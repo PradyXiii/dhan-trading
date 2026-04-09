@@ -173,38 +173,45 @@ def _get(row, col, default=float("nan")):
 
 
 def score_row(row):
-    """Score all available indicators. Returns (total_score, {indicator: score})."""
-    s = {}
+    """
+    Score indicators. Returns (total_score, {indicator: score}).
 
-    # ── Core 8 ────────────────────────────────────────────────────────────────
-    s["s_ema20"]    = 1  if row["bn_close"] > row["ema20"] else -1
-    s["s_rsi14"]    = (1  if row["rsi14"]     > 55   else
-                      (-1 if row["rsi14"]     < 45   else 0))
-    s["s_trend5"]   = (1  if row["trend5"]    > 1.0  else
-                      (-1 if row["trend5"]    < -1.0 else 0))
-    s["s_vix"]      = (1  if row["vix_dir"]   < 0    else
-                      (-1 if row["vix_dir"]   > 0    else 0))
-    s["s_sp500"]    = 1  if row["sp500_chg"]  > 0    else -1
-    s["s_nikkei"]   = 1  if row["nikkei_chg"] > 0    else -1
-    s["s_spf_gap"]  = (1  if row["spf_gap"]   > 0.2  else
-                      (-1 if row["spf_gap"]   < -0.2 else 0))
-    s["s_bn_nf_div"]= (1  if row["bn_nf_div"] > 0.5  else
-                      (-1 if row["bn_nf_div"] < -0.5 else 0))
+    ACTIVE (4 India-specific technical indicators — Round 3 optimisation):
+      EMA20, 5-day trend, VIX direction, BN-NF divergence
+      Attribution analysis (Run 8) showed these 4 alone generate ₹1.50Cr
+      vs ₹1.00Cr for all 10 combined. Macro signals (US, Nikkei, futures,
+      BN gap) and RSI/HV20 added noise; removing them raised WR to 54.6%.
 
-    # ── Round 1: HV20 + BN gap ────────────────────────────────────────────────
-    s["s_hv20"]    = (1  if row["hv20"]   < 12.0 else
-                     (-1 if row["hv20"]   > 20.0 else 0))
-    s["s_bn_gap"]  = (1  if row["bn_gap"] > 0.3  else
-                     (-1 if row["bn_gap"] < -0.3  else 0))
+    INACTIVE (kept in dict for CSV audit trail, not added to total):
+      RSI14, S&P500, Nikkei, S&P Futures gap, HV20, BN overnight gap
+    """
+    active = {}
 
-    # ── Round 2 indicators REMOVED — backtesting confirmed they add noise ─────
-    # All 5 dropped win rate from 50.7% → 47.3-47.7% and P&L from ₹6.35L → <₹2L
-    #   PCR/OI/MaxPain : weekly convergence signals, not intraday-relevant
-    #   FII F&O        : lagged + hedged, noisy day-to-day
-    #   IV Rank        : redundant with HV20 (same vol info, double-counted)
-    # Raw data files retained in data/ for possible future research use.
+    # ── ACTIVE: 4 India-specific technical signals ────────────────────────────
+    active["s_ema20"]     = 1  if row["bn_close"] > row["ema20"] else -1
+    active["s_trend5"]    = (1  if row["trend5"]    > 1.0  else
+                            (-1 if row["trend5"]    < -1.0 else 0))
+    active["s_vix"]       = (1  if row["vix_dir"]   < 0    else
+                            (-1 if row["vix_dir"]   > 0    else 0))
+    active["s_bn_nf_div"] = (1  if row["bn_nf_div"] > 0.5  else
+                            (-1 if row["bn_nf_div"] < -0.5 else 0))
 
-    return sum(s.values()), s
+    total = sum(active.values())
+
+    # ── INACTIVE: computed for CSV audit trail only (not scored) ─────────────
+    inactive = {}
+    inactive["s_rsi14"]   = (1  if row["rsi14"]     > 55   else
+                            (-1 if row["rsi14"]     < 45   else 0))
+    inactive["s_sp500"]   = 1  if row["sp500_chg"]  > 0    else -1
+    inactive["s_nikkei"]  = 1  if row["nikkei_chg"] > 0    else -1
+    inactive["s_spf_gap"] = (1  if row["spf_gap"]   > 0.2  else
+                            (-1 if row["spf_gap"]   < -0.2 else 0))
+    inactive["s_hv20"]    = (1  if row["hv20"]   < 12.0 else
+                            (-1 if row["hv20"]   > 20.0 else 0))
+    inactive["s_bn_gap"]  = (1  if row["bn_gap"] > 0.3  else
+                            (-1 if row["bn_gap"] < -0.3  else 0))
+
+    return total, {**active, **inactive}
 
 
 def generate_signals(df):
@@ -273,9 +280,9 @@ def main():
     print(f"  Merged dataset : {len(df)} trading days  "
           f"({df['date'].min().date()} to {df['date'].max().date()})")
 
-    # 10 active indicators: 8 core + HV20 + BN overnight gap
-    # Round 2 indicators (PCR, OI, MaxPain, FII, IVRank) removed — added noise
-    print(f"  Active indicators: 10/10  (8 core + HV20 + BN overnight gap)")
+    # 4 active indicators: EMA20, 5-day trend, VIX direction, BN-NF divergence
+    # Macro signals (SP500, Nikkei, SPF gap, BN gap) and RSI14/HV20 inactive — attribution showed drag
+    print(f"  Active indicators: 4/10  (EMA20, 5-day trend, VIX, BN-NF divergence)")
 
     event_count = sum(1 for d in pd.date_range(df["date"].min(),
                                                df["date"].max(), freq="B")

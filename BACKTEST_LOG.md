@@ -86,23 +86,25 @@ One-time patch for existing CSVs: `python3 data_fetcher.py --fix-dates`
 
 ## Signal Engine Logic
 
-### 10 Active Indicators
+### 4 Active Indicators (as of Run 8)
 
 Each indicator scores +1 (bullish), -1 (bearish), or 0 (neutral).
-Total score range: -10 to +10.
+Active score range: -4 to +4.
 
-| # | Indicator | Bullish (+1) | Bearish (-1) | Neutral (0) |
-|---|---|---|---|---|
-| 1 | EMA20 | BN close > EMA20 | BN close < EMA20 | — |
-| 2 | RSI14 | RSI > 55 | RSI < 45 | 45–55 |
-| 3 | 5-day trend | BN change > +1% | BN change < -1% | within ±1% |
-| 4 | VIX direction | VIX falling | VIX rising | unchanged |
-| 5 | S&P500 change | prev-day S&P > 0% | prev-day S&P < 0% | — |
-| 6 | Nikkei change | prev-day Nikkei > 0% | prev-day Nikkei < 0% | — |
-| 7 | S&P futures gap | gap > +0.2% | gap < -0.2% | within ±0.2% |
-| 8 | BN-NF divergence | BN outperforms NF >+0.5% | BN underperforms >-0.5% | within ±0.5% |
-| 9 | HV20 (historical vol) | HV < 12% (calm) | HV > 20% (chaotic) | 12–20% |
-| 10 | BN overnight gap | gap > +0.3% | gap < -0.3% | within ±0.3% |
+| # | Indicator | Bullish (+1) | Bearish (-1) | Neutral (0) | Status |
+|---|---|---|---|---|---|
+| 1 | EMA20 | BN close > EMA20 | BN close < EMA20 | — | **ACTIVE** |
+| 2 | 5-day trend | BN change > +1% | BN change < -1% | within ±1% | **ACTIVE** |
+| 3 | VIX direction | VIX falling | VIX rising | unchanged | **ACTIVE** |
+| 4 | BN-NF divergence | BN outperforms NF >+0.5% | BN underperforms >-0.5% | within ±0.5% | **ACTIVE** |
+| 5 | RSI14 | RSI > 55 | RSI < 45 | 45–55 | inactive (audit trail only) |
+| 6 | S&P500 change | prev-day S&P > 0% | prev-day S&P < 0% | — | inactive (audit trail only) |
+| 7 | Nikkei change | prev-day Nikkei > 0% | prev-day Nikkei < 0% | — | inactive (audit trail only) |
+| 8 | S&P futures gap | gap > +0.2% | gap < -0.2% | within ±0.2% | inactive (audit trail only) |
+| 9 | HV20 (historical vol) | HV < 12% (calm) | HV > 20% (chaotic) | 12–20% | inactive (audit trail only) |
+| 10 | BN overnight gap | gap > +0.3% | gap < -0.3% | within ±0.3% | inactive (audit trail only) |
+
+Inactive indicators are still computed and written to signals.csv (for audit/research) but do not contribute to the score used for trade decisions.
 
 ### Signal Decision
 - Score ≥ +THRESHOLD → **BUY CALL**
@@ -110,10 +112,10 @@ Total score range: -10 to +10.
 - Otherwise → **NO TRADE**
 - Event days (RBI MPC + Budget) → **forced NO TRADE** regardless of score
 
-### Indicators Tested and Removed (Round 2)
-PCR, OI direction, Max Pain, FII F&O, IV Rank — all 5 degraded performance.
-Root cause: wrong time horizon for intraday trading, redundancy with HV20.
-Raw data files retained in `data/` for possible future research.
+### Indicators Tested and Deactivated
+**Round 2 (PCR, OI, MaxPain, FII F&O, IV Rank):** all 5 degraded performance; wrong time horizon and redundant with HV20. Raw data retained in `data/` for research.
+
+**Run 8 attribution study:** Macro signals (S&P500, Nikkei, S&P futures, BN overnight gap) identified as negative drag via indicator_attribution.py. RSI14 and HV20 marginally positive but below noise threshold. Deactivated 6 indicators, kept 4 India-specific technical signals.
 
 ---
 
@@ -199,7 +201,38 @@ All 5 Round 2 indicators (PCR, OI, MaxPain, FII F&O, IV Rank) degraded performan
 Win rate dropped from 50.7% → 47.3-47.7%, P&L from ₹6.35L → <₹2L.
 Reverted to 10 indicators. Event filter (RBI MPC + Budget) kept.
 
-### Run 7 — Timezone fix + all 5 days (CURRENT BEST) ✅
+### Run 8 — Indicator attribution + 4-indicator optimisation (CURRENT BEST) ✅
+
+**Methodology:** `indicator_attribution.py` tested each of 10 indicators individually and in combinations. Found that macro signals (S&P500, Nikkei, S&P futures gap, BN overnight gap) are net negative drag — they add noise that overrides genuine India-specific signals.
+
+**Attribution results (threshold ±1, all 5 days, indicator_attribution.py):**
+
+| Config | Trades | WR | Net P&L |
+|---|---|---|---|
+| All 10 combined (baseline) | ~990 | 50.5% | ₹1.00Cr |
+| No macro (5 India-only) | ~895 | 51.8% | ₹1.30Cr |
+| Top 2: trend5 + BN-NF div | 585 | 55.6% | ₹1.65Cr |
+| **Top 4: +EMA20 +VIX** | **756** | **54.6%** | **₹1.50Cr** |
+| Top 5: +RSI14 (no macro) | 834 | 53.3% | ₹1.40Cr |
+
+**Decision:** "Top 4" selected over "Top 2" because:
+- 756 trades (vs 585) = more statistical confidence, less overfitting risk
+- ₹1.50Cr vs ₹1.65Cr — only 10% difference in P&L
+- MaxDD -25.4% vs estimated -28% for Top 2 (fewer trades = deeper drawdowns)
+- +50% improvement over 10-indicator baseline
+
+**Changes to signal_engine.py:**
+- `score_row()` now uses only 4 active indicators: s_ema20, s_trend5, s_vix, s_bn_nf_div
+- 6 inactive indicators still computed and written to signals.csv for audit trail
+- Score range now -4 to +4 (threshold ±1 still applies = trade on any net directional signal)
+
+**Additional studies completed this session:**
+- **Straddle vs Directional Long** (`strangle_backtest.py`): Directional ₹98.7L vs Straddle -₹5.4L LOSS. BN avg daily range (~586 pts) is below straddle breakeven for Mon/Tue/Thu/Fri. Directional long wins decisively.
+- **Entry timing** (`timing_backtest.py`): 9:15 vs 9:30 AM difference = ₹248/trade noise. Keep 9:15 AM.
+- **Slippage sensitivity**: Survives 1% slippage (₹81L vs ₹98.7L). Realistic ATM spread 0.5-1.5%.
+- **Signal source analysis**: GIFT Nifty ≈ BN overnight gap (same construct). US close / Nikkei are negative drag. India-only signals dominate the edge.
+
+### Run 7 — Timezone fix + all 5 days ✅
 
 **Critical fix discovered:** Dhan API timestamps at midnight IST were parsed as UTC,
 shifting all dates 1 day earlier. What we thought was "Tuesday" data was actually Wednesday
@@ -293,4 +326,4 @@ These are hard NONE overrides — score is irrelevant on these days.
 - **Dhan token expires:** ~24 hours — regenerate at dhan.co → API settings
 
 ---
-*Last updated: Apr 2026 — Run 7 (corrected timezone, all 5 days, ₹98.5L net P&L)*
+*Last updated: Apr 2026 — Run 8 (4-indicator attribution optimisation, ₹1.50Cr net P&L)*
