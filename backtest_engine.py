@@ -325,7 +325,7 @@ def print_summary(trade_df, monthly, threshold=None):
     # Per-day breakdown
     if "weekday" in active.columns:
         print(f"  PER-DAY BREAKDOWN")
-        day_order = ["Monday", "Tuesday", "Thursday", "Friday"]
+        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
         for day in day_order:
             d = active[active["weekday"] == day]
             if len(d) == 0:
