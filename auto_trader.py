@@ -153,10 +153,19 @@ def get_capital() -> float:
                             headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             d   = resp.json()
+            if DRY_RUN:
+                notify.send(f"🔍 Fund limit raw: {str(d)[:400]}", silent=True)
             bal = (d.get("availabelBalance") or
                    d.get("availableBalance") or
                    d.get("net") or 0)
-            return float(bal)
+            bal = float(bal)
+            if bal <= 0 and DRY_RUN:
+                notify.send(
+                    "ℹ️ DRY RUN: Fund API returned ₹0 (no F&O margin, or account not funded). "
+                    "Using ₹1,00,000 for simulation."
+                )
+                return 100_000.0
+            return bal
     except Exception:
         pass
     die("Could not fetch available capital from Dhan fund limit API.")
@@ -358,22 +367,24 @@ def main():
         notify.send("⏸ No signal available for today. No trade.")
         return
 
-    weekday = sig["weekday"]
-    signal  = sig["signal"]
-    score   = int(sig["score"])
+    weekday  = sig["weekday"]        # signal source's weekday (may be yesterday)
+    signal   = sig["signal"]
+    score    = int(sig["score"])
     sig_date = sig["date"]
+    today_weekday = date.today().strftime("%A")   # actual trading day
 
     if signal not in ("CALL", "PUT"):
         reason = "event day (RBI/Budget)" if sig.get("event_day") else f"score = {score:+d}"
         notify.send(
-            f"⏸ <b>NO TRADE</b> today  ({weekday}, {sig_date})\n"
+            f"⏸ <b>NO TRADE</b> today  ({today_weekday}, {date.today()})\n"
             f"Reason: {reason}"
         )
         return
 
     opt_type = "CE" if signal == "CALL" else "PE"
+    sig_label = (f" [signal from {sig_date}]" if str(sig_date)[:10] != str(date.today()) else "")
     notify.send(
-        f"📊 Signal: <b>{signal}</b>  ({weekday})\n"
+        f"📊 Signal: <b>{signal}</b>  ({today_weekday}{sig_label})\n"
         f"Score: {score:+d}  |  Action: BUY BankNifty ATM {opt_type}"
     )
 
@@ -388,14 +399,33 @@ def main():
     security_id, atm_strike, spot = get_atm_security_id(signal, expiry)
 
     if not security_id:
-        die(
-            f"Could not find security_id for BANKNIFTY {expiry} {atm_strike} {opt_type}.\n"
-            f"Option chain API may be down. Check manually on Dhan app."
-        )
+        if DRY_RUN:
+            # Option chain only works during market hours — use last BN close as spot fallback
+            try:
+                bn_df  = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+                spot   = float(bn_df.iloc[-1]["close"])
+                atm_strike = round(spot / 100) * 100
+                security_id = "DRY_RUN_PLACEHOLDER"
+                notify.send(
+                    f"ℹ️ DRY RUN: Option chain unavailable outside market hours.\n"
+                    f"Using last BN close ₹{spot:,.0f} as spot (ATM strike: {int(atm_strike)})."
+                )
+            except Exception as e:
+                die(
+                    f"Could not find security_id for BANKNIFTY {expiry} {atm_strike} {opt_type}.\n"
+                    f"Option chain API may be down. Check manually on Dhan app."
+                )
+        else:
+            die(
+                f"Could not find security_id for BANKNIFTY {expiry} {atm_strike} {opt_type}.\n"
+                f"Option chain API may be down. Check manually on Dhan app."
+            )
 
-    # 6. Sizing
-    dte     = DAY_DTE.get(weekday, 1)
-    rr      = DAY_RR.get(weekday, 1.4)
+    # 6. Sizing — always use TODAY's weekday for DTE/RR, not the signal date's weekday.
+    # (When using fallback signal from yesterday, weekday field = yesterday's day.)
+    today_weekday = date.today().strftime("%A")
+    dte     = DAY_DTE.get(today_weekday, 1)
+    rr      = DAY_RR.get(today_weekday, 1.4)
     premium = spot * PREMIUM_K * sqrt(dte)
 
     max_loss_1lot = LOT_SIZE * premium * SL_PCT
