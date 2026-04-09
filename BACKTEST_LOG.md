@@ -156,10 +156,18 @@ Based on Dhan's pricing + NSE statutory charges:
 - **Decision:** Win rate held. Threshold ±3 adopted as default. Testing ±2 next.
 
 ### Run 3 — Threshold ±2 (8 signals, with Dhan costs)
-*(pending)*
+- Trades: 153 | Trade rate: 68.0% ✅
+- Wins: 82 | Losses: 68 | Partials: 3 | Win rate: 54.7% ✅
+- Gross P&L: ₹10,55,671 | Charges: ₹39,318 | Net P&L: ₹10,16,353
+- Ending capital: ~₹15,46,353 | Max drawdown: -28.8%
+- **Decision:** Best threshold — highest trade rate AND highest win rate. ±2 adopted.
 
 ### Run 4 — Threshold ±3 (8 signals, with Dhan costs)
-*(pending)*
+- Trades: 118 | Trade rate: 52.4%
+- Wins: 60 | Losses: 55 | Win rate: 52.2%
+- Gross P&L: ₹4,42,391 | Charges: ₹39,318 | Net P&L: ₹4,03,073
+- Ending capital: ~₹9,33,073 | Max drawdown: -24.8%
+- **Decision:** Lower P&L and lower win rate than ±2. Not preferred.
 
 ---
 
@@ -168,7 +176,7 @@ Based on Dhan's pricing + NSE statutory charges:
 | Decision | Reason |
 |---|---|
 | Trade only Tue/Fri | Weekly options strategy requires specific entry days |
-| Threshold ±3 > ±4 | Win rate held at 52% while trade rate jumped from 38% to 52% |
+| Threshold ±2 > ±3 > ±4 | At ±2: 68% trade rate, 54.7% win rate, ₹10.16L net P&L. Best on all metrics. |
 | No carryforward | Avoid theta decay overnight; user preference |
 | Delta ≈ 0.5 for exits | ATM option approximation — no live options data available |
 | Dhan API for BN/NF data | Most accurate Indian index data available |
@@ -188,10 +196,12 @@ Based on Dhan's pricing + NSE statutory charges:
 
 ## Planned Improvements (Round 1)
 
-- [ ] PCR (Put-Call Ratio) — NSE historical data
-- [ ] FII/DII net buy-sell data — NSE daily reports
-- [ ] GIFT Nifty / SGX pre-market gap signal
-- [ ] BankNifty 20-day historical volatility signal
+- [ ] PCR (Put-Call Ratio) — NSE historical data  
+- [ ] FII/DII net buy-sell data — NSE daily reports  
+- [ ] GIFT Nifty / SGX pre-market gap signal  
+- [ ] BankNifty 20-day historical volatility signal  
+
+**Status: In progress** — Adding these as 4 new indicators to signal_engine.py to bring total from 8 → 12 signals (score range -12 to +12)
 
 ## Planned Improvements (Round 2)
 
