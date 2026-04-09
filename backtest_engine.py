@@ -9,11 +9,28 @@ SL_PCT           = 0.30     # stop-loss = 30% of premium
 STARTING_CAPITAL = 30_000
 MONTHLY_TOPUP    = 10_000
 
-# ATM premium as % of spot (approximation: no live options data)
-PREMIUM_FACTOR = {"Tuesday": 0.004, "Friday": 0.009}
+# ATM premium as % of spot using sqrt(DTE) scaling.
+# Calibrated from: Tuesday (1 DTE) = 0.4%, Friday (5 DTE) = 0.9%
+# Formula: premium = spot × PREMIUM_K × sqrt(DTE)
+# Verification: 0.004 × √1 = 0.4% ✓   0.004 × √5 = 0.894% ≈ 0.9% ✓
+PREMIUM_K = 0.004
 
-# Reward-to-risk ratios
-RR = {"Tuesday": 1.4, "Friday": 2.0}
+# Days to expiry per weekday (BankNifty expires Wednesday)
+# Wednesday excluded — trading 0 DTE on expiry day is a different risk profile
+DAY_DTE = {
+    "Monday":   2,   # Mon → Wed = 2 days
+    "Tuesday":  1,   # Tue → Wed = 1 day
+    "Thursday": 6,   # Thu → next Wed = 6 days
+    "Friday":   5,   # Fri → next Wed = 5 days
+}
+
+# Reward-to-risk ratios per day (higher DTE = richer premium = can target bigger)
+DAY_RR = {
+    "Monday":   1.6,
+    "Tuesday":  1.4,
+    "Thursday": 2.0,
+    "Friday":   2.0,
+}
 
 # ── Dhan brokerage + statutory charges (per round-trip trade) ─────────────────
 # Source: dhan.co/pricing + NSE circulars (as of 2024-25)
@@ -99,9 +116,9 @@ def simulate_trade(row, bn_ohlcv, capital):
     bn_low   = bar["low"]
     bn_close = bar["close"]
 
-    pf      = PREMIUM_FACTOR[weekday]
-    rr      = RR[weekday]
-    premium = bn_open * pf
+    dte     = DAY_DTE.get(weekday, 1)
+    rr      = DAY_RR.get(weekday, 1.4)
+    premium = bn_open * PREMIUM_K * (dte ** 0.5)
 
     # ── Lot sizing ────────────────────────────────────────────────────────────
     max_loss_1lot = LOT_SIZE * premium * SL_PCT
@@ -289,7 +306,7 @@ def print_summary(trade_df, monthly, threshold=None):
     print(f"  {'Avg cost/trade':<20}: ₹{total_charges/total:>8,.2f}")
     print(f"{'─'*60}")
     total_signals = total + skipped + event_skipped
-    print(f"  Tue/Fri days total  : {total_signals}")
+    print(f"  Trading days total  : {total_signals}  (Mon/Tue/Thu/Fri)")
     print(f"  Trades taken        : {total}  ({total/total_signals*100:.1f}%)")
     print(f"  Skipped (low cap)   : {skipped}")
     if event_skipped:
@@ -300,6 +317,21 @@ def print_summary(trade_df, monthly, threshold=None):
     print(f"  Partial exits       : {partial}  ({partial/total*100:.1f}%)")
     wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
     print(f"  Win rate (W vs L)   : {wr:.1f}%")
+    print(f"{'─'*60}")
+    # Per-day breakdown
+    if "weekday" in active.columns:
+        print(f"  PER-DAY BREAKDOWN")
+        day_order = ["Monday", "Tuesday", "Thursday", "Friday"]
+        for day in day_order:
+            d = active[active["weekday"] == day]
+            if len(d) == 0:
+                continue
+            dw = (d["result"] == "WIN").sum()
+            dl = (d["result"] == "LOSS").sum()
+            dwr = dw / (dw + dl) * 100 if (dw + dl) > 0 else 0
+            dte = DAY_DTE.get(day, 1)
+            print(f"  {day:<10}: {len(d):>3} trades | WR {dwr:.0f}%"
+                  f" | Net ₹{d['pnl'].sum():>9,.0f} | DTE={dte}")
     print(f"{'─'*60}")
     print(f"  Best trade          : ₹{active['pnl'].max():>10,.2f}")
     print(f"  Worst trade         : ₹{active['pnl'].min():>10,.2f}")

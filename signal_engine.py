@@ -167,8 +167,12 @@ def score_row(row):
 
 
 def generate_signals(df):
-    """Filter to Tuesdays and Fridays, score, apply event filter, return DataFrame."""
-    trade_days = df[df["date"].dt.weekday.isin([1, 4])].copy()
+    """
+    Filter to Mon/Tue/Thu/Fri, score, apply event filter, return DataFrame.
+    Wednesday (expiry day) is excluded — 0 DTE gamma risk is a different strategy.
+    """
+    # 0=Mon, 1=Tue, 3=Thu, 4=Fri — skip 2=Wed (BankNifty expiry day)
+    trade_days = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy()
     trade_days["weekday"] = trade_days["date"].dt.day_name()
 
     rows = []
@@ -255,11 +259,19 @@ def main():
     event_days = signals["event_day"].sum() if "event_day" in signals else 0
 
     print(f"\n{'='*52}")
-    print(f"  Trade days scanned : {total}")
+    print(f"  Trade days scanned : {total}  (Mon/Tue/Thu/Fri, skip Wed expiry)")
     print(f"  CALL signals       : {calls}  ({calls/total*100:.1f}%)")
     print(f"  PUT  signals       : {puts}   ({puts/total*100:.1f}%)")
     print(f"  NO TRADE (score)   : {nones - event_days}  ({(nones-event_days)/total*100:.1f}%)")
     print(f"  NO TRADE (event)   : {event_days}  ({event_days/total*100:.1f}%)")
+    print(f"{'─'*52}")
+    for day in ["Monday", "Tuesday", "Thursday", "Friday"]:
+        d = signals[signals["weekday"] == day]
+        if len(d):
+            dc = (d["signal"] == "CALL").sum()
+            dp = (d["signal"] == "PUT").sum()
+            print(f"  {day:<10}: {len(d):>3} days | "
+                  f"CALL {dc} | PUT {dp} | NONE {len(d)-dc-dp}")
     print(f"{'='*52}")
     print(f"\nSaved → {DATA_DIR}/signals.csv")
 
