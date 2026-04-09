@@ -50,8 +50,15 @@ python3 signal_engine.py 4      # test with threshold ±4
 
 **Step 6 — Run backtest:**
 ```bash
-python3 backtest_engine.py
+python3 backtest_engine.py                # uses whatever signals.csv is active
 ```
+
+**Step 6b — Run all thresholds at once (comparison mode):**
+```bash
+python3 backtest_engine.py --compare      # runs ±1 through ±4 and prints comparison table
+```
+
+This is the fastest way to evaluate thresholds — runs everything in one shot, prints side-by-side table with costs, win rate, net P&L for each threshold.
 
 ---
 
@@ -164,7 +171,7 @@ Based on Dhan's pricing + NSE statutory charges:
 - Wins: 82 | Losses: 68 | Partials: 3 | Win rate: 54.7% ✅
 - Gross P&L: ₹10,55,671 | Charges: ₹39,318 | Net P&L: ₹10,16,353
 - Ending capital: ~₹15,46,353 | Max drawdown: -28.8%
-- **Decision:** Best threshold — highest trade rate AND highest win rate. ±2 adopted.
+- **Decision:** Best threshold so far. Pending ±1 test.
 
 ### Run 4 — Threshold ±3 (8 signals, with Dhan costs)
 - Trades: 118 | Trade rate: 52.4%
@@ -172,6 +179,13 @@ Based on Dhan's pricing + NSE statutory charges:
 - Gross P&L: ₹4,42,391 | Charges: ₹39,318 | Net P&L: ₹4,03,073
 - Ending capital: ~₹9,33,073 | Max drawdown: -24.8%
 - **Decision:** Lower P&L and lower win rate than ±2. Not preferred.
+
+### Run 5 — Threshold ±1 vs ±2 vs ±3 vs ±4 (10 signals, with Dhan costs)
+*(pending — run `python3 backtest_engine.py --compare` on GCP VM after Round 1 signal additions)*
+
+**Why ±1 matters:** With 10 integer-scored indicators, threshold ±1 is the minimum possible
+directional edge — any Tue/Fri where even 1 more indicator is bullish/bearish gets a trade.
+Score=0 (perfect tie across all 10 indicators) still gets no trade — no edge to exploit.
 
 ---
 

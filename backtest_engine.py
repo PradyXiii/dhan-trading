@@ -26,19 +26,33 @@ RR = {"Tuesday": 1.4, "Friday": 2.0}
 #   Stamp duty     : 0.003% on buy-side premium
 #   SEBI turnover  : 0.0001% on total turnover (both sides) — negligible
 
-def calculate_charges(premium, lots):
-    """Return total round-trip transaction cost for one trade."""
+def calculate_charges(premium, lots, breakdown=False):
+    """
+    Return total round-trip transaction cost for one trade.
+    If breakdown=True, returns (total, dict_of_components).
+    """
     pv = lots * LOT_SIZE * premium          # total premium value
 
-    brokerage       = 40.0                  # ₹20 × 2 orders
-    stt             = 0.000625 * pv         # 0.0625% on sell side
-    exchange        = 0.00053  * pv * 2    # 0.053% per side
-    clearing        = 0.000005 * pv * 2    # 0.0005% per side
-    gst             = 0.18 * (brokerage + exchange + clearing)
-    stamp_duty      = 0.00003  * pv        # 0.003% on buy side
-    sebi            = 0.000001 * pv * 2    # negligible
+    brokerage  = 40.0                       # ₹20 × 2 orders
+    stt        = 0.000625 * pv              # 0.0625% on sell side
+    exchange   = 0.00053  * pv * 2         # 0.053% per side
+    clearing   = 0.000005 * pv * 2         # 0.0005% per side
+    gst        = 0.18 * (brokerage + exchange + clearing)
+    stamp_duty = 0.00003  * pv             # 0.003% on buy side
+    sebi       = 0.000001 * pv * 2         # negligible
 
     total = brokerage + stt + exchange + clearing + gst + stamp_duty + sebi
+
+    if breakdown:
+        return round(total, 2), {
+            "c_brokerage":  round(brokerage,  2),
+            "c_stt":        round(stt,         2),
+            "c_exchange":   round(exchange,    2),
+            "c_clearing":   round(clearing,    2),
+            "c_gst":        round(gst,         2),
+            "c_stamp_duty": round(stamp_duty,  2),
+            "c_sebi":       round(sebi,        2),
+        }
     return round(total, 2)
 
 
@@ -46,6 +60,8 @@ def calculate_charges(premium, lots):
 
 def load_signals():
     df = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+    if "threshold" in df.columns:
+        df = df.drop(columns=["threshold"])
     return df[df["signal"].isin(["CALL", "PUT"])].reset_index(drop=True)
 
 
@@ -59,16 +75,20 @@ def load_bn_ohlcv():
 def simulate_trade(row, bn_ohlcv, capital):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
-    Returns (pnl, result, lots, premium).
+    Returns (pnl, result, lots, premium, charges_total, charges_breakdown).
     """
     date    = row["date"]
     weekday = row["weekday"]
     signal  = row["signal"]
 
-    if date not in bn_ohlcv.index:
-        return 0.0, "SKIPPED", 0, 0.0
+    zero_breakdown = {k: 0.0 for k in
+                      ["c_brokerage","c_stt","c_exchange","c_clearing",
+                       "c_gst","c_stamp_duty","c_sebi"]}
 
-    bar     = bn_ohlcv.loc[date]
+    if date not in bn_ohlcv.index:
+        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_breakdown
+
+    bar      = bn_ohlcv.loc[date]
     bn_open  = bar["open"]
     bn_high  = bar["high"]
     bn_low   = bar["low"]
@@ -81,7 +101,7 @@ def simulate_trade(row, bn_ohlcv, capital):
     # ── Lot sizing ────────────────────────────────────────────────────────────
     max_loss_1lot = LOT_SIZE * premium * SL_PCT
     if max_loss_1lot > capital * 0.15:          # even 1 lot is too expensive
-        return 0.0, "SKIPPED_LOW_CAPITAL", 0, premium
+        return 0.0, "SKIPPED_LOW_CAPITAL", 0, premium, 0.0, zero_breakdown
 
     lots = max(1, int((capital * RISK_PCT) / max_loss_1lot))
 
@@ -104,8 +124,8 @@ def simulate_trade(row, bn_ohlcv, capital):
             result = "LOSS"
         else:                                    # neither hit — exit at close
             gross = (bn_close - bn_open) * 0.5 * lots * LOT_SIZE
-            charges = calculate_charges(premium, lots)
-            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2)
+            charges, bd = calculate_charges(premium, lots, breakdown=True)
+            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
 
     else:  # PUT
         sl_level = bn_open + sl_pts
@@ -121,16 +141,16 @@ def simulate_trade(row, bn_ohlcv, capital):
             result = "LOSS"
         else:
             gross = (bn_open - bn_close) * 0.5 * lots * LOT_SIZE
-            charges = calculate_charges(premium, lots)
-            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2)
+            charges, bd = calculate_charges(premium, lots, breakdown=True)
+            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
 
-    charges = calculate_charges(premium, lots)
+    charges, bd = calculate_charges(premium, lots, breakdown=True)
     if result == "WIN":
         pnl =  lots * LOT_SIZE * premium * rr  * SL_PCT - charges
     else:
         pnl = -lots * LOT_SIZE * premium * SL_PCT - charges
 
-    return round(pnl, 2), result, lots, round(premium, 2)
+    return round(pnl, 2), result, lots, round(premium, 2), charges, bd
 
 
 # ── Backtest loop ─────────────────────────────────────────────────────────────
@@ -155,8 +175,7 @@ def run_backtest():
             current_month = month_key
 
         capital_before = capital
-        pnl, result, lots, premium = simulate_trade(row, bn_ohlcv, capital)
-        charges = calculate_charges(premium, lots) if lots > 0 else 0
+        pnl, result, lots, premium, charges, charges_bd = simulate_trade(row, bn_ohlcv, capital)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -172,6 +191,7 @@ def run_backtest():
             "lots":           lots,
             "risk_amt":       round(lots * LOT_SIZE * premium * SL_PCT, 2),
             "charges":        charges,
+            **charges_bd,
             "result":         result,
             "pnl":            pnl,
             "capital_before": round(capital_before, 2),
@@ -198,7 +218,7 @@ def run_backtest():
 
 # ── Summary printer ───────────────────────────────────────────────────────────
 
-def print_summary(trade_df, monthly):
+def print_summary(trade_df, monthly, threshold=None):
     active  = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL"])]
     wins    = (active["result"] == "WIN").sum()
     losses  = (active["result"] == "LOSS").sum()
@@ -221,35 +241,55 @@ def print_summary(trade_df, monthly):
     drawdown    = (cap_series - rolling_max) / rolling_max * 100
     max_dd      = drawdown.min()
 
-    print(f"\n{'='*56}")
-    print(f"   BANKNIFTY OPTIONS BACKTEST — Sep 2021 to Apr 2026")
-    print(f"{'='*56}")
+    # ── Cost breakdown components ─────────────────────────────────────────────
+    cost_cols = ["c_brokerage", "c_stt", "c_exchange", "c_clearing",
+                 "c_gst", "c_stamp_duty", "c_sebi"]
+    costs = {c: trade_df[c].sum() if c in trade_df.columns else 0.0 for c in cost_cols}
+
+    thr_label = f"±{threshold}" if threshold is not None else "±?"
+
+    print(f"\n{'='*60}")
+    print(f"   BANKNIFTY OPTIONS BACKTEST — Sep 2021 to Apr 2026"
+          f"  [threshold {thr_label}]")
+    print(f"{'='*60}")
     print(f"  Starting capital    : ₹{start_cap:>10,.0f}")
     print(f"  Monthly top-ups     : ₹10,000 × {topups} months = ₹{topups*10000:,.0f}")
     print(f"  Total injected      : ₹{start_cap + topups*10000:>10,.0f}")
     print(f"  Ending capital      : ₹{end_cap:>10,.2f}")
-    print(f"{'─'*56}")
+    print(f"{'─'*60}")
     print(f"  Gross trading P&L   : ₹{gross_pnl:>10,.2f}")
-    print(f"  Total charges paid  : ₹{total_charges:>10,.2f}  ← brokerage+STT+GST etc.")
     print(f"  Net trading P&L     : ₹{total_pnl:>10,.2f}  ← after all costs")
     verdict = "PROFITABLE ✓" if total_pnl > 0 else "NOT PROFITABLE ✗"
     print(f"  Verdict             : {verdict}")
-    print(f"{'─'*56}")
+    print(f"{'─'*60}")
+    print(f"  TRANSACTION COSTS BREAKDOWN  ({total} trades)")
+    print(f"  {'Brokerage':<20}: ₹{costs['c_brokerage']:>8,.2f}  (₹40 flat × {total} trades)")
+    print(f"  {'STT':<20}: ₹{costs['c_stt']:>8,.2f}  (0.0625% of sell premium)")
+    print(f"  {'NSE exchange':<20}: ₹{costs['c_exchange']:>8,.2f}  (0.053% × both sides)")
+    print(f"  {'NSCCL clearing':<20}: ₹{costs['c_clearing']:>8,.2f}  (0.0005% × both sides)")
+    print(f"  {'GST (18%)':<20}: ₹{costs['c_gst']:>8,.2f}  (on brokerage+exchange)")
+    print(f"  {'Stamp duty':<20}: ₹{costs['c_stamp_duty']:>8,.2f}  (0.003% on buy side)")
+    print(f"  {'SEBI turnover':<20}: ₹{costs['c_sebi']:>8,.2f}  (0.0001% on turnover)")
+    print(f"  {'─'*42}")
+    charges_pct = (total_charges / gross_pnl * 100) if gross_pnl != 0 else 0
+    print(f"  {'TOTAL CHARGES':<20}: ₹{total_charges:>8,.2f}  ({charges_pct:.1f}% of gross P&L)")
+    print(f"  {'Avg cost/trade':<20}: ₹{total_charges/total:>8,.2f}")
+    print(f"{'─'*60}")
     print(f"  Signals generated   : {total + skipped}")
-    print(f"  Trades taken        : {total}")
+    print(f"  Trades taken        : {total}  (trade rate: {total/(total+skipped)*100:.1f}%)")
     print(f"  Skipped (low cap)   : {skipped}")
-    print(f"{'─'*56}")
+    print(f"{'─'*60}")
     print(f"  Wins                : {wins}  ({wins/total*100:.1f}%)")
     print(f"  Losses              : {losses}  ({losses/total*100:.1f}%)")
     print(f"  Partial exits       : {partial}  ({partial/total*100:.1f}%)")
     wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
     print(f"  Win rate (W vs L)   : {wr:.1f}%")
-    print(f"{'─'*56}")
+    print(f"{'─'*60}")
     print(f"  Best trade          : ₹{active['pnl'].max():>10,.2f}")
     print(f"  Worst trade         : ₹{active['pnl'].min():>10,.2f}")
     print(f"  Avg trade P&L       : ₹{active['pnl'].mean():>10,.2f}")
     print(f"  Max drawdown        : {max_dd:.1f}%")
-    print(f"{'='*56}")
+    print(f"{'='*60}")
 
     print(f"\nMonthly breakdown (first 8 months):")
     cols = ["month", "trades", "wins", "losses", "monthly_pnl", "end_capital"]
@@ -258,14 +298,96 @@ def print_summary(trade_df, monthly):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def run_comparison():
+    """
+    Run backtest for all thresholds (1, 2, 3, 4) side-by-side using
+    whatever signals.csv is present, but re-generates signals for each threshold.
+    Prints a comparison table at the end.
+    """
+    import subprocess, sys
+
+    thresholds = [1, 2, 3, 4]
+    summary_rows = []
+
+    for thr in thresholds:
+        print(f"\n{'─'*60}")
+        print(f"  Generating signals at threshold ±{thr}...")
+        subprocess.run([sys.executable, "signal_engine.py", str(thr)],
+                       capture_output=True)   # quiet — we just need signals.csv
+
+        trade_df, monthly = run_backtest()
+        active = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL"])]
+        total  = len(active)
+        wins   = (active["result"] == "WIN").sum()
+        losses = (active["result"] == "LOSS").sum()
+        total_signals = len(trade_df)
+        skipped = (trade_df["result"].str.startswith("SKIPPED")).sum()
+
+        gross_pnl     = active["pnl"].sum() + trade_df["charges"].sum()
+        net_pnl       = active["pnl"].sum()
+        total_charges = trade_df["charges"].sum()
+        end_cap       = trade_df["capital_after"].iloc[-1]
+        wr = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+
+        cap_series  = trade_df["capital_after"]
+        rolling_max = cap_series.cummax()
+        drawdown    = (cap_series - rolling_max) / rolling_max * 100
+        max_dd      = drawdown.min()
+
+        summary_rows.append({
+            "threshold":   f"±{thr}",
+            "signals":     total + skipped,
+            "trades":      total,
+            "trade_rate":  f"{total/(total+skipped)*100:.0f}%",
+            "wins":        wins,
+            "losses":      losses,
+            "win_rate":    f"{wr:.1f}%",
+            "gross_pnl":   f"₹{gross_pnl:,.0f}",
+            "charges":     f"₹{total_charges:,.0f}",
+            "net_pnl":     f"₹{net_pnl:,.0f}",
+            "end_capital": f"₹{end_cap:,.0f}",
+            "max_dd":      f"{max_dd:.1f}%",
+        })
+
+        # Save individual results
+        trade_df.to_csv(f"{DATA_DIR}/trade_log_t{thr}.csv",    index=False)
+        monthly.to_csv( f"{DATA_DIR}/equity_curve_t{thr}.csv", index=False)
+        print(f"  Threshold ±{thr}: {total} trades | WR {wr:.1f}% | Net P&L ₹{net_pnl:,.0f} | Charges ₹{total_charges:,.0f}")
+
+    # Final comparison table
+    print(f"\n{'='*100}")
+    print(f"  THRESHOLD COMPARISON — all costs included")
+    print(f"{'='*100}")
+    df_cmp = pd.DataFrame(summary_rows)
+    print(df_cmp.to_string(index=False))
+    print(f"{'='*100}")
+    print(f"\nNote: ±1 is effectively 'no threshold' — trades on any Tue/Fri")
+    print(f"      with even 1 net bullish/bearish indicator (score = ±1 to ±10).")
+    print(f"      Score = 0 (perfect tie) still gets no trade — no directional edge.")
+
+
 def main():
+    import sys as _sys
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--compare":
+        print("Running full threshold comparison (±1 through ±4)...")
+        run_comparison()
+        return
+
+    # Read threshold embedded in signals.csv
+    try:
+        sig_df    = pd.read_csv(f"{DATA_DIR}/signals.csv", nrows=1)
+        threshold = int(sig_df["threshold"].iloc[0]) if "threshold" in sig_df.columns else None
+    except Exception:
+        threshold = None
+
     print("Running backtest...")
     trade_df, monthly = run_backtest()
 
     trade_df.to_csv(f"{DATA_DIR}/trade_log.csv",    index=False)
     monthly.to_csv( f"{DATA_DIR}/equity_curve.csv", index=False)
 
-    print_summary(trade_df, monthly)
+    print_summary(trade_df, monthly, threshold=threshold)
 
     print(f"\nSaved → {DATA_DIR}/trade_log.csv")
     print(f"Saved → {DATA_DIR}/equity_curve.csv")
