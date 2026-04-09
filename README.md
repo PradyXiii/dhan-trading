@@ -31,7 +31,7 @@ Each trading day (Mon–Fri) at 9:15 AM IST:
 
 Score ≥ +1 → BUY CALL · Score ≤ −1 → BUY PUT · Score = 0 → No trade
 
-Macro signals (S&P500, Nikkei, S&P futures, BN overnight gap) were tested and found to be net negative drag — attribution analysis showed removing them increases P&L by +47%.
+Macro signals (S&P500, Nikkei, S&P futures, BN overnight gap) were tested and found to be net negative drag — attribution analysis showed India-only technical signals significantly outperform.
 
 ### Trade Parameters
 
@@ -203,9 +203,9 @@ Add to `~/.claude/claude.json`:
 |---|---|
 | Directional long (not straddle) | BN avg daily range ~586 pts < straddle breakeven (800–1960 pts). Directional significantly outperforms straddle across the backtest period |
 | 4 indicators (not 10) | Attribution showed macro signals (US/Japan) are noise. India-only technical signals significantly outperform the full 10-indicator set |
-| All 5 days including Wed (0 DTE) | Wed has 62% WR — highest of any day. All-5-days gives best P&L and lowest drawdown |
+| All 5 days including Wed (0 DTE) | Wed (expiry day, 0 DTE) has the highest win rate of any weekday. All-5-days gives best P&L and lowest drawdown |
 | Threshold ±1 | Signal direction matters; score magnitude adds no edge |
-| 20-lot cap | Uncapped lots hit 100+ late in backtest — unrealistic for liquidity and margin |
+| 20-lot cap | Prevents unrealistically large position sizes as capital compounds — liquidity and margin constraint |
 | 5% risk per trade | Balances growth with drawdown control |
 
 ---
