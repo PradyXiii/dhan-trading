@@ -15,6 +15,32 @@ PREMIUM_FACTOR = {"Tuesday": 0.004, "Friday": 0.009}
 # Reward-to-risk ratios
 RR = {"Tuesday": 1.4, "Friday": 2.0}
 
+# ── Dhan brokerage + statutory charges (per round-trip trade) ─────────────────
+# Source: dhan.co/pricing + NSE circulars (as of 2024-25)
+#
+#   Brokerage      : ₹20 per order × 2 (buy + sell) = ₹40 flat
+#   STT            : 0.0625% of premium on SELL side (Budget 2023 rate)
+#   Exchange (NSE) : 0.053% per side on premium (index F&O)
+#   Clearing (NSCCL): 0.0005% per side
+#   GST            : 18% on (brokerage + exchange + clearing charges)
+#   Stamp duty     : 0.003% on buy-side premium
+#   SEBI turnover  : 0.0001% on total turnover (both sides) — negligible
+
+def calculate_charges(premium, lots):
+    """Return total round-trip transaction cost for one trade."""
+    pv = lots * LOT_SIZE * premium          # total premium value
+
+    brokerage       = 40.0                  # ₹20 × 2 orders
+    stt             = 0.000625 * pv         # 0.0625% on sell side
+    exchange        = 0.00053  * pv * 2    # 0.053% per side
+    clearing        = 0.000005 * pv * 2    # 0.0005% per side
+    gst             = 0.18 * (brokerage + exchange + clearing)
+    stamp_duty      = 0.00003  * pv        # 0.003% on buy side
+    sebi            = 0.000001 * pv * 2    # negligible
+
+    total = brokerage + stt + exchange + clearing + gst + stamp_duty + sebi
+    return round(total, 2)
+
 
 # ── Loaders ──────────────────────────────────────────────────────────────────
 
@@ -77,8 +103,9 @@ def simulate_trade(row, bn_ohlcv, capital):
         elif sl_hit:
             result = "LOSS"
         else:                                    # neither hit — exit at close
-            pnl = (bn_close - bn_open) * 0.5 * lots * LOT_SIZE
-            return round(pnl, 2), "PARTIAL", lots, round(premium, 2)
+            gross = (bn_close - bn_open) * 0.5 * lots * LOT_SIZE
+            charges = calculate_charges(premium, lots)
+            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2)
 
     else:  # PUT
         sl_level = bn_open + sl_pts
@@ -93,13 +120,15 @@ def simulate_trade(row, bn_ohlcv, capital):
         elif sl_hit:
             result = "LOSS"
         else:
-            pnl = (bn_open - bn_close) * 0.5 * lots * LOT_SIZE
-            return round(pnl, 2), "PARTIAL", lots, round(premium, 2)
+            gross = (bn_open - bn_close) * 0.5 * lots * LOT_SIZE
+            charges = calculate_charges(premium, lots)
+            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2)
 
+    charges = calculate_charges(premium, lots)
     if result == "WIN":
-        pnl =  lots * LOT_SIZE * premium * rr  * SL_PCT
+        pnl =  lots * LOT_SIZE * premium * rr  * SL_PCT - charges
     else:
-        pnl = -lots * LOT_SIZE * premium * SL_PCT
+        pnl = -lots * LOT_SIZE * premium * SL_PCT - charges
 
     return round(pnl, 2), result, lots, round(premium, 2)
 
@@ -127,6 +156,7 @@ def run_backtest():
 
         capital_before = capital
         pnl, result, lots, premium = simulate_trade(row, bn_ohlcv, capital)
+        charges = calculate_charges(premium, lots) if lots > 0 else 0
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -141,6 +171,7 @@ def run_backtest():
             "premium":        premium,
             "lots":           lots,
             "risk_amt":       round(lots * LOT_SIZE * premium * SL_PCT, 2),
+            "charges":        charges,
             "result":         result,
             "pnl":            pnl,
             "capital_before": round(capital_before, 2),
@@ -175,10 +206,12 @@ def print_summary(trade_df, monthly):
     total   = len(active)
     skipped = (trade_df["result"].str.startswith("SKIPPED")).sum()
 
-    start_cap  = STARTING_CAPITAL
-    end_cap    = trade_df["capital_after"].iloc[-1]
-    total_pnl  = active["pnl"].sum()
-    topups     = (trade_df["capital_before"].diff() > 5000).sum()
+    start_cap     = STARTING_CAPITAL
+    end_cap       = trade_df["capital_after"].iloc[-1]
+    total_pnl     = active["pnl"].sum()
+    total_charges = trade_df["charges"].sum() if "charges" in trade_df.columns else 0
+    gross_pnl     = total_pnl + total_charges
+    topups        = (trade_df["capital_before"].diff() > 5000).sum()
 
     # Max drawdown on capital series
     cap_series  = trade_df["capital_after"]
@@ -193,7 +226,12 @@ def print_summary(trade_df, monthly):
     print(f"  Monthly top-ups     : ₹10,000 × {topups} months = ₹{topups*10000:,.0f}")
     print(f"  Total injected      : ₹{start_cap + topups*10000:>10,.0f}")
     print(f"  Ending capital      : ₹{end_cap:>10,.2f}")
-    print(f"  Net trading P&L     : ₹{total_pnl:>10,.2f}")
+    print(f"{'─'*56}")
+    print(f"  Gross trading P&L   : ₹{gross_pnl:>10,.2f}")
+    print(f"  Total charges paid  : ₹{total_charges:>10,.2f}  ← brokerage+STT+GST etc.")
+    print(f"  Net trading P&L     : ₹{total_pnl:>10,.2f}  ← after all costs")
+    verdict = "PROFITABLE ✓" if total_pnl > 0 else "NOT PROFITABLE ✗"
+    print(f"  Verdict             : {verdict}")
     print(f"{'─'*56}")
     print(f"  Signals generated   : {total + skipped}")
     print(f"  Trades taken        : {total}")
