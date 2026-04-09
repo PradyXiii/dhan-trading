@@ -6,7 +6,7 @@ import sys
 DATA_DIR = "data"
 
 # ── Change this to test different thresholds (2, 3, 4) ───────────────────────
-SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 2
+SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
