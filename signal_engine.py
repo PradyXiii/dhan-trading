@@ -256,9 +256,11 @@ def main():
     print("Generating signals for Tuesdays and Fridays...")
     signals = generate_signals(df)
 
-    # Save
+    # Save — embed threshold as a metadata comment in filename convention
     out_path = f"{DATA_DIR}/signals.csv"
+    signals["threshold"] = SIGNAL_THRESHOLD   # backtest_engine reads this
     signals.to_csv(out_path, index=False)
+    signals.drop(columns=["threshold"], inplace=True)  # remove from display df
 
     # Summary
     total  = len(signals)
