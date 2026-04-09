@@ -71,41 +71,14 @@ def load_data():
     for other in [nf, vix, sp, nk, spf]:
         df = df.merge(other, on="date", how="left")
 
-    # ── Optional data files — all gracefully skipped if missing ──────────────
-    optional = {
-        "pcr":          (f"{DATA_DIR}/pcr.csv",          ["date", "pcr"]),
-        "max_pain":     (f"{DATA_DIR}/max_pain.csv",      ["date", "max_pain"]),
-        "oi_buildup":   (f"{DATA_DIR}/oi_buildup.csv",    ["date", "put_oi_chg", "call_oi_chg"]),
-        "fii_fo":       (f"{DATA_DIR}/fii_fo.csv",        ["date", "fii_net_futures"]),
-        "fii_dii":      (f"{DATA_DIR}/fii_dii.csv",       ["date", "fii_net"]),
-    }
-    loaded = {}
-    for key, (path, cols) in optional.items():
-        if os.path.exists(path):
-            tmp = pd.read_csv(path, parse_dates=["date"])
-            available = [c for c in cols if c in tmp.columns]
-            df = df.merge(tmp[available], on="date", how="left")
-            loaded[key] = True
-        else:
-            for col in cols[1:]:          # skip "date"
-                if col not in df.columns:
-                    df[col] = np.nan
-            loaded[key] = False
-
     df = df.sort_values("date").reset_index(drop=True)
 
     # Forward-fill global market data (handles weekends/holidays)
     ff_cols = ["nf_close", "vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]
     df[ff_cols] = df[ff_cols].ffill(limit=3)
 
-    # Forward-fill optional data (1 day only — stale beyond that)
-    for col in ["pcr", "max_pain", "put_oi_chg", "call_oi_chg",
-                "fii_net_futures", "fii_net"]:
-        if col in df.columns and not df[col].isna().all():
-            df[col] = df[col].ffill(limit=1)
-
     return df.dropna(subset=["bn_close", "nf_close", "vix_close",
-                              "sp_close", "nk_close", "spf_open", "spf_close"]), loaded
+                              "sp_close", "nk_close", "spf_open", "spf_close"])
 
 
 # ── Indicator computation ─────────────────────────────────────────────────────
@@ -141,14 +114,6 @@ def compute_indicators(df):
     log_ret    = np.log(d["bn_close"] / d["bn_close"].shift(1))
     d["hv20"]  = log_ret.rolling(20).std() * np.sqrt(252) * 100
     d["bn_gap"]= (d["bn_open"] - d["bn_close"].shift(1)) / d["bn_close"].shift(1) * 100
-
-    # ── Round 2: IV Rank (52-week HV percentile) — no new data needed ─────────
-    # IV Rank < 30 = vol is low relative to past year = calm = +1 (trends work)
-    # IV Rank > 70 = vol is elevated = stressed market = -1 (chop/reversal risk)
-    hv_min       = d["hv20"].rolling(252, min_periods=60).min()
-    hv_max       = d["hv20"].rolling(252, min_periods=60).max()
-    hv_range     = (hv_max - hv_min).replace(0, np.nan)
-    d["iv_rank"] = (d["hv20"] - hv_min) / hv_range * 100
 
     return d.dropna(subset=["ema20", "rsi14", "trend5", "vix_dir",
                              "sp500_chg", "nikkei_chg", "spf_gap", "bn_nf_div",
@@ -191,41 +156,12 @@ def score_row(row):
     s["s_bn_gap"]  = (1  if row["bn_gap"] > 0.3  else
                      (-1 if row["bn_gap"] < -0.3  else 0))
 
-    # ── Round 2: IV Rank (always computed) ───────────────────────────────────
-    iv = _get(row, "iv_rank")
-    if not pd.isna(iv):
-        s["s_iv_rank"] = 1 if iv < 30 else (-1 if iv > 70 else 0)
-
-    # ── Optional (need bhavcopy download) ────────────────────────────────────
-
-    # PCR: contrarian — high PCR (fear) = bullish; low PCR (greed) = bearish
-    pcr = _get(row, "pcr")
-    if not pd.isna(pcr):
-        s["s_pcr"] = 1 if pcr > 1.2 else (-1 if pcr < 0.8 else 0)
-
-    # OI direction: CALL OI building faster = bullish; PUT OI faster = bearish
-    call_oi_chg = _get(row, "call_oi_chg")
-    put_oi_chg  = _get(row, "put_oi_chg")
-    if not (pd.isna(call_oi_chg) or pd.isna(put_oi_chg)):
-        s["s_oi_dir"] = (1  if call_oi_chg > put_oi_chg else
-                        (-1 if put_oi_chg  > call_oi_chg else 0))
-
-    # Max Pain: BN price below max pain = bullish (market may drift up to pain level)
-    max_pain = _get(row, "max_pain")
-    if not pd.isna(max_pain) and max_pain > 0:
-        dist_pct = (row["bn_close"] - max_pain) / max_pain * 100
-        s["s_max_pain"] = (1  if dist_pct < -1.0 else    # price below max pain → drift up
-                          (-1 if dist_pct >  1.0 else 0)) # price above max pain → drift down
-
-    # FII F&O net futures (from fetch_round2_data.py)
-    fii_fo = _get(row, "fii_net_futures")
-    if not pd.isna(fii_fo):
-        s["s_fii_fo"] = 1 if fii_fo > 0 else (-1 if fii_fo < 0 else 0)
-
-    # FII cash market (from fii_dii.csv, manual download)
-    fii_cash = _get(row, "fii_net")
-    if not pd.isna(fii_cash):
-        s["s_fii_cash"] = 1 if fii_cash > 500 else (-1 if fii_cash < -500 else 0)
+    # ── Round 2 indicators REMOVED — backtesting confirmed they add noise ─────
+    # All 5 dropped win rate from 50.7% → 47.3-47.7% and P&L from ₹6.35L → <₹2L
+    #   PCR/OI/MaxPain : weekly convergence signals, not intraday-relevant
+    #   FII F&O        : lagged + hedged, noisy day-to-day
+    #   IV Rank        : redundant with HV20 (same vol info, double-counted)
+    # Raw data files retained in data/ for possible future research use.
 
     return sum(s.values()), s
 
@@ -286,27 +222,13 @@ def generate_signals(df):
 
 def main():
     print(f"Loading data...  [Signal threshold: ±{SIGNAL_THRESHOLD}]")
-    df, loaded = load_data()
+    df = load_data()
     print(f"  Merged dataset : {len(df)} trading days  "
           f"({df['date'].min().date()} to {df['date'].max().date()})")
 
-    # Count active indicators
-    always_on  = 11          # 8 core + HV20 + BN gap + IV Rank (computed)
-    optional   = {
-        "PCR":            loaded.get("pcr",      False),
-        "OI direction":   loaded.get("oi_buildup", False),
-        "Max Pain":       loaded.get("oi_buildup", False),  # same file
-        "FII F&O":        loaded.get("fii_fo",   False),
-        "FII cash":       loaded.get("fii_dii",  False),
-    }
-    active_opt = sum(optional.values())
-    total_ind  = always_on + active_opt
-
-    print(f"  Active indicators: {total_ind}/16")
-    for name, status in optional.items():
-        mark = "✓" if status else "✗"
-        print(f"    {mark} {name}"
-              + ("" if status else "  ← run python3 fetch_round2_data.py"))
+    # 10 active indicators: 8 core + HV20 + BN overnight gap
+    # Round 2 indicators (PCR, OI, MaxPain, FII, IVRank) removed — added noise
+    print(f"  Active indicators: 10/10  (8 core + HV20 + BN overnight gap)")
 
     event_count = sum(1 for d in pd.date_range(df["date"].min(),
                                                df["date"].max(), freq="B")

@@ -262,6 +262,25 @@ directional lean. Score = 0 (perfect tie) still skips — no edge to exploit.
 
 **Status: ✅ Built** — Run `python3 fetch_round2_data.py` to download NSE data (~6 min), then re-run signal engine.
 
+### Run 6 — Round 2 indicators tested, all removed (10 indicators, with costs) ✅
+
+| Threshold | Win Rate | Net P&L | vs 10-indicator best |
+|---|---|---|---|
+| ±1 (15 ind) | 47.7% ⚠️ | ₹2,04,493 | -68% |
+| ±2 (15 ind) | 47.3% ⚠️ | ₹1,43,710 | -77% |
+| ±3 (15 ind) | 47.3% ⚠️ | ₹91,223 | -86% |
+| ±4 (15 ind) | 50.5% | ₹1,63,117 | -74% |
+
+**All 5 Round 2 indicators added noise and reduced performance.** Reverted to 10 indicators.
+Event filter (RBI + Budget hard NONE) **kept** — good risk management regardless of P&L.
+
+Root causes for why each indicator failed as a scoring signal:
+- PCR, OI direction, Max Pain — weekly convergence signals, not intraday-relevant
+- FII F&O net futures — lagged + hedged, noisy day-to-day
+- IV Rank — redundant with HV20 (double-counted volatility information)
+
+**Current best config: 10 indicators, threshold ±1, event filter ON → ₹6,34,931 net P&L**
+
 ### Round 2 — New Indicators
 
 | # | Indicator | Signal logic | Data source |
