@@ -102,22 +102,45 @@ def refresh_data_and_signal():
 
 
 def get_todays_signal() -> dict:
-    """Read today's row from signals.csv."""
+    """
+    Read today's signal from signals.csv.
+
+    Why the fallback exists:
+      signal_engine merges Indian + global market data. At 9:15 AM IST the US
+      market hasn't closed yet, so today's row is sometimes missing from the
+      merged dataset. The PREVIOUS trading day's signal is the correct one to
+      use anyway — it's computed from yesterday's close, which is all we know
+      at market open today.
+    """
     try:
-        df  = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
-        df  = df.drop(columns=["threshold"], errors="ignore")
+        df    = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+        df    = df.drop(columns=["threshold"], errors="ignore")
         today = pd.Timestamp(date.today())
 
         row = df[df["date"] == today]
-        if row.empty:
-            # Signal file not yet updated for today (holiday or run before market)
-            last = df.iloc[-1]
+        if not row.empty:
+            return row.iloc[0].to_dict()
+
+        # Today's row not generated yet — use most recent available signal.
+        # This is correct: it reflects yesterday's close, the latest complete data.
+        last     = df.iloc[-1]
+        days_gap = (today - last["date"]).days
+
+        if days_gap <= 4:   # covers Mon (gap=3 from Fri) and after market holidays
             notify.send(
-                f"⚠️ No signal for {today.date()}.  "
-                f"Last available: {last['date'].date()} → {last['signal']}"
+                f"ℹ️ Today's signal not yet in CSV "
+                f"(global markets still open at 9:15 AM IST).\n"
+                f"Using {last['date'].date()} signal → <b>{last['signal']}</b> "
+                f"(score {int(last['score']):+d})"
             )
-            return None
-        return row.iloc[0].to_dict()
+            return last.to_dict()
+
+        notify.send(
+            f"⚠️ Signal is {days_gap} days stale "
+            f"(last: {last['date'].date()}). No trade today."
+        )
+        return None
+
     except Exception as e:
         die(f"Cannot read signals.csv: {e}")
 
