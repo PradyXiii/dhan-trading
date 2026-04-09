@@ -353,16 +353,21 @@ def run_comparison():
     whatever signals.csv is present, but re-generates signals for each threshold.
     Prints a comparison table at the end.
     """
-    import subprocess, sys
+    import subprocess, sys as _sys
 
     thresholds = [1, 2, 3, 4]
     summary_rows = []
 
+    # Pass optional days argument through: backtest_engine.py --compare [days]
+    days_arg = _sys.argv[2] if len(_sys.argv) > 2 else None
+
     for thr in thresholds:
         print(f"\n{'─'*60}")
         print(f"  Generating signals at threshold ±{thr}...")
-        subprocess.run([sys.executable, "signal_engine.py", str(thr)],
-                       capture_output=True)   # quiet — we just need signals.csv
+        cmd = [_sys.executable, "signal_engine.py", str(thr)]
+        if days_arg:
+            cmd.append(days_arg)
+        subprocess.run(cmd, capture_output=True)   # quiet — we just need signals.csv
 
         trade_df, monthly = run_backtest()
         active = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL"])]

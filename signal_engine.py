@@ -5,8 +5,29 @@ import sys
 
 DATA_DIR = "data"
 
-# ── Change this to test different thresholds (1, 2, 3, 4) ────────────────────
+# ── CLI args: signal_engine.py [threshold] [days] ────────────────────────────
+# threshold: integer ≥1 (default 1)
+# days     : comma-separated abbreviations, e.g. "tue,thu" or "mon,tue,thu,fri"
+#            default = "mon,tue,thu,fri"
+#
+# Examples:
+#   python3 signal_engine.py          → threshold=1, all 4 days
+#   python3 signal_engine.py 2        → threshold=2, all 4 days
+#   python3 signal_engine.py 1 thu,tue → threshold=1, Thu+Tue only
+
 SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+
+_DAY_MAP = {
+    "mon": 0, "monday": 0,
+    "tue": 1, "tuesday": 1,
+    "thu": 3, "thursday": 3,
+    "fri": 4, "friday": 4,
+}
+_raw_days = sys.argv[2] if len(sys.argv) > 2 else "mon,tue,thu,fri"
+TRADE_WEEKDAYS = [_DAY_MAP[d.strip().lower()] for d in _raw_days.split(",")
+                  if d.strip().lower() in _DAY_MAP]
+if not TRADE_WEEKDAYS:
+    TRADE_WEEKDAYS = [0, 1, 3, 4]  # fallback to all 4
 
 
 # ── Event calendar — hard NO-TRADE override ───────────────────────────────────
@@ -177,11 +198,11 @@ def score_row(row):
 
 def generate_signals(df):
     """
-    Filter to Mon/Tue/Thu/Fri, score, apply event filter, return DataFrame.
-    Wednesday (expiry day) is excluded — 0 DTE gamma risk is a different strategy.
+    Filter to selected weekdays, score, apply event filter, return DataFrame.
+    Wednesday (expiry day) is always excluded — 0 DTE gamma risk is a different strategy.
+    Active days controlled by TRADE_WEEKDAYS (CLI arg or default Mon/Tue/Thu/Fri).
     """
-    # 0=Mon, 1=Tue, 3=Thu, 4=Fri — skip 2=Wed (BankNifty expiry day)
-    trade_days = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy()
+    trade_days = df[df["date"].dt.weekday.isin(TRADE_WEEKDAYS)].copy()
     trade_days["weekday"] = trade_days["date"].dt.day_name()
 
     rows = []
@@ -234,7 +255,9 @@ def generate_signals(df):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print(f"Loading data...  [Signal threshold: ±{SIGNAL_THRESHOLD}]")
+    _day_names = [d.capitalize() for d in _raw_days.split(",") if d.strip().lower() in _DAY_MAP]
+    _days_label = "/".join(_day_names)
+    print(f"Loading data...  [Signal threshold: ±{SIGNAL_THRESHOLD}]  [Days: {_days_label}]")
     df = load_data()
     print(f"  Merged dataset : {len(df)} trading days  "
           f"({df['date'].min().date()} to {df['date'].max().date()})")
@@ -252,7 +275,7 @@ def main():
     print("\nComputing indicators...")
     df = compute_indicators(df)
 
-    print("Generating signals for Tuesdays and Fridays...")
+    print(f"Generating signals for {_days_label}...")
     signals = generate_signals(df)
 
     # Embed threshold for backtest_engine to read back
@@ -268,7 +291,7 @@ def main():
     event_days = signals["event_day"].sum() if "event_day" in signals else 0
 
     print(f"\n{'='*52}")
-    print(f"  Trade days scanned : {total}  (Mon/Tue/Thu/Fri, skip Wed expiry)")
+    print(f"  Trade days scanned : {total}  ({_days_label}, skip Wed expiry)")
     print(f"  CALL signals       : {calls}  ({calls/total*100:.1f}%)")
     print(f"  PUT  signals       : {puts}   ({puts/total*100:.1f}%)")
     print(f"  NO TRADE (score)   : {nones - event_days}  ({(nones-event_days)/total*100:.1f}%)")
