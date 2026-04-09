@@ -6,13 +6,13 @@ import sys
 DATA_DIR = "data"
 
 # ── Change this to test different thresholds (2, 3, 4) ───────────────────────
-SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 2
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 def load_data():
-    """Load all 6 CSVs and merge on date using BankNifty calendar as master."""
+    """Load all data CSVs and merge on date using BankNifty calendar as master."""
     bn  = pd.read_csv(f"{DATA_DIR}/banknifty.csv",     parse_dates=["date"])
     nf  = pd.read_csv(f"{DATA_DIR}/nifty50.csv",       parse_dates=["date"])
     vix = pd.read_csv(f"{DATA_DIR}/india_vix.csv",     parse_dates=["date"])
@@ -33,13 +33,37 @@ def load_data():
     for other in [nf, vix, sp, nk, spf]:
         df = df.merge(other, on="date", how="left")
 
+    # ── Optional Round-1 data sources (skip gracefully if not downloaded yet) ──
+    pcr_path = f"{DATA_DIR}/pcr.csv"
+    fii_path = f"{DATA_DIR}/fii_dii.csv"
+
+    if os.path.exists(pcr_path):
+        pcr = pd.read_csv(pcr_path, parse_dates=["date"])
+        pcr = pcr[["date", "pcr"]].rename(columns={"pcr": "pcr"})
+        df = df.merge(pcr, on="date", how="left")
+    else:
+        df["pcr"] = np.nan
+
+    if os.path.exists(fii_path):
+        fii = pd.read_csv(fii_path, parse_dates=["date"])
+        fii = fii[["date", "fii_net"]].rename(columns={"fii_net": "fii_net"})
+        df = df.merge(fii, on="date", how="left")
+    else:
+        df["fii_net"] = np.nan
+
     df = df.sort_values("date").reset_index(drop=True)
     df[["nf_close", "vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]] = (
         df[["nf_close", "vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]]
           .ffill(limit=3)
     )
+    # Forward-fill PCR and FII only if files were loaded
+    if not df["pcr"].isna().all():
+        df["pcr"] = df["pcr"].ffill(limit=1)
+    if not df["fii_net"].isna().all():
+        df["fii_net"] = df["fii_net"].ffill(limit=1)
 
-    return df.dropna()
+    return df.dropna(subset=["bn_close", "nf_close", "vix_close", "sp_close",
+                              "nk_close", "spf_open", "spf_close"])
 
 
 # ── Indicator computation ──────────────────────────────────────────────────────
@@ -57,8 +81,10 @@ def compute_rsi(series, period=14):
 
 
 def compute_indicators(df):
-    """Add all 8 signal indicator columns to the dataframe."""
+    """Add all signal indicator columns to the dataframe."""
     d = df.copy()
+
+    # ── Original 8 indicators ──────────────────────────────────────────────────
 
     # 1. EMA20 of BankNifty close
     d["ema20"] = d["bn_close"].ewm(span=20, adjust=False).mean()
@@ -86,7 +112,29 @@ def compute_indicators(df):
     nf_chg = (d["nf_close"] - d["nf_close"].shift(1)) / d["nf_close"].shift(1) * 100
     d["bn_nf_div"] = bn_chg - nf_chg
 
-    return d.dropna()
+    # ── Round 1 additions ─────────────────────────────────────────────────────
+
+    # 9. BankNifty 20-day historical volatility (annualised, in %)
+    #    High vol (>20%) = uncertain/dangerous; Low vol (<12%) = calm/trending
+    log_ret = np.log(d["bn_close"] / d["bn_close"].shift(1))
+    d["hv20"] = log_ret.rolling(20).std() * np.sqrt(252) * 100
+
+    # 10. BankNifty overnight gap (today's open vs yesterday's close)
+    #     Proxy for GIFT Nifty pre-market signal
+    d["bn_gap"] = (d["bn_open"] - d["bn_close"].shift(1)) / d["bn_close"].shift(1) * 100
+
+    # 11. PCR (Put-Call Ratio) — only if pcr.csv was loaded
+    #     PCR > 1.2 = too much put buying = possible reversal up (contrarian bullish)
+    #     PCR < 0.8 = too much call buying = possible reversal down (contrarian bearish)
+    #     Trend signal: PCR rising = more puts = bearish pressure building
+
+    # 12. FII net buy/sell (₹ crore) — only if fii_dii.csv was loaded
+    #     FII net positive = institutional buying = bullish
+    #     FII net negative = institutional selling = bearish
+
+    return d.dropna(subset=["ema20", "rsi14", "trend5", "vix_dir",
+                             "sp500_chg", "nikkei_chg", "spf_gap", "bn_nf_div",
+                             "hv20", "bn_gap"])
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
@@ -94,6 +142,8 @@ def compute_indicators(df):
 def score_row(row):
     """Score a single day's indicators. Returns (score, individual scores dict)."""
     s = {}
+
+    # ── Original 8 ────────────────────────────────────────────────────────────
 
     # EMA20: close above/below EMA
     s["s_ema20"]     = 1 if row["bn_close"] > row["ema20"] else -1
@@ -119,6 +169,25 @@ def score_row(row):
     # BN-NF divergence: BN outperforming = bullish
     s["s_bn_nf_div"] = 1 if row["bn_nf_div"] > 0.5 else (-1 if row["bn_nf_div"] < -0.5 else 0)
 
+    # ── Round 1 additions ─────────────────────────────────────────────────────
+
+    # HV20: low vol = trend likely to continue; high vol = avoid or fade
+    # Neutral at mid-vol (12–20%) — these thresholds calibrated for BankNifty
+    s["s_hv20"]      = 1 if row["hv20"] < 12.0 else (-1 if row["hv20"] > 20.0 else 0)
+
+    # BN overnight gap: positive gap = bullish open; negative = bearish
+    # Threshold ±0.3% — small gaps are noise
+    s["s_bn_gap"]    = 1 if row["bn_gap"] > 0.3 else (-1 if row["bn_gap"] < -0.3 else 0)
+
+    # PCR (if available): contrarian — high PCR = fear = bullish; low PCR = greed = bearish
+    if not pd.isna(row.get("pcr", float("nan"))):
+        s["s_pcr"]   = 1 if row["pcr"] > 1.2 else (-1 if row["pcr"] < 0.8 else 0)
+
+    # FII net (if available): FII buying = bullish; selling = bearish
+    # Threshold ±500 crore to filter out small/noise flows
+    if not pd.isna(row.get("fii_net", float("nan"))):
+        s["s_fii"]   = 1 if row["fii_net"] > 500 else (-1 if row["fii_net"] < -500 else 0)
+
     total = sum(s.values())
     return total, s
 
@@ -135,7 +204,7 @@ def generate_signals(df):
 
         signal = "CALL" if score >= SIGNAL_THRESHOLD else ("PUT" if score <= -SIGNAL_THRESHOLD else "NONE")
 
-        rows.append({
+        row_data = {
             "date":       row["date"].date(),
             "weekday":    row["weekday"],
             "bn_close":   round(row["bn_close"], 2),
@@ -147,10 +216,20 @@ def generate_signals(df):
             "nikkei_chg": round(row["nikkei_chg"], 2),
             "spf_gap":    round(row["spf_gap"], 2),
             "bn_nf_div":  round(row["bn_nf_div"], 2),
+            "hv20":       round(row["hv20"], 2),
+            "bn_gap":     round(row["bn_gap"], 2),
             **{k: v for k, v in s.items()},
             "score":      score,
             "signal":     signal,
-        })
+        }
+
+        # Add optional columns if data was available
+        if "pcr" in row.index and not pd.isna(row.get("pcr", float("nan"))):
+            row_data["pcr"] = round(row["pcr"], 2)
+        if "fii_net" in row.index and not pd.isna(row.get("fii_net", float("nan"))):
+            row_data["fii_net"] = round(row["fii_net"], 0)
+
+        rows.append(row_data)
 
     return pd.DataFrame(rows)
 
@@ -162,6 +241,14 @@ def main():
     df = load_data()
     print(f"  Merged dataset: {len(df)} trading days  "
           f"({df['date'].min().date()} to {df['date'].max().date()})")
+
+    # Report which Round-1 data sources are active
+    has_pcr = not df["pcr"].isna().all()
+    has_fii = not df["fii_net"].isna().all()
+    active_indicators = 10 + (1 if has_pcr else 0) + (1 if has_fii else 0)
+    print(f"  Active indicators: {active_indicators}/12"
+          f"  [PCR: {'✓' if has_pcr else '✗ (pcr.csv missing)'}]"
+          f"  [FII/DII: {'✓' if has_fii else '✗ (fii_dii.csv missing)'}]")
 
     print("Computing indicators...")
     df = compute_indicators(df)

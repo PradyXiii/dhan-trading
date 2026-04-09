@@ -72,10 +72,10 @@ python3 backtest_engine.py
 
 ## Signal Engine Logic
 
-### 8 Indicators and Scoring
+### 10–12 Indicators and Scoring (Round 1 added indicators 9–12)
 
 Each indicator scores +1 (bullish), -1 (bearish), or 0 (neutral).
-Total score range: -8 to +8.
+Total score range: -10 to +10 (or -12 to +12 with PCR + FII/DII).
 
 | # | Indicator | Bullish (+1) | Bearish (-1) | Neutral (0) |
 |---|---|---|---|---|
@@ -87,6 +87,10 @@ Total score range: -8 to +8.
 | 6 | Nikkei change | prev-day Nikkei > 0% | prev-day Nikkei < 0% | — |
 | 7 | S&P futures gap | gap > +0.2% | gap < -0.2% | within ±0.2% |
 | 8 | BN-NF divergence | BN outperforms NF >+0.5% | BN underperforms >-0.5% | within ±0.5% |
+| 9 | HV20 (historical vol) | HV < 12% (calm) | HV > 20% (chaotic) | 12–20% |
+| 10 | BN overnight gap | gap > +0.3% | gap < -0.3% | within ±0.3% |
+| 11 | PCR (Put-Call Ratio) | PCR > 1.2 (contrarian bullish) | PCR < 0.8 (contrarian bearish) | 0.8–1.2 |
+| 12 | FII net flows | FII net > +500Cr | FII net < -500Cr | within ±500Cr |
 
 ### Signal Decision
 - Score ≥ +THRESHOLD → **BUY CALL**
@@ -201,7 +205,32 @@ Based on Dhan's pricing + NSE statutory charges:
 - [ ] GIFT Nifty / SGX pre-market gap signal  
 - [ ] BankNifty 20-day historical volatility signal  
 
-**Status: In progress** — Adding these as 4 new indicators to signal_engine.py to bring total from 8 → 12 signals (score range -12 to +12)
+**Status: ✅ Signal logic built** — 10 indicators active now (8 original + HV20 + BN overnight gap). PCR and FII/DII need manual data download (instructions below).
+
+### Round 1 — New Indicators Added
+
+| # | Indicator | How it scores | Status |
+|---|---|---|---|
+| 9 | BN 20-day historical vol (HV20) | Low vol (<12%) = +1, High vol (>20%) = -1, mid = 0 | ✅ Auto-computed from banknifty.csv |
+| 10 | BN overnight gap (today open vs yesterday close) | Gap > +0.3% = +1, gap < -0.3% = -1, else 0 | ✅ Auto-computed from banknifty.csv |
+| 11 | PCR — BankNifty Put-Call Ratio | PCR > 1.2 = +1 (fear/contrarian bullish), PCR < 0.8 = -1, else 0 | ⚠️ Needs manual data download |
+| 12 | FII net flows (₹ crore, cash market) | FII net > +500Cr = +1, net < -500Cr = -1, else 0 | ⚠️ Needs manual data download |
+
+### How to Get PCR Data (NSE)
+
+1. Go to: https://www.nseindia.com/report-detail/fo_eq_security
+2. Select: Symbol = BANKNIFTY | From: 01-Sep-2021 | To: 09-Apr-2026
+3. Download CSV
+4. Run: `python3 data_fetcher.py --process-pcr <downloaded_filename.csv>`
+5. This creates `data/pcr.csv` automatically
+
+### How to Get FII/DII Data
+
+1. Go to: https://www.nseindia.com/research/content/US_FiiDiiData.xlsx
+2. Download the Excel file (covers several years of daily FII/DII flows)
+3. Save relevant columns as `data/fii_dii.csv` with columns: `date, fii_net`
+   - `fii_net` = FII net buy/sell in ₹ crore (positive = buying)
+4. Re-run `python3 signal_engine.py 2` — it will auto-detect the file
 
 ## Planned Improvements (Round 2)
 
