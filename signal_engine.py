@@ -24,7 +24,7 @@ _DAY_MAP = {
     "thu": 3, "thursday": 3,
     "fri": 4, "friday": 4,
 }
-_raw_days = sys.argv[2] if len(sys.argv) > 2 else "mon,tue,thu,fri"
+_raw_days = sys.argv[2] if len(sys.argv) > 2 else "mon,tue,wed,thu,fri"
 TRADE_WEEKDAYS = [_DAY_MAP[d.strip().lower()] for d in _raw_days.split(",")
                   if d.strip().lower() in _DAY_MAP]
 if not TRADE_WEEKDAYS:
@@ -308,7 +308,7 @@ def main():
     print(f"  NO TRADE (score)   : {nones - event_days}  ({(nones-event_days)/total*100:.1f}%)")
     print(f"  NO TRADE (event)   : {event_days}  ({event_days/total*100:.1f}%)")
     print(f"{'─'*52}")
-    for day in ["Monday", "Tuesday", "Thursday", "Friday"]:
+    for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
         d = signals[signals["weekday"] == day]
         if len(d):
             dc = (d["signal"] == "CALL").sum()

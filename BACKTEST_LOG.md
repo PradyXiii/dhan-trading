@@ -2,7 +2,8 @@
 
 ## What This Project Does
 Backtests a weekly BankNifty ATM options trading strategy from Sep 2021 to Apr 2026.
-Trades are taken only on **Tuesdays and Fridays** based on a signal scoring system.
+Trades are taken **every trading day (Mon–Fri)** based on a signal scoring system.
+Wednesday (expiry day) is included as a 0 DTE gamma trade.
 All code runs on a **Google Cloud VM** at IP `34.45.55.132` (whitelisted on Dhan's platform).
 
 ---
@@ -15,8 +16,9 @@ All code runs on a **Google Cloud VM** at IP `34.45.55.132` (whitelisted on Dhan
 | `.gitignore` | Keeps `.env` and data CSVs out of GitHub |
 | `test_connection.py` | Quick test to verify Dhan API token is valid |
 | `data_fetcher.py` | Downloads all 6 market data sources and saves to `data/` folder |
-| `signal_engine.py` | Computes 8 indicators, scores each Tue/Fri, generates CALL/PUT/NONE |
+| `signal_engine.py` | Computes 10 indicators, scores each day, generates CALL/PUT/NONE |
 | `backtest_engine.py` | Simulates trades with capital management, costs, and P&L calculation |
+| `fetch_round2_data.py` | Downloads NSE F&O bhavcopy + participant OI (Round 2 data, retained for research) |
 | `data/` | Folder containing all CSV files (not in GitHub — lives only on GCP VM) |
 
 ---
@@ -25,13 +27,13 @@ All code runs on a **Google Cloud VM** at IP `34.45.55.132` (whitelisted on Dhan
 
 **Step 1 — Open terminal:** Go to console.cloud.google.com → Compute Engine → VM instances → SSH button
 
-**Step 2 — Activate environment:**
+**Step 2 — Navigate to project:**
 ```bash
-cd ~/dhan-env && source ~/dhan-env/bin/activate
+cd ~/dhan-trading
 ```
 
 **Step 3 — Refresh token (if needed):**
-Edit `~/.dhan-env/.env` and update `DHAN_ACCESS_TOKEN` (token expires every ~24 hours)
+Edit `~/dhan-trading/.env` and update `DHAN_ACCESS_TOKEN` (token expires every ~24 hours)
 ```bash
 python3 test_connection.py
 ```
@@ -41,24 +43,24 @@ python3 test_connection.py
 python3 data_fetcher.py
 ```
 
-**Step 5 — Run signal engine with a threshold:**
+**Step 5 — Run signal engine + backtest (default: all 5 days, threshold ±1):**
 ```bash
-python3 signal_engine.py 3      # threshold ±3 (current default)
-python3 signal_engine.py 2      # test with threshold ±2
-python3 signal_engine.py 4      # test with threshold ±4
+python3 signal_engine.py && python3 backtest_engine.py
 ```
 
-**Step 6 — Run backtest:**
+**Step 5b — Test specific day combinations or thresholds:**
 ```bash
-python3 backtest_engine.py                # uses whatever signals.csv is active
+python3 signal_engine.py 1 mon,tue,wed,thu,fri   # all 5 days (default)
+python3 signal_engine.py 1 thu,tue                # Thursday + Tuesday only
+python3 signal_engine.py 2 thu                    # Thursday alone, threshold ±2
+python3 signal_engine.py 1 wed                    # Wednesday (0 DTE) alone
 ```
 
-**Step 6b — Run all thresholds at once (comparison mode):**
+**Step 5c — Run all thresholds at once (comparison mode):**
 ```bash
-python3 backtest_engine.py --compare      # runs ±1 through ±4 and prints comparison table
+python3 backtest_engine.py --compare              # ±1 through ±4, current day config
+python3 backtest_engine.py --compare thu,tue       # comparison for specific days
 ```
-
-This is the fastest way to evaluate thresholds — runs everything in one shot, prints side-by-side table with costs, win rate, net P&L for each threshold.
 
 ---
 
@@ -73,16 +75,21 @@ This is the fastest way to evaluate thresholds — runs everything in one shot, 
 | Nikkei 225 | Yahoo Finance (^N225) | Daily | nikkei.csv |
 | S&P 500 Futures | Yahoo Finance (ES=F) | Daily | sp500_futures.csv |
 
-**Period:** 1 Sep 2021 → 9 Apr 2026 | **~1,125 trading days**
+**Period:** 1 Sep 2021 → 8 Apr 2026 | **~1,123 trading days**
+
+### Dhan API Timezone Fix
+Dhan timestamps are midnight IST (UTC+5:30). When parsed as UTC, every date shifts 1 day
+earlier (Mon→Sun, Tue→Mon, etc.). Fixed in `data_fetcher.py` by adding IST offset.
+One-time patch for existing CSVs: `python3 data_fetcher.py --fix-dates`
 
 ---
 
 ## Signal Engine Logic
 
-### 10–12 Indicators and Scoring (Round 1 added indicators 9–12)
+### 10 Active Indicators
 
 Each indicator scores +1 (bullish), -1 (bearish), or 0 (neutral).
-Total score range: -10 to +10 (or -12 to +12 with PCR + FII/DII).
+Total score range: -10 to +10.
 
 | # | Indicator | Bullish (+1) | Bearish (-1) | Neutral (0) |
 |---|---|---|---|---|
@@ -96,36 +103,51 @@ Total score range: -10 to +10 (or -12 to +12 with PCR + FII/DII).
 | 8 | BN-NF divergence | BN outperforms NF >+0.5% | BN underperforms >-0.5% | within ±0.5% |
 | 9 | HV20 (historical vol) | HV < 12% (calm) | HV > 20% (chaotic) | 12–20% |
 | 10 | BN overnight gap | gap > +0.3% | gap < -0.3% | within ±0.3% |
-| 11 | PCR (Put-Call Ratio) | PCR > 1.2 (contrarian bullish) | PCR < 0.8 (contrarian bearish) | 0.8–1.2 |
-| 12 | FII net flows | FII net > +500Cr | FII net < -500Cr | within ±500Cr |
 
 ### Signal Decision
 - Score ≥ +THRESHOLD → **BUY CALL**
 - Score ≤ -THRESHOLD → **BUY PUT**
 - Otherwise → **NO TRADE**
+- Event days (RBI MPC + Budget) → **forced NO TRADE** regardless of score
+
+### Indicators Tested and Removed (Round 2)
+PCR, OI direction, Max Pain, FII F&O, IV Rank — all 5 degraded performance.
+Root cause: wrong time horizon for intraday trading, redundancy with HV20.
+Raw data files retained in `data/` for possible future research.
 
 ---
 
 ## Trade Rules
 
+### Per-Day Configuration
+
+| Day | DTE | Premium | RR | Breakeven WR |
+|---|---|---|---|---|
+| Monday | 2 | spot × 0.57% | 1.6:1 | 38.5% |
+| Tuesday | 1 | spot × 0.40% | 1.4:1 | 41.7% |
+| Wednesday | 0.25 | spot × 0.20% | 1.0:1 | 50.0% |
+| Thursday | 6 | spot × 0.98% | 2.0:1 | 33.3% |
+| Friday | 5 | spot × 0.89% | 2.0:1 | 33.3% |
+
+### Premium Estimation Formula
+`premium = spot × 0.004 × sqrt(DTE)`
+
+Calibrated from: Tuesday (1 DTE) = 0.4%, Friday (5 DTE) = 0.9%.
+Wednesday uses DTE=0.25 (≈6 hours of trading at open on expiry day).
+
+### Capital Management
+
 | Parameter | Value |
 |---|---|
-| Trade days | Tuesdays and Fridays only |
-| Option type | ATM weekly options (BankNifty) |
-| Lot size | 30 |
-| Risk per trade | 5% of current capital |
-| Stop-loss | 30% of premium |
-| Target (RR) | **1.4:1 on Tuesdays**, **2.0:1 on Fridays** |
-| Entry | Day's open price |
-| Exit | Intraday (same day) — no carryforward |
 | Starting capital | ₹30,000 |
 | Monthly top-up | ₹10,000 added at start of each new month |
-
-### Premium Estimation (no live options data)
-- Tuesday (1 day to expiry): **0.4% of spot price**
-- Friday (5 days to expiry): **0.9% of spot price**
+| Lot size | 30 |
+| Max lots | 20 (cap for liquidity/margin realism) |
+| Risk per trade | 5% of current capital |
+| Stop-loss | 30% of premium |
 
 ### Intraday Exit Simulation (using daily OHLCV)
+- Entry at day's OPEN. Exit attempted intraday — no overnight holding.
 - Uses delta ≈ 0.5 (ATM option) to convert underlying move → option price change
 - CALL: TP hit if day's HIGH ≥ TP level; SL hit if day's LOW ≤ SL level
 - PUT: TP hit if day's LOW ≤ TP level; SL hit if day's HIGH ≥ SL level
@@ -135,8 +157,6 @@ Total score range: -10 to +10 (or -12 to +12 with PCR + FII/DII).
 ---
 
 ## Transaction Costs (Dhan Platform)
-
-Based on Dhan's pricing + NSE statutory charges:
 
 | Charge | Rate | Applies to |
 |---|---|---|
@@ -152,52 +172,82 @@ Based on Dhan's pricing + NSE statutory charges:
 
 ## Backtest Results Log
 
-### Run 1 — Threshold ±4 (8 signals, no costs)
-- Trades: 85 | Trade rate: 37.7%
-- Wins: 43 | Losses: 39 | Win rate: 52.4%
-- Net P&L: ₹1,83,858 | Ending capital: ₹6,63,858
-- Max drawdown: -15.4%
-- **Decision:** Trade rate too low. Tested ±3.
+### Runs 1–4 — Early exploration (Tue/Fri only, 8 indicators, pre-timezone fix)
 
-### Run 2 — Threshold ±3 (8 signals, no costs)
-- Trades: 118 | Trade rate: 52.4% ✅ (above 50% target)
-- Wins: 60 | Losses: 55 | Win rate: 52.2% ✅ (barely changed)
-- Net P&L: ₹4,39,238 | Ending capital: ₹9,69,238
-- Max drawdown: -24.3%
-- **Decision:** Win rate held. Threshold ±3 adopted as default. Testing ±2 next.
+These used **incorrect dates** (Dhan timezone bug — all dates were 1 day early).
+Results are retained for historical reference but should not be compared to corrected runs.
 
-### Run 3 — Threshold ±2 (8 signals, with Dhan costs)
-- Trades: 153 | Trade rate: 68.0% ✅
-- Wins: 82 | Losses: 68 | Partials: 3 | Win rate: 54.7% ✅
-- Gross P&L: ₹10,55,671 | Charges: ₹39,318 | Net P&L: ₹10,16,353
-- Ending capital: ~₹15,46,353 | Max drawdown: -28.8%
-- **Decision:** Best threshold so far. Pending ±1 test.
+| Run | Config | Trades | WR | Net P&L | Decision |
+|---|---|---|---|---|---|
+| 1 | ±4, 8 ind, no costs | 85 | 52.4% | ₹1.84L | Trade rate too low |
+| 2 | ±3, 8 ind, no costs | 118 | 52.2% | ₹4.39L | Better, adopted ±3 |
+| 3 | ±2, 8 ind, with costs | 153 | 54.7% | ₹10.16L | Best so far |
+| 4 | ±3, 8 ind, with costs | 118 | 52.2% | ₹4.03L | Worse than ±2 |
 
-### Run 4 — Threshold ±3 (8 signals, with Dhan costs)
-- Trades: 118 | Trade rate: 52.4%
-- Wins: 60 | Losses: 55 | Win rate: 52.2%
-- Gross P&L: ₹4,42,391 | Charges: ₹39,318 | Net P&L: ₹4,03,073
-- Ending capital: ~₹9,33,073 | Max drawdown: -24.8%
-- **Decision:** Lower P&L and lower win rate than ±2. Not preferred.
+### Run 5 — Threshold sweep (10 indicators, pre-timezone fix)
 
-### Run 5 — Threshold ±1 vs ±2 vs ±3 vs ±4 (10 signals, with Dhan costs) ✅
+| Threshold | Trades | WR | Net P&L | Decision |
+|---|---|---|---|---|
+| **±1** | 209 | 50.7% | **₹6.35L** | Best P&L — adopted |
+| ±2 | 166 | 47.8% | ₹2.03L | Noise |
+| ±3 | 119 | 53.0% | ₹3.82L | Good WR but less P&L |
+| ±4 | 95 | 51.1% | ₹2.11L | Too few trades |
 
-| Threshold | Trades | Win Rate | Gross P&L | Charges | Net P&L | End Capital | Max DD |
-|---|---|---|---|---|---|---|---|
-| **±1** | **209** | 50.7% | ₹6,80,508 | ₹45,577 | **₹6,34,931** | **₹12,04,931** | -31.0% |
-| ±2 | 166 | 47.8% ⚠️ | ₹2,31,483 | ₹28,935 | ₹2,02,548 | ₹7,62,548 | -26.3% |
-| ±3 | 119 | **53.0%** | ₹4,04,905 | ₹22,978 | ₹3,81,927 | ₹9,11,927 | -30.5% |
-| ±4 | 95 | 51.1% | ₹2,25,116 | ₹14,270 | ₹2,10,846 | ₹7,10,846 | **-19.6%** |
+### Run 6 — Round 2 indicators tested and removed
+
+All 5 Round 2 indicators (PCR, OI, MaxPain, FII F&O, IV Rank) degraded performance.
+Win rate dropped from 50.7% → 47.3-47.7%, P&L from ₹6.35L → <₹2L.
+Reverted to 10 indicators. Event filter (RBI MPC + Budget) kept.
+
+### Run 7 — Timezone fix + all 5 days (CURRENT BEST) ✅
+
+**Critical fix discovered:** Dhan API timestamps at midnight IST were parsed as UTC,
+shifting all dates 1 day earlier. What we thought was "Tuesday" data was actually Wednesday
+(expiry day). Patched with `python3 data_fetcher.py --fix-dates`.
+
+**Threshold sweep (all 5 days, corrected data, 20-lot cap):**
+
+| Threshold | Trades | WR | Net P&L | Max DD |
+|---|---|---|---|---|
+| **±1** | **990** | **50.5%** | **₹98.5L** | **-23.2%** |
+| ±2 | 646 | 46.8% | ₹74.0L | -31.9% |
+| ±3 | 507 | 47.7% | ₹60.1L | -34.4% |
+| ±4 | 368 | 49.0% | ₹53.8L | -31.8% |
+
+**Per-day breakdown (±1 threshold, corrected data):**
+
+| Day | Trades | WR | Net P&L | DTE | Breakeven WR | Margin |
+|---|---|---|---|---|---|---|
+| Monday | 209 | 51% | ₹25.9L | 2 | 38.5% | +12.5% |
+| Tuesday | 199 | 53% | ₹15.2L | 1 | 41.7% | +11.3% |
+| Wednesday | 195 | 62% | ₹7.3L | 0.25 | 50.0% | +12.1% |
+| Thursday | 199 | 35% | ₹12.5L | 6 | 33.3% | +1.7% |
+| Friday | 188 | 41% | ₹37.6L | 5 | 33.3% | +7.7% |
+| **Total** | **990** | **50.5%** | **₹98.5L** | | | |
+
+**Day-combination tests:**
+
+| Config | Trades | WR | Net P&L | Max DD |
+|---|---|---|---|---|
+| **Mon–Fri (all 5)** | **990** | **50.5%** | **₹98.5L** | **-23.2%** |
+| Mon+Tue+Thu+Fri | 795 | 46.8% | ₹86.9L | -27.4% |
+| Mon+Tue+Fri | 596 | 49.4% | ₹70.4L | -44.1% |
+| Thu+Tue | 393 | 45.7% | ₹40.8L | -33.3% |
+| Thu alone (±2) | 160 | 35.5% | ₹0.52L | -34.1% |
+| Wed alone | 195 | 62.1% | ₹5.85L | -20.7% |
 
 **Key findings:**
-- ±1 wins on total P&L (₹6.35L) — more volume at 50.7% win rate beats fewer trades at 53%
-- ±2 is the worst: 47.8% win rate (below 50%) — the 2 new indicators reshuffled which days
-  land in this bucket, making it net noise. Avoid ±2 with 10-indicator setup.
-- ±3 has the best win rate but only 90 fewer trades than ±1 give 40% less P&L for same drawdown
-- **Decision: ±1 adopted as default.** Signal score direction matters; magnitude does not add edge.
+- All 5 days gives best P&L AND lowest drawdown (diversification effect)
+- Wednesday has the highest WR (62%) — 0 DTE gamma works with our signals
+- Thursday has the thinnest edge (35% vs 33.3% breakeven) but acts as a diversifier
+- Dropping any day worsens max drawdown — more trading days = smoother equity curve
+- Friday dominates P&L (₹37.6L) because capital has compounded all week by then
 
-**Why ±1 = "no threshold":** With integer-scored indicators, score ≥ 1 = score > 0 = any
-directional lean. Score = 0 (perfect tie) still skips — no edge to exploit.
+**Final result:**
+- ₹5.8L injected (₹30K start + ₹10K/month × 55 months)
+- ₹1.04 Cr ending capital
+- **17x return on capital over 4.5 years**
+- Charges: ₹3.5L (3.4% of gross P&L)
 
 ---
 
@@ -205,125 +255,42 @@ directional lean. Score = 0 (perfect tie) still skips — no edge to exploit.
 
 | Decision | Reason |
 |---|---|
-| Trade only Tue/Fri | Weekly options strategy requires specific entry days |
-| Threshold ±1 (no threshold) | Signal direction matters; score magnitude adds no edge. ±1 gives best P&L (₹6.35L) with 10 indicators. ±2 became noise after adding HV20+BN gap. |
+| Trade all 5 days (Mon–Fri) | Best P&L AND lowest drawdown (-23.2%). Each day profitable with different DTE profile. |
+| Wednesday 0 DTE included | 62% WR — highest of any day. Premium tiny but signal accuracy high. |
+| Threshold ±1 (no threshold) | Signal direction matters; score magnitude adds no edge. ±1 gives best P&L at every config tested. |
+| 20-lot cap | Uncapped lots reached 100+ in later months — unrealistic for liquidity/margin. Cap reduces P&L but makes results credible. |
 | No carryforward | Avoid theta decay overnight; user preference |
 | Delta ≈ 0.5 for exits | ATM option approximation — no live options data available |
-| Dhan API for BN/NF data | Most accurate Indian index data available |
+| Dhan API for BN/NF data | Most accurate Indian index data available (with IST timezone fix) |
 | yfinance for global data | VIX, S&P, Nikkei not available via Dhan |
+
+---
+
+## Event Filter — Calendar Used
+
+RBI MPC decision days (6 per year) + Union Budget day = ~7 no-trade days per year.
+These are hard NONE overrides — score is irrelevant on these days.
+30 event days blocked across the 4.5 year backtest period.
 
 ---
 
 ## Known Limitations
 
 1. **Premium is estimated** — real premiums vary with IV. High-IV days = expensive premiums not captured.
-2. **No options chain data** — PCR, Max Pain, OI not yet included (planned in Round 1 additions).
-3. **Daily OHLCV only** — intraday SL/TP simulation is approximate.
-4. **No news/events filter** — RBI policy days, Budget, F&O expiry weeks not excluded.
-5. **Fixed lot size** — assumes standard lot size of 30 throughout (SEBI may change this).
-
----
-
-## Planned Improvements (Round 1)
-
-- [ ] PCR (Put-Call Ratio) — NSE historical data  
-- [ ] FII/DII net buy-sell data — NSE daily reports  
-- [ ] GIFT Nifty / SGX pre-market gap signal  
-- [ ] BankNifty 20-day historical volatility signal  
-
-**Status: ✅ Signal logic built** — 10 indicators active now (8 original + HV20 + BN overnight gap). PCR and FII/DII need manual data download (instructions below).
-
-### Round 1 — New Indicators Added
-
-| # | Indicator | How it scores | Status |
-|---|---|---|---|
-| 9 | BN 20-day historical vol (HV20) | Low vol (<12%) = +1, High vol (>20%) = -1, mid = 0 | ✅ Auto-computed from banknifty.csv |
-| 10 | BN overnight gap (today open vs yesterday close) | Gap > +0.3% = +1, gap < -0.3% = -1, else 0 | ✅ Auto-computed from banknifty.csv |
-| 11 | PCR — BankNifty Put-Call Ratio | PCR > 1.2 = +1 (fear/contrarian bullish), PCR < 0.8 = -1, else 0 | ⚠️ Needs manual data download |
-| 12 | FII net flows (₹ crore, cash market) | FII net > +500Cr = +1, net < -500Cr = -1, else 0 | ⚠️ Needs manual data download |
-
-### How to Get PCR Data (NSE)
-
-1. Go to: https://www.nseindia.com/report-detail/fo_eq_security
-2. Select: Symbol = BANKNIFTY | From: 01-Sep-2021 | To: 09-Apr-2026
-3. Download CSV
-4. Run: `python3 data_fetcher.py --process-pcr <downloaded_filename.csv>`
-5. This creates `data/pcr.csv` automatically
-
-### How to Get FII/DII Data
-
-1. Go to: https://www.nseindia.com/research/content/US_FiiDiiData.xlsx
-2. Download the Excel file (covers several years of daily FII/DII flows)
-3. Save relevant columns as `data/fii_dii.csv` with columns: `date, fii_net`
-   - `fii_net` = FII net buy/sell in ₹ crore (positive = buying)
-4. Re-run `python3 signal_engine.py 2` — it will auto-detect the file
-
-## Planned Improvements (Round 2)
-
-**Status: ✅ Built** — Run `python3 fetch_round2_data.py` to download NSE data (~6 min), then re-run signal engine.
-
-### Run 6 — Round 2 indicators tested, all removed (10 indicators, with costs) ✅
-
-| Threshold | Win Rate | Net P&L | vs 10-indicator best |
-|---|---|---|---|
-| ±1 (15 ind) | 47.7% ⚠️ | ₹2,04,493 | -68% |
-| ±2 (15 ind) | 47.3% ⚠️ | ₹1,43,710 | -77% |
-| ±3 (15 ind) | 47.3% ⚠️ | ₹91,223 | -86% |
-| ±4 (15 ind) | 50.5% | ₹1,63,117 | -74% |
-
-**All 5 Round 2 indicators added noise and reduced performance.** Reverted to 10 indicators.
-Event filter (RBI + Budget hard NONE) **kept** — good risk management regardless of P&L.
-
-Root causes for why each indicator failed as a scoring signal:
-- PCR, OI direction, Max Pain — weekly convergence signals, not intraday-relevant
-- FII F&O net futures — lagged + hedged, noisy day-to-day
-- IV Rank — redundant with HV20 (double-counted volatility information)
-
-**Current best config: 10 indicators, threshold ±1, event filter ON → ₹6,34,931 net P&L**
-
-### Round 2 — New Indicators
-
-| # | Indicator | Signal logic | Data source |
-|---|---|---|---|
-| 11 | PCR (Put-Call Ratio) | PCR > 1.2 = +1 (fear=contrarian bullish), PCR < 0.8 = -1 | NSE F&O bhavcopy |
-| 12 | OI direction | CALL OI building faster = +1 (bulls entering), PUT faster = -1 | NSE F&O bhavcopy |
-| 13 | Max Pain distance | Price below max pain = +1 (drift up), above = -1 | NSE F&O bhavcopy |
-| 14 | IV Rank (HV Rank) | IV Rank < 30% (calm) = +1, > 70% (stressed) = -1 | Computed from HV20 |
-| 15 | FII net F&O position | FII net long futures = +1, net short = -1 | NSE participant OI |
-| — | Event filter (hard) | RBI MPC + Budget days → forced NONE (hard override, not scored) | Hardcoded calendar |
-
-### How to Get Round 2 Data
-
-```bash
-cd ~/dhan-trading
-python3 fetch_round2_data.py        # ~6 min, downloads 450 files, resumable
-python3 signal_engine.py            # auto-detects new files, shows 15/16 active
-python3 backtest_engine.py          # or --compare for threshold sweep
-```
-
-Files produced: `data/pcr.csv`, `data/max_pain.csv`, `data/oi_buildup.csv`, `data/fii_fo.csv`
-
-### Max Pain — How It Works
-For each possible strike price S, calculate total option WRITER losses:
-- Call writers lose: (S − K) × OI for all calls with K < S (in-the-money)
-- Put writers lose: (K − S) × OI for all puts with K > S (in-the-money)
-- Max Pain = the S where total writer loss is **minimum**
-
-Theory: option sellers (who have the most money and hedging power) push the market toward max pain by expiry. Signal: if BN price is >1% above max pain → drift down likely (bearish). If >1% below → drift up likely (bullish).
-
-### Event Filter — Calendar Used
-RBI MPC decision days (6 per year) + Union Budget day = ~7 no-trade days per year.
-These are hard NONE overrides — score is irrelevant on these days.
+2. **Daily OHLCV only** — intraday SL/TP simulation is approximate.
+3. **20-lot cap** — artificial constraint; real max depends on account margin and liquidity.
+4. **Thursday edge is thin** — 35% WR vs 33.3% breakeven = only 1.7% margin. Could flip in live trading.
+5. **Compounding effect dominates** — Friday's ₹37.6L is partly because capital has grown from Mon–Thu trades. In isolation, Friday contributes ₹3.6L.
+6. **No slippage modeled** — real fills may differ from OHLCV open price, especially on high-vol days.
 
 ---
 
 ## GCP VM Setup Notes
 
 - **VM IP:** 34.45.55.132 (static, whitelisted on Dhan)
-- **Python env:** `~/dhan-env/` (virtualenv)
-- **Activate:** `source ~/dhan-env/bin/activate`
-- **Data files:** `~/dhan-env/data/`
+- **Working directory:** `~/dhan-trading/` (git clone of this repo)
+- **Data files:** `~/dhan-trading/data/`
 - **Dhan token expires:** ~24 hours — regenerate at dhan.co → API settings
 
 ---
-*Last updated: Apr 2026*
+*Last updated: Apr 2026 — Run 7 (corrected timezone, all 5 days, ₹98.5L net P&L)*
