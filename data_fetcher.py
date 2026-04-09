@@ -1,0 +1,149 @@
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os
+import time
+
+load_dotenv()
+TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+
+HEADERS = {
+    "access-token": TOKEN,
+    "client-id": CLIENT_ID,
+    "Content-Type": "application/json"
+}
+
+FROM_DATE = "2021-09-01"
+TO_DATE   = "2026-04-09"
+DATA_DIR  = "data"
+
+
+def fetch_dhan_index(security_id, name, from_date, to_date):
+    """Fetch daily OHLCV from Dhan API in 90-day chunks."""
+    all_frames = []
+    current = datetime.strptime(from_date, "%Y-%m-%d")
+    end     = datetime.strptime(to_date,   "%Y-%m-%d")
+
+    while current < end:
+        chunk_end = min(current + timedelta(days=89), end)
+
+        payload = {
+            "securityId":      security_id,
+            "exchangeSegment": "NSE_INDEX",
+            "instrument":      "INDEX",
+            "expiryCode":      0,
+            "fromDate":        current.strftime("%Y-%m-%d"),
+            "toDate":          chunk_end.strftime("%Y-%m-%d")
+        }
+
+        resp = requests.post(
+            "https://api.dhan.co/v2/charts/historical",
+            headers=HEADERS,
+            json=payload
+        )
+
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("open"):
+                df = pd.DataFrame({
+                    "date":   pd.to_datetime(data["timestamp"], unit="s").normalize(),
+                    "open":   data["open"],
+                    "high":   data["high"],
+                    "low":    data["low"],
+                    "close":  data["close"],
+                    "volume": data["volume"]
+                })
+                all_frames.append(df)
+                print(f"  {name}: {len(df)} rows  "
+                      f"({current.strftime('%Y-%m-%d')} → {chunk_end.strftime('%Y-%m-%d')})")
+        else:
+            print(f"  {name}: ERROR {resp.status_code}  "
+                  f"chunk {current.strftime('%Y-%m-%d')} — {resp.text[:120]}")
+
+        current = chunk_end + timedelta(days=1)
+        time.sleep(0.4)   # stay polite to the API
+
+    if not all_frames:
+        return pd.DataFrame()
+
+    result = (pd.concat(all_frames)
+                .drop_duplicates("date")
+                .sort_values("date")
+                .reset_index(drop=True))
+    return result
+
+
+def fetch_yfinance(ticker, name, from_date, to_date):
+    """Fetch daily OHLCV from Yahoo Finance."""
+    import yfinance as yf
+
+    df = yf.download(ticker, start=from_date, end=to_date,
+                     progress=False, auto_adjust=True)
+    if df.empty:
+        print(f"  {name}: no data returned")
+        return pd.DataFrame()
+
+    # yfinance ≥0.2 returns MultiIndex columns — flatten them
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.columns = [c.lower() for c in df.columns]
+
+    df = df.reset_index()
+    df.rename(columns={"date": "date", "index": "date"}, inplace=True)
+    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    df = (df[["date", "open", "high", "low", "close", "volume"]]
+            .sort_values("date")
+            .reset_index(drop=True))
+
+    print(f"  {name}: {len(df)} rows")
+    return df
+
+
+def main():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    # ── Dhan API indices ──────────────────────────────────────────────
+    print("\n=== BankNifty (Dhan API) ===")
+    bn = fetch_dhan_index("25", "BankNifty", FROM_DATE, TO_DATE)
+    if not bn.empty:
+        bn.to_csv(f"{DATA_DIR}/banknifty.csv", index=False)
+        print(f"  → Saved banknifty.csv  ({len(bn)} rows total)\n")
+
+    print("=== Nifty50 (Dhan API) ===")
+    nf = fetch_dhan_index("13", "Nifty50", FROM_DATE, TO_DATE)
+    if not nf.empty:
+        nf.to_csv(f"{DATA_DIR}/nifty50.csv", index=False)
+        print(f"  → Saved nifty50.csv  ({len(nf)} rows total)\n")
+
+    # ── Yahoo Finance (international data) ───────────────────────────
+    print("=== India VIX (Yahoo Finance) ===")
+    vix = fetch_yfinance("^INDIAVIX", "India VIX", FROM_DATE, TO_DATE)
+    if not vix.empty:
+        vix.to_csv(f"{DATA_DIR}/india_vix.csv", index=False)
+        print(f"  → Saved india_vix.csv  ({len(vix)} rows total)\n")
+
+    print("=== S&P 500 (Yahoo Finance) ===")
+    sp500 = fetch_yfinance("^GSPC", "S&P500", FROM_DATE, TO_DATE)
+    if not sp500.empty:
+        sp500.to_csv(f"{DATA_DIR}/sp500.csv", index=False)
+        print(f"  → Saved sp500.csv  ({len(sp500)} rows total)\n")
+
+    print("=== Nikkei 225 (Yahoo Finance) ===")
+    nikkei = fetch_yfinance("^N225", "Nikkei225", FROM_DATE, TO_DATE)
+    if not nikkei.empty:
+        nikkei.to_csv(f"{DATA_DIR}/nikkei.csv", index=False)
+        print(f"  → Saved nikkei.csv  ({len(nikkei)} rows total)\n")
+
+    print("=== S&P 500 Futures (Yahoo Finance) ===")
+    spf = fetch_yfinance("ES=F", "S&P Futures", FROM_DATE, TO_DATE)
+    if not spf.empty:
+        spf.to_csv(f"{DATA_DIR}/sp500_futures.csv", index=False)
+        print(f"  → Saved sp500_futures.csv  ({len(spf)} rows total)\n")
+
+    print("=== All data files saved to data/ folder ===")
+
+
+if __name__ == "__main__":
+    main()
