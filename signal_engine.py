@@ -1,8 +1,12 @@
 import pandas as pd
 import numpy as np
 import os
+import sys
 
 DATA_DIR = "data"
+
+# ── Change this to test different thresholds (2, 3, 4) ───────────────────────
+SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -129,7 +133,7 @@ def generate_signals(df):
     for _, row in trade_days.iterrows():
         score, s = score_row(row)
 
-        signal = "CALL" if score >= 3 else ("PUT" if score <= -3 else "NONE")
+        signal = "CALL" if score >= SIGNAL_THRESHOLD else ("PUT" if score <= -SIGNAL_THRESHOLD else "NONE")
 
         rows.append({
             "date":       row["date"].date(),
@@ -154,7 +158,7 @@ def generate_signals(df):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Loading data...")
+    print(f"Loading data...  [Signal threshold: ±{SIGNAL_THRESHOLD}]")
     df = load_data()
     print(f"  Merged dataset: {len(df)} trading days  "
           f"({df['date'].min().date()} to {df['date'].max().date()})")
