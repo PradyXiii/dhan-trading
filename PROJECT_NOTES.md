@@ -9,7 +9,7 @@ Written as a reference for future work.
 
 A fully automated options trading system for BankNifty weekly ATM options on the NSE.
 
-- Runs on a **GCP VM** (us-central1, IP 34.45.55.132, whitelisted on Dhan)
+- Runs on a **GCP VM** (us-central1, IP your.vm.ip.address, whitelisted on Dhan)
 - **No human input during market hours** — cron fires at 9:15 AM IST, trade placed, Telegram sent
 - **Backtested on 4.5 years** of daily data (Sep 2021 – Apr 2026)
 - **Final result**: ₹30K starting capital + ₹10K/month → ₹1.51 Cr in 4.5 years (26× return)
@@ -188,7 +188,7 @@ Ending capital  : ₹1.51 Cr
 ### Infrastructure
 - **VM**: GCP us-central1 (Iowa), e2-micro or similar, ~$5/month
   - Region doesn't matter for trading — VM is UTC, cron converts to IST
-  - IP 34.45.55.132 whitelisted on Dhan API
+  - IP your.vm.ip.address whitelisted on Dhan API
 - **Cron**: `45 3 * * 1-5` = 3:45 AM UTC = 9:15 AM IST
 
 ### Daily Routine

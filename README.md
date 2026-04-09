@@ -4,18 +4,8 @@ Fully automated weekly BankNifty ATM options system. Runs every trading day at 9
 
 ---
 
-## Backtest Results — Sep 2021 to Apr 2026
-
-| Metric | Value |
-|---|---|
-| Net P&L | ₹1.45 Cr |
-| Capital injected | ₹5.8L (₹30K start + ₹10K/month × 55 months) |
-| Ending capital | ₹1.51 Cr |
-| Return on capital | **26×** in 4.5 years |
-| Win rate | 54.6% |
-| Total trades | 892 |
-| Max drawdown | −24.9% |
-| Transaction costs | ₹3.15L (2.1% of gross P&L) |
+> **Disclaimer**
+> This project is for **educational and research purposes only**. Nothing in this repository constitutes financial advice, investment advice, or a recommendation to buy or sell any financial instrument. Trading options and derivatives involves substantial risk of loss and is not suitable for all investors. Past backtest performance does not guarantee future results. Always consult a SEBI-registered investment advisor before making any trading or investment decisions. The authors and contributors of this project accept no liability for any financial losses incurred from using this software.
 
 ---
 
@@ -117,10 +107,10 @@ nano .env
 ```
 
 ```env
-DHAN_ACCESS_TOKEN=eyJ...      # from dhan.co → API settings (expires every 24h)
-DHAN_CLIENT_ID=1111158553
-TELEGRAM_BOT_TOKEN=85685...
-TELEGRAM_CHAT_ID=6152227460
+DHAN_ACCESS_TOKEN=eyJ...           # from dhan.co → API settings (expires every 24h)
+DHAN_CLIENT_ID=your_client_id      # found in Dhan API settings
+TELEGRAM_BOT_TOKEN=your_bot_token  # from t.me/BotFather
+TELEGRAM_CHAT_ID=your_chat_id      # your Telegram user/channel ID
 ```
 
 ### 3. Fetch historical data + run backtest
@@ -179,16 +169,16 @@ An MCP server (`dhan_mcp.py`) lets you query your live Dhan positions directly f
 > "What's today's P&L?"
 > "Did my stop-loss trigger?"
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude/claude.json`:
 
 ```json
 {
-  "mcpServers": {
-    "dhan": {
-      "command": "python3",
-      "args": ["/home/user/dhan-trading/dhan_mcp.py"]
+    "mcpServers": {
+        "dhan": {
+            "command": "python3",
+            "args": ["/home/user/dhan-trading/dhan_mcp.py"]
+        }
     }
-  }
 }
 ```
 
@@ -211,8 +201,8 @@ Add to `~/.claude/settings.json`:
 
 | Decision | Why |
 |---|---|
-| Directional long (not straddle) | BN avg daily range ~586 pts < straddle breakeven (800–1960 pts). Directional wins by ₹1.04 Cr vs straddle −₹5.4L loss |
-| 4 indicators (not 10) | Attribution showed macro signals (US/Japan) are noise. India-only technical signals deliver +47% more P&L |
+| Directional long (not straddle) | BN avg daily range ~586 pts < straddle breakeven (800–1960 pts). Directional significantly outperforms straddle across the backtest period |
+| 4 indicators (not 10) | Attribution showed macro signals (US/Japan) are noise. India-only technical signals significantly outperform the full 10-indicator set |
 | All 5 days including Wed (0 DTE) | Wed has 62% WR — highest of any day. All-5-days gives best P&L and lowest drawdown |
 | Threshold ±1 | Signal direction matters; score magnitude adds no edge |
 | 20-lot cap | Uncapped lots hit 100+ late in backtest — unrealistic for liquidity and margin |
@@ -220,4 +210,8 @@ Add to `~/.claude/settings.json`:
 
 ---
 
-*Backtest period: Sep 2021 – Apr 2026 | Strategy: BankNifty ATM weekly options, intraday, MIS*
+*Strategy: BankNifty ATM weekly options, intraday, MIS*
+
+---
+
+> **Risk Warning**: Options trading carries a high level of risk and may not be appropriate for all investors. You can lose more than your initial investment. This system is provided as-is, with no warranty of fitness for live trading. Use at your own risk.
