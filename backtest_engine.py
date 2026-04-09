@@ -17,20 +17,23 @@ PREMIUM_K = 0.004
 MAX_LOTS  = 20      # cap to keep backtest realistic (liquidity + margin constraints)
 
 # Days to expiry per weekday (BankNifty expires Wednesday)
-# Wednesday excluded — trading 0 DTE on expiry day is a different risk profile
+# Wednesday = 0 DTE (expiry day): ~6 hours of trading at open ≈ 0.25 of a day
 DAY_DTE = {
-    "Monday":   2,   # Mon → Wed = 2 days
-    "Tuesday":  1,   # Tue → Wed = 1 day
-    "Thursday": 6,   # Thu → next Wed = 6 days
-    "Friday":   5,   # Fri → next Wed = 5 days
+    "Monday":    2,      # Mon → Wed = 2 days
+    "Tuesday":   1,      # Tue → Wed = 1 day
+    "Wednesday": 0.25,   # expiry day — ~6 hrs trading left at open
+    "Thursday":  6,      # Thu → next Wed = 6 days
+    "Friday":    5,      # Fri → next Wed = 5 days
 }
 
 # Reward-to-risk ratios per day (higher DTE = richer premium = can target bigger)
+# Wednesday uses 1.0 (1:1 RR) — fast gamma, take quick exits on expiry day
 DAY_RR = {
-    "Monday":   1.6,
-    "Tuesday":  1.4,
-    "Thursday": 2.0,
-    "Friday":   2.0,
+    "Monday":    1.6,
+    "Tuesday":   1.4,
+    "Wednesday": 1.0,
+    "Thursday":  2.0,
+    "Friday":    2.0,
 }
 
 # ── Dhan brokerage + statutory charges (per round-trip trade) ─────────────────
