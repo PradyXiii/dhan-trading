@@ -211,7 +211,9 @@ def print_summary(trade_df, monthly):
     total_pnl     = active["pnl"].sum()
     total_charges = trade_df["charges"].sum() if "charges" in trade_df.columns else 0
     gross_pnl     = total_pnl + total_charges
-    topups        = (trade_df["capital_before"].diff() > 5000).sum()
+    # Count actual top-ups: derive from ending capital, starting capital, and net P&L
+    actual_topups = round((end_cap - start_cap - total_pnl) / MONTHLY_TOPUP)
+    topups        = max(0, actual_topups)
 
     # Max drawdown on capital series
     cap_series  = trade_df["capital_after"]
