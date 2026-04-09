@@ -127,7 +127,7 @@ def fetch_nse_pcr(from_date, to_date):
 
     Returns empty DataFrame if data not available.
     """
-    print("  PCR: NSE historical data requires manual download (see BACKTEST_LOG.md)")
+    print("  PCR: NSE historical data requires manual download (see README.md for instructions)")
     print("  Skipping PCR fetch — add pcr.csv manually to data/ folder to enable this signal.")
     return pd.DataFrame()
 
@@ -146,7 +146,7 @@ def fetch_nse_fii_dii(from_date, to_date):
 
     Returns empty DataFrame if data not available.
     """
-    print("  FII/DII: NSE historical data requires manual download (see BACKTEST_LOG.md)")
+    print("  FII/DII: NSE historical data requires manual download (see README.md for instructions)")
     print("  Skipping FII/DII fetch — add fii_dii.csv manually to data/ folder to enable this signal.")
     return pd.DataFrame()
 
