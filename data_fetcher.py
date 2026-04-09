@@ -47,8 +47,13 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
         if resp.status_code == 200:
             data = resp.json()
             if data.get("open"):
+                # Dhan timestamps are midnight IST (UTC+5:30), not UTC.
+                # Parsing as UTC shifts every date 1 day earlier (Mon → Sun, etc.)
+                # Fix: add the IST offset before normalising to recover the correct date.
+                _ts = (pd.to_datetime(data["timestamp"], unit="s")
+                       + pd.Timedelta(hours=5, minutes=30)).normalize()
                 df = pd.DataFrame({
-                    "date":   pd.to_datetime(data["timestamp"], unit="s").normalize(),
+                    "date":   _ts,
                     "open":   data["open"],
                     "high":   data["high"],
                     "low":    data["low"],
@@ -184,8 +189,52 @@ def process_pcr_from_nse_bhavcopy(bhavcopy_file):
         return pd.DataFrame()
 
 
+def fix_dhan_dates():
+    """
+    One-time patch for the Dhan API timezone bug.
+
+    Root cause: Dhan timestamps are midnight IST (UTC+5:30).  When parsed as UTC
+    the date rolls back to the previous calendar day, so every weekday shifts:
+        Mon NSE data → stored as Sun
+        Tue NSE data → stored as Mon
+        Wed NSE data → stored as Tue  (expiry day — wrongly included as "Tuesday")
+        Thu NSE data → stored as Wed  (wrongly excluded as "Wednesday"/expiry)
+        Fri NSE data → stored as Thu
+
+    Fix: add +1 day to all dates in banknifty.csv and nifty50.csv.
+    Weekend dates that result (from the 4 garbage Friday / 2 Saturday rows) are dropped.
+    """
+    for fname in [f"{DATA_DIR}/banknifty.csv", f"{DATA_DIR}/nifty50.csv"]:
+        if not os.path.exists(fname):
+            print(f"  {fname}: not found, skipping")
+            continue
+        df = pd.read_csv(fname, parse_dates=["date"])
+        before = df["date"].dt.day_name().value_counts().sort_index()
+        df["date"] = df["date"] + pd.Timedelta(days=1)
+        df = df[df["date"].dt.weekday < 5]           # drop any resulting weekend rows
+        df = (df.drop_duplicates("date")
+                .sort_values("date")
+                .reset_index(drop=True))
+        after = df["date"].dt.day_name().value_counts().sort_index()
+        df.to_csv(fname, index=False)
+        print(f"\n  {fname}  ({len(df)} rows)")
+        print(f"  {'Day':<12} {'Before':>8}  {'After':>8}")
+        print(f"  {'─'*32}")
+        for day in ["Monday","Tuesday","Wednesday","Thursday","Friday"]:
+            b = before.get(day, 0)
+            a = after.get(day, 0)
+            print(f"  {day:<12} {b:>8}  {a:>8}")
+    print(f"\n  Done. Re-run: python3 signal_engine.py && python3 backtest_engine.py")
+
+
 def main():
     import sys as _sys
+
+    # Handle --fix-dates flag (one-time timezone patch for existing CSVs)
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--fix-dates":
+        print("=== Fixing Dhan API timezone bug in existing CSV files ===")
+        fix_dhan_dates()
+        return
 
     # Handle --process-pcr flag
     if len(_sys.argv) >= 3 and _sys.argv[1] == "--process-pcr":
