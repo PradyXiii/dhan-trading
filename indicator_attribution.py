@@ -273,6 +273,22 @@ def main():
         "All 10 combined ★"   : ["s_ema20", "s_rsi14", "s_trend5", "s_vix",
                                   "s_sp500", "s_nikkei", "s_spf_gap", "s_bn_nf_div",
                                   "s_hv20", "s_bn_gap"],
+        # ── Targeted tests based on attribution results ───────────────────────
+        # Remove the 4 clear losers (BN gap, Nikkei, HV20, S&P futures) + S&P close
+        "No macro (5 India-only)": ["s_ema20", "s_rsi14", "s_trend5",
+                                    "s_vix", "s_bn_nf_div"],
+        # Remove just the global macro (keep HV20 as vol filter)
+        "No macro (6 India+vol)" : ["s_ema20", "s_rsi14", "s_trend5",
+                                    "s_vix", "s_bn_nf_div", "s_hv20"],
+        # Top 2 standalone performers only
+        "Top 2: trend5 + BN-NF"  : ["s_trend5", "s_bn_nf_div"],
+        # Top 3
+        "Top 3: +EMA20"          : ["s_trend5", "s_bn_nf_div", "s_ema20"],
+        # Top 3 + VIX
+        "Top 4: +VIX"            : ["s_trend5", "s_bn_nf_div", "s_ema20", "s_vix"],
+        # Top 4 + RSI (all technical, no macro, no HV20, no BN gap)
+        "Top 5: +RSI14 (no macro)": ["s_trend5", "s_bn_nf_div", "s_ema20",
+                                      "s_vix", "s_rsi14"],
     }
 
     # ── Run individual indicator backtests ────────────────────────────────────
