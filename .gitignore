@@ -1,0 +1,12 @@
+# Secret credentials - never upload these
+.env
+
+# Python cache files - not needed in version control
+__pycache__/
+*.pyc
+*.pyo
+
+# Data files generated during backtest
+*.csv
+*.json
+data/
