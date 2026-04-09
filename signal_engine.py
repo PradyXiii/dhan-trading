@@ -103,10 +103,20 @@ def load_data():
 
     # ── Data quality check ────────────────────────────────────────────────────
     wd_counts = result["date"].dt.day_name().value_counts()
+    bad_days = []
     for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
         n = wd_counts.get(day, 0)
         if n < 50:
-            print(f"  WARNING: Only {n} {day}s in dataset — data gap detected!")
+            bad_days.append(f"{day}({n})")
+    if bad_days:
+        print(f"  WARNING: data gap detected — {', '.join(bad_days)} have very few rows!")
+        print(f"  Run: python3 data_fetcher.py --fix-dates  to patch the timezone bug.")
+    # Sanity: no Sundays or Saturdays should appear (they indicate un-fixed data)
+    for day in ["Sunday", "Saturday"]:
+        n = wd_counts.get(day, 0)
+        if n > 5:
+            print(f"  WARNING: {n} {day}s in dataset — Dhan timezone bug not fixed!")
+            print(f"  Run: python3 data_fetcher.py --fix-dates  to patch.")
 
     return result
 
