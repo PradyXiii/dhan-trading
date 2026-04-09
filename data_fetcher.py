@@ -100,7 +100,107 @@ def fetch_yfinance(ticker, name, from_date, to_date):
     return df
 
 
+def fetch_nse_pcr(from_date, to_date):
+    """
+    Fetch BankNifty Put-Call Ratio from NSE historical data.
+
+    NSE provides a daily bhav copy for F&O at:
+    https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv  (lots reference)
+
+    For PCR we use the NSE F&O bhavcopy which has OI data.
+    However, NSE's historical PCR is not available as a direct endpoint.
+
+    Strategy: use yfinance to approximate PCR via a proxy if direct NSE
+    download fails. For now this fetches the NSE option chain PCR endpoint
+    for each date — this works only for recent dates.
+
+    NOTE: For historical PCR (2021-2026), users need to download NSE's
+    historical F&O data manually from:
+    https://www.nseindia.com/report-detail/fo_eq_security
+    Select: BankNifty | Expiry: All | From/To dates → download CSV
+    Then run: python3 data_fetcher.py --process-pcr <downloaded_file.csv>
+
+    Returns empty DataFrame if data not available.
+    """
+    print("  PCR: NSE historical data requires manual download (see BACKTEST_LOG.md)")
+    print("  Skipping PCR fetch — add pcr.csv manually to data/ folder to enable this signal.")
+    return pd.DataFrame()
+
+
+def fetch_nse_fii_dii(from_date, to_date):
+    """
+    Fetch FII/DII net cash-market buy/sell from NSE daily reports.
+
+    NSE publishes FII/DII activity at:
+    https://www.nseindia.com/api/fiidiiTradeReact?type=fiiDii
+    (Current data only — not historical)
+
+    For historical FII/DII data (2021–2026):
+    Download from: https://www.nseindia.com/research/content/US_FiiDiiData.xlsx
+    or from: https://www.nsdl.co.in/download/FPI_Monitor.zip
+
+    Returns empty DataFrame if data not available.
+    """
+    print("  FII/DII: NSE historical data requires manual download (see BACKTEST_LOG.md)")
+    print("  Skipping FII/DII fetch — add fii_dii.csv manually to data/ folder to enable this signal.")
+    return pd.DataFrame()
+
+
+def process_pcr_from_nse_bhavcopy(bhavcopy_file):
+    """
+    Process NSE F&O bhavcopy CSV to extract daily PCR for BankNifty.
+
+    NSE bhavcopy columns include: SYMBOL, EXPIRY_DT, OPTION_TYP, OPEN_INT etc.
+    PCR = sum(PUT open interest) / sum(CALL open interest) for all BN strikes on that date.
+
+    Usage: python3 data_fetcher.py --process-pcr fo_mktlots_YYYYMMDD.csv
+    """
+    print(f"Processing NSE bhavcopy: {bhavcopy_file}")
+    try:
+        df = pd.read_csv(bhavcopy_file)
+        df.columns = [c.strip().lower() for c in df.columns]
+
+        # Filter BankNifty options
+        bn = df[df["symbol"].str.strip() == "BANKNIFTY"].copy()
+        if bn.empty:
+            print("  No BANKNIFTY rows found in bhavcopy")
+            return pd.DataFrame()
+
+        bn["date"] = pd.to_datetime(bn["timestamp"].str.strip()
+                                    if "timestamp" in bn.columns
+                                    else bn["expiry_dt"].str.strip(),
+                                    format="%d-%b-%Y", errors="coerce")
+
+        # Daily PCR: sum PUT OI / sum CALL OI
+        puts  = bn[bn["option_typ"].str.strip() == "PE"].groupby("date")["open_int"].sum()
+        calls = bn[bn["option_typ"].str.strip() == "CE"].groupby("date")["open_int"].sum()
+        pcr   = (puts / calls.replace(0, np.nan)).reset_index()
+        pcr.columns = ["date", "pcr"]
+        pcr = pcr.dropna().sort_values("date").reset_index(drop=True)
+        print(f"  Extracted PCR for {len(pcr)} days")
+        return pcr
+    except Exception as e:
+        print(f"  Error processing bhavcopy: {e}")
+        return pd.DataFrame()
+
+
 def main():
+    import sys as _sys
+
+    # Handle --process-pcr flag
+    if len(_sys.argv) >= 3 and _sys.argv[1] == "--process-pcr":
+        pcr = process_pcr_from_nse_bhavcopy(_sys.argv[2])
+        if not pcr.empty:
+            out = f"{DATA_DIR}/pcr.csv"
+            os.makedirs(DATA_DIR, exist_ok=True)
+            # Merge with existing pcr.csv if it exists
+            if os.path.exists(out):
+                existing = pd.read_csv(out, parse_dates=["date"])
+                pcr = pd.concat([existing, pcr]).drop_duplicates("date").sort_values("date")
+            pcr.to_csv(out, index=False)
+            print(f"  → Saved {out}  ({len(pcr)} rows total)")
+        return
+
     os.makedirs(DATA_DIR, exist_ok=True)
 
     # ── Dhan API indices ──────────────────────────────────────────────
@@ -140,6 +240,15 @@ def main():
     if not spf.empty:
         spf.to_csv(f"{DATA_DIR}/sp500_futures.csv", index=False)
         print(f"  → Saved sp500_futures.csv  ({len(spf)} rows total)\n")
+
+    # ── Round 1: PCR and FII/DII (inform user about manual steps) ────
+    print("=== PCR — BankNifty Put-Call Ratio ===")
+    fetch_nse_pcr(FROM_DATE, TO_DATE)
+    print()
+
+    print("=== FII/DII Net Flows ===")
+    fetch_nse_fii_dii(FROM_DATE, TO_DATE)
+    print()
 
     print("=== All data files saved to data/ folder ===")
 
