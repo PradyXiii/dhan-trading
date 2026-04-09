@@ -31,7 +31,7 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
 
         payload = {
             "securityId":      security_id,
-            "exchangeSegment": "IDX_I",
+            "exchangeSegment": "IDX_I",  # correct segment for NSE indices
             "instrument":      "INDEX",
             "expiryCode":      0,
             "fromDate":        current.strftime("%Y-%m-%d"),
@@ -85,18 +85,12 @@ def fetch_yfinance(ticker, name, from_date, to_date):
         print(f"  {name}: no data returned")
         return pd.DataFrame()
 
-    # reset_index first so the date index becomes a regular column
     df = df.reset_index()
-
-    # yfinance ≥0.2 returns MultiIndex columns — flatten them
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-
-    # lowercase everything (handles 'Date', 'Open', etc.)
     df.columns = [c.lower() for c in df.columns]
-
-    # yfinance sometimes names the date column 'datetime' instead of 'date'
-    df.rename(columns={"datetime": "date"}, inplace=True)
+    # yfinance index is named 'Date' or 'Datetime' depending on version
+    df.rename(columns={"datetime": "date", "Date": "date", "Datetime": "date"}, inplace=True)
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
     df = (df[["date", "open", "high", "low", "close", "volume"]]
             .sort_values("date")
