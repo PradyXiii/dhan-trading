@@ -260,10 +260,41 @@ directional lean. Score = 0 (perfect tie) still skips — no edge to exploit.
 
 ## Planned Improvements (Round 2)
 
-- [ ] Max Pain level signal
-- [ ] Open Interest buildup direction
-- [ ] IV Rank / IVP (needs historical options chain)
-- [ ] News/event calendar filter (avoid RBI, Budget days)
+**Status: ✅ Built** — Run `python3 fetch_round2_data.py` to download NSE data (~6 min), then re-run signal engine.
+
+### Round 2 — New Indicators
+
+| # | Indicator | Signal logic | Data source |
+|---|---|---|---|
+| 11 | PCR (Put-Call Ratio) | PCR > 1.2 = +1 (fear=contrarian bullish), PCR < 0.8 = -1 | NSE F&O bhavcopy |
+| 12 | OI direction | CALL OI building faster = +1 (bulls entering), PUT faster = -1 | NSE F&O bhavcopy |
+| 13 | Max Pain distance | Price below max pain = +1 (drift up), above = -1 | NSE F&O bhavcopy |
+| 14 | IV Rank (HV Rank) | IV Rank < 30% (calm) = +1, > 70% (stressed) = -1 | Computed from HV20 |
+| 15 | FII net F&O position | FII net long futures = +1, net short = -1 | NSE participant OI |
+| — | Event filter (hard) | RBI MPC + Budget days → forced NONE (hard override, not scored) | Hardcoded calendar |
+
+### How to Get Round 2 Data
+
+```bash
+cd ~/dhan-trading
+python3 fetch_round2_data.py        # ~6 min, downloads 450 files, resumable
+python3 signal_engine.py            # auto-detects new files, shows 15/16 active
+python3 backtest_engine.py          # or --compare for threshold sweep
+```
+
+Files produced: `data/pcr.csv`, `data/max_pain.csv`, `data/oi_buildup.csv`, `data/fii_fo.csv`
+
+### Max Pain — How It Works
+For each possible strike price S, calculate total option WRITER losses:
+- Call writers lose: (S − K) × OI for all calls with K < S (in-the-money)
+- Put writers lose: (K − S) × OI for all puts with K > S (in-the-money)
+- Max Pain = the S where total writer loss is **minimum**
+
+Theory: option sellers (who have the most money and hedging power) push the market toward max pain by expiry. Signal: if BN price is >1% above max pain → drift down likely (bearish). If >1% below → drift up likely (bullish).
+
+### Event Filter — Calendar Used
+RBI MPC decision days (6 per year) + Union Budget day = ~7 no-trade days per year.
+These are hard NONE overrides — score is irrelevant on these days.
 
 ---
 

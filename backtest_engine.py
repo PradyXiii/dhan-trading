@@ -65,6 +65,11 @@ def load_signals():
     return df[df["signal"].isin(["CALL", "PUT"])].reset_index(drop=True)
 
 
+def load_all_signals():
+    """Load full signals including NONE rows — used for summary stats."""
+    return pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+
+
 def load_bn_ohlcv():
     df = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
     return df.set_index("date")
@@ -226,12 +231,20 @@ def print_summary(trade_df, monthly, threshold=None):
     total   = len(active)
     skipped = (trade_df["result"].str.startswith("SKIPPED")).sum()
 
+    # Event-skipped days — read from signals.csv if available
+    event_skipped = 0
+    try:
+        all_sig = load_all_signals()
+        if "event_day" in all_sig.columns:
+            event_skipped = int(all_sig["event_day"].sum())
+    except Exception:
+        pass
+
     start_cap     = STARTING_CAPITAL
     end_cap       = trade_df["capital_after"].iloc[-1]
     total_pnl     = active["pnl"].sum()
     total_charges = trade_df["charges"].sum() if "charges" in trade_df.columns else 0
     gross_pnl     = total_pnl + total_charges
-    # Count actual top-ups: derive from ending capital, starting capital, and net P&L
     actual_topups = round((end_cap - start_cap - total_pnl) / MONTHLY_TOPUP)
     topups        = max(0, actual_topups)
 
@@ -275,9 +288,12 @@ def print_summary(trade_df, monthly, threshold=None):
     print(f"  {'TOTAL CHARGES':<20}: ₹{total_charges:>8,.2f}  ({charges_pct:.1f}% of gross P&L)")
     print(f"  {'Avg cost/trade':<20}: ₹{total_charges/total:>8,.2f}")
     print(f"{'─'*60}")
-    print(f"  Signals generated   : {total + skipped}")
-    print(f"  Trades taken        : {total}  (trade rate: {total/(total+skipped)*100:.1f}%)")
+    total_signals = total + skipped + event_skipped
+    print(f"  Tue/Fri days total  : {total_signals}")
+    print(f"  Trades taken        : {total}  ({total/total_signals*100:.1f}%)")
     print(f"  Skipped (low cap)   : {skipped}")
+    if event_skipped:
+        print(f"  Skipped (event day) : {event_skipped}  ← RBI MPC / Budget")
     print(f"{'─'*60}")
     print(f"  Wins                : {wins}  ({wins/total*100:.1f}%)")
     print(f"  Losses              : {losses}  ({losses/total*100:.1f}%)")
