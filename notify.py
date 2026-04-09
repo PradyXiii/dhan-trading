@@ -4,6 +4,7 @@ Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from .env
 """
 
 import os
+import re
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -13,28 +14,37 @@ _BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 _CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
 
 
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text)
+
+
+def log(message: str):
+    """Print to console/log only — does NOT send to Telegram."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {_strip_html(message)}")
+
+
 def send(message: str, silent: bool = False) -> bool:
     """
-    Send a Telegram message. Returns True on success.
-    If credentials not set, just prints to stdout (dev mode).
+    Send a message to Telegram AND print to console.
+    silent=True → print to console only, skip Telegram (for debug/intermediate steps).
     """
     timestamp = datetime.now().strftime("%H:%M:%S")
-    full_msg  = f"[{timestamp}] {message}"
+    print(f"[{timestamp}] {_strip_html(message)[:120]}")
 
-    # Always print to console / log file
-    print(full_msg)
+    if silent:
+        return True   # console-only; do not send to Telegram
 
     if not _BOT_TOKEN or not _CHAT_ID:
-        return True  # silent no-op if Telegram not configured
+        return True   # Telegram not configured — silent no-op
 
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{_BOT_TOKEN}/sendMessage",
             json={
-                "chat_id":              _CHAT_ID,
-                "text":                 full_msg,
-                "parse_mode":           "HTML",
-                "disable_notification": silent,
+                "chat_id":    _CHAT_ID,
+                "text":       message,
+                "parse_mode": "HTML",
             },
             timeout=10,
         )
