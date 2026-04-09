@@ -180,12 +180,24 @@ Based on Dhan's pricing + NSE statutory charges:
 - Ending capital: ~₹9,33,073 | Max drawdown: -24.8%
 - **Decision:** Lower P&L and lower win rate than ±2. Not preferred.
 
-### Run 5 — Threshold ±1 vs ±2 vs ±3 vs ±4 (10 signals, with Dhan costs)
-*(pending — run `python3 backtest_engine.py --compare` on GCP VM after Round 1 signal additions)*
+### Run 5 — Threshold ±1 vs ±2 vs ±3 vs ±4 (10 signals, with Dhan costs) ✅
 
-**Why ±1 matters:** With 10 integer-scored indicators, threshold ±1 is the minimum possible
-directional edge — any Tue/Fri where even 1 more indicator is bullish/bearish gets a trade.
-Score=0 (perfect tie across all 10 indicators) still gets no trade — no edge to exploit.
+| Threshold | Trades | Win Rate | Gross P&L | Charges | Net P&L | End Capital | Max DD |
+|---|---|---|---|---|---|---|---|
+| **±1** | **209** | 50.7% | ₹6,80,508 | ₹45,577 | **₹6,34,931** | **₹12,04,931** | -31.0% |
+| ±2 | 166 | 47.8% ⚠️ | ₹2,31,483 | ₹28,935 | ₹2,02,548 | ₹7,62,548 | -26.3% |
+| ±3 | 119 | **53.0%** | ₹4,04,905 | ₹22,978 | ₹3,81,927 | ₹9,11,927 | -30.5% |
+| ±4 | 95 | 51.1% | ₹2,25,116 | ₹14,270 | ₹2,10,846 | ₹7,10,846 | **-19.6%** |
+
+**Key findings:**
+- ±1 wins on total P&L (₹6.35L) — more volume at 50.7% win rate beats fewer trades at 53%
+- ±2 is the worst: 47.8% win rate (below 50%) — the 2 new indicators reshuffled which days
+  land in this bucket, making it net noise. Avoid ±2 with 10-indicator setup.
+- ±3 has the best win rate but only 90 fewer trades than ±1 give 40% less P&L for same drawdown
+- **Decision: ±1 adopted as default.** Signal score direction matters; magnitude does not add edge.
+
+**Why ±1 = "no threshold":** With integer-scored indicators, score ≥ 1 = score > 0 = any
+directional lean. Score = 0 (perfect tie) still skips — no edge to exploit.
 
 ---
 
@@ -194,7 +206,7 @@ Score=0 (perfect tie across all 10 indicators) still gets no trade — no edge t
 | Decision | Reason |
 |---|---|
 | Trade only Tue/Fri | Weekly options strategy requires specific entry days |
-| Threshold ±2 > ±3 > ±4 | At ±2: 68% trade rate, 54.7% win rate, ₹10.16L net P&L. Best on all metrics. |
+| Threshold ±1 (no threshold) | Signal direction matters; score magnitude adds no edge. ±1 gives best P&L (₹6.35L) with 10 indicators. ±2 became noise after adding HV20+BN gap. |
 | No carryforward | Avoid theta decay overnight; user preference |
 | Delta ≈ 0.5 for exits | ATM option approximation — no live options data available |
 | Dhan API for BN/NF data | Most accurate Indian index data available |
