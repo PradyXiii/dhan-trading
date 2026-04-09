@@ -176,11 +176,11 @@ def score_row(row):
     """
     Score indicators. Returns (total_score, {indicator: score}).
 
-    ACTIVE (4 India-specific technical indicators — Round 3 optimisation):
+    ACTIVE (4 India-specific technical indicators — selected via attribution):
       EMA20, 5-day trend, VIX direction, BN-NF divergence
-      Attribution analysis (Run 8) showed these 4 alone generate ₹1.50Cr
-      vs ₹1.00Cr for all 10 combined. Macro signals (US, Nikkei, futures,
-      BN gap) and RSI/HV20 added noise; removing them raised WR to 54.6%.
+      Attribution analysis showed these 4 India-specific signals significantly
+      outperform the full 10-indicator set. Macro signals (US, Nikkei, futures,
+      BN gap) and RSI/HV20 added noise and were excluded.
 
     INACTIVE (kept in dict for CSV audit trail, not added to total):
       RSI14, S&P500, Nikkei, S&P Futures gap, HV20, BN overnight gap
