@@ -77,8 +77,17 @@ def load_data():
     ff_cols = ["nf_close", "vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]
     df[ff_cols] = df[ff_cols].ffill(limit=3)
 
-    return df.dropna(subset=["bn_close", "nf_close", "vix_close",
-                              "sp_close", "nk_close", "spf_open", "spf_close"])
+    result = df.dropna(subset=["bn_close", "nf_close", "vix_close",
+                               "sp_close", "nk_close", "spf_open", "spf_close"])
+
+    # ── Data quality check ────────────────────────────────────────────────────
+    wd_counts = result["date"].dt.day_name().value_counts()
+    for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
+        n = wd_counts.get(day, 0)
+        if n < 50:
+            print(f"  WARNING: Only {n} {day}s in dataset — data gap detected!")
+
+    return result
 
 
 # ── Indicator computation ─────────────────────────────────────────────────────

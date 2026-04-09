@@ -14,6 +14,7 @@ MONTHLY_TOPUP    = 10_000
 # Formula: premium = spot × PREMIUM_K × sqrt(DTE)
 # Verification: 0.004 × √1 = 0.4% ✓   0.004 × √5 = 0.894% ≈ 0.9% ✓
 PREMIUM_K = 0.004
+MAX_LOTS  = 20      # cap to keep backtest realistic (liquidity + margin constraints)
 
 # Days to expiry per weekday (BankNifty expires Wednesday)
 # Wednesday excluded — trading 0 DTE on expiry day is a different risk profile
@@ -125,7 +126,7 @@ def simulate_trade(row, bn_ohlcv, capital):
     if max_loss_1lot > capital * 0.15:          # even 1 lot is too expensive
         return 0.0, "SKIPPED_LOW_CAPITAL", 0, premium, 0.0, zero_breakdown
 
-    lots = max(1, int((capital * RISK_PCT) / max_loss_1lot))
+    lots = min(MAX_LOTS, max(1, int((capital * RISK_PCT) / max_loss_1lot)))
 
     # ── SL / TP levels in underlying points (delta ≈ 0.5 for ATM) ───────────
     sl_pts = (SL_PCT  * premium) / 0.5          # underlying drop to lose 30% option
@@ -409,9 +410,10 @@ def run_comparison():
     df_cmp = pd.DataFrame(summary_rows)
     print(df_cmp.to_string(index=False))
     print(f"{'='*100}")
-    print(f"\nNote: ±1 is effectively 'no threshold' — trades on any Tue/Fri")
+    print(f"\nNote: ±1 is effectively 'no threshold' — trades on any Mon/Tue/Thu/Fri")
     print(f"      with even 1 net bullish/bearish indicator (score = ±1 to ±10).")
     print(f"      Score = 0 (perfect tie) still gets no trade — no directional edge.")
+    print(f"      Lot cap: {MAX_LOTS} lots per trade (liquidity/margin constraint).")
 
 
 def main():
