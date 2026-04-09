@@ -129,7 +129,7 @@ def generate_signals(df):
     for _, row in trade_days.iterrows():
         score, s = score_row(row)
 
-        signal = "CALL" if score >= 4 else ("PUT" if score <= -4 else "NONE")
+        signal = "CALL" if score >= 3 else ("PUT" if score <= -3 else "NONE")
 
         rows.append({
             "date":       row["date"].date(),
