@@ -20,6 +20,7 @@ SIGNAL_THRESHOLD = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 _DAY_MAP = {
     "mon": 0, "monday": 0,
     "tue": 1, "tuesday": 1,
+    "wed": 2, "wednesday": 2,
     "thu": 3, "thursday": 3,
     "fri": 4, "friday": 4,
 }
