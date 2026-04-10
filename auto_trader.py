@@ -206,59 +206,111 @@ def get_expiry() -> date:
 
 # ── Step 4: ATM option security_id ───────────────────────────────────────────
 
-def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
+def _fetch_option_chain(expiry: date) -> tuple:
     """
-    Returns (security_id, atm_strike, spot).
-    In DRY RUN, falls back to last BN close if option chain unavailable (market closed).
+    Single attempt to fetch option chain for a given expiry.
+    Returns (security_id, atm_strike, spot, opt_type_used) or (None, None, None, None).
+    Called by get_atm_security_id with retry + fallback-expiry logic.
     """
-    opt_type = "CE" if signal == "CALL" else "PE"
-    payload  = {
+    payload = {
         "UnderlyingScrip": 25,
         "UnderlyingSeg":   "IDX_I",
         "Expiry":          expiry.strftime("%Y-%m-%d"),
     }
+    resp = requests.post(
+        "https://api.dhan.co/v2/optionchain",
+        headers=HEADERS, json=payload, timeout=15
+    )
+    if resp.status_code != 200:
+        notify.log(f"Option chain {expiry} → {resp.status_code}: {resp.text[:120]}")
+        return None, None, None, None
 
-    try:
-        resp = requests.post(
-            "https://api.dhan.co/v2/optionchain",
-            headers=HEADERS, json=payload, timeout=15
-        )
-        if resp.status_code != 200:
-            notify.log(f"Option chain API {resp.status_code}: {resp.text[:150]}")
-        else:
-            data  = resp.json()
-            inner = data.get("data") or {}
-            spot  = float(
-                data.get("last_price") or data.get("lastTradedPrice") or
-                (inner.get("last_price") if isinstance(inner, dict) else 0) or
-                (inner.get("underlyingPrice") if isinstance(inner, dict) else 0) or 0
-            )
-            atm_strike = round(spot / 100) * 100 if spot else None
+    data  = resp.json()
+    inner = data.get("data") or {}
+    spot  = float(
+        data.get("last_price") or data.get("lastTradedPrice") or
+        (inner.get("last_price")       if isinstance(inner, dict) else 0) or
+        (inner.get("underlyingPrice")  if isinstance(inner, dict) else 0) or 0
+    )
+    if not spot:
+        notify.log(f"Option chain {expiry} → got 200 but spot price is 0")
+        return None, None, None, None
 
-            oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
-            if oc and atm_strike:
-                for delta in [0, 100, -100, 200, -200]:
-                    key = str(int(atm_strike + delta))
-                    if key in oc:
-                        sub = oc[key].get(opt_type, {})
-                        sid = sub.get("security_id") or sub.get("securityId")
-                        if sid:
-                            return str(sid), float(key), spot
+    atm_strike = round(spot / 100) * 100
+    return data, atm_strike, spot, inner
 
-            options = data.get("options") or data.get("OptionChain") or []
-            if isinstance(options, list) and atm_strike:
-                for item in options:
-                    s = float(item.get("strikePrice") or item.get("strike_price") or 0)
-                    t = (item.get("optionType") or item.get("option_type") or "").upper()
-                    if abs(s - atm_strike) < 1 and t == opt_type:
-                        sid = item.get("security_id") or item.get("securityId")
-                        if sid:
-                            return str(sid), atm_strike, spot
 
-    except Exception as e:
-        notify.log(f"Option chain exception: {e}")
+def _parse_security_id(data, inner, atm_strike, opt_type) -> tuple:
+    """Extract security_id from option chain response. Returns (sid, strike) or (None, None)."""
+    oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+    if oc and atm_strike:
+        for delta in [0, 100, -100, 200, -200]:
+            key = str(int(atm_strike + delta))
+            if key in oc:
+                sub = oc[key].get(opt_type, {})
+                sid = sub.get("security_id") or sub.get("securityId")
+                if sid:
+                    return str(sid), float(key)
 
-    # Fallback: use BN close from CSV (works outside market hours / in DRY RUN)
+    options = data.get("options") or data.get("OptionChain") or []
+    if isinstance(options, list) and atm_strike:
+        for item in options:
+            s = float(item.get("strikePrice") or item.get("strike_price") or 0)
+            t = (item.get("optionType") or item.get("option_type") or "").upper()
+            if abs(s - atm_strike) < 1 and t == opt_type:
+                sid = item.get("security_id") or item.get("securityId")
+                if sid:
+                    return str(sid), atm_strike
+
+    return None, None
+
+
+def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
+    """
+    Returns (security_id, atm_strike, spot).
+
+    Retry logic:
+      - For each expiry candidate (primary + next fallback expiry):
+          - Try up to 3 times (1 initial + 2 retries) with 3s delay between attempts
+          - If security_id found → return it
+          - If all retries fail → move to next expiry candidate
+      - If all expiries exhausted → use CSV spot (DRY RUN) or return None (LIVE)
+    """
+    opt_type = "CE" if signal == "CALL" else "PE"
+
+    # Build expiry candidates: primary expiry + next week as backup
+    expiry_candidates = [expiry, expiry + timedelta(days=7)]
+
+    for exp in expiry_candidates:
+        for attempt in range(3):   # 3 attempts per expiry
+            try:
+                result = _fetch_option_chain(exp)
+                data, atm_strike, spot, inner = result
+
+                if data is None:
+                    if attempt < 2:
+                        notify.log(f"Retry {attempt+1}/3 for expiry {exp} in 3s...")
+                        time.sleep(3)
+                    continue
+
+                sid, strike = _parse_security_id(data, inner, atm_strike, opt_type)
+                if sid:
+                    if exp != expiry:
+                        notify.log(f"Using fallback expiry {exp} (primary {expiry} failed)")
+                    return sid, strike, spot
+
+                notify.log(f"Got chain for {exp} but no {opt_type} security_id at ATM {atm_strike}")
+                if attempt < 2:
+                    time.sleep(3)
+
+            except Exception as e:
+                notify.log(f"Option chain exception (expiry {exp}, attempt {attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(3)
+
+        notify.log(f"All 3 attempts failed for expiry {exp} — trying next expiry")
+
+    # All expiries exhausted — fallback to CSV spot for DRY RUN
     try:
         bn_df      = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
         spot       = spot_fallback or float(bn_df.iloc[-1]["close"])
