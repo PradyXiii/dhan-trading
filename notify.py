@@ -6,7 +6,9 @@ Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from .env
 import os
 import re
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_IST = timezone(timedelta(hours=5, minutes=30))
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,7 +22,7 @@ def _strip_html(text: str) -> str:
 
 def log(message: str):
     """Print to console/log only — does NOT send to Telegram."""
-    timestamp = datetime.now().strftime("%H:%M:%S")
+    timestamp = datetime.now(_IST).strftime("%H:%M:%S IST")
     print(f"[{timestamp}] {_strip_html(message)}")
 
 
@@ -29,7 +31,7 @@ def send(message: str, silent: bool = False) -> bool:
     Send a message to Telegram AND print to console.
     silent=True → print to console only, skip Telegram (for debug/intermediate steps).
     """
-    timestamp = datetime.now().strftime("%H:%M:%S")
+    timestamp = datetime.now(_IST).strftime("%H:%M:%S IST")
     print(f"[{timestamp}] {_strip_html(message)[:120]}")
 
     if silent:
