@@ -10,3 +10,7 @@ __pycache__/
 *.csv
 *.json
 data/
+
+# Local-only scripts (VM only, never published)
+portfolio_tracker.py
+logs/

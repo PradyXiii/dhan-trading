@@ -54,22 +54,16 @@ Macro signals (S&P500, Nikkei, S&P futures, BN overnight gap) were tested and fo
 ```
 dhan-trading/
 │
-├── data_fetcher.py          Fetches all market data → data/
+├── auto_trader.py           Morning automation: signal → Dhan order → Telegram
 ├── signal_engine.py         Computes indicators, generates CALL/PUT/NONE signals
 ├── backtest_engine.py       Simulates trades on historical data with full cost model
-├── auto_trader.py           Morning automation: signal → Dhan order → Telegram
+├── data_fetcher.py          Fetches all market data → data/
+├── fetch_intraday.py        Fetches 5-min BankNifty candles from Dhan API
+├── timing_backtest.py       Entry timing analysis (9:15–9:30) + slippage sensitivity
 ├── notify.py                Telegram notification helper
-├── test_connection.py       Verify Dhan API token is valid
-├── setup_automation.sh      One-shot setup: deps, cron, dry-run
-│
-├── indicator_attribution.py Research: which indicators actually drive P&L
-├── strangle_backtest.py     Research: straddle vs directional long comparison
-├── timing_backtest.py       Research: entry timing (9:15–9:30) + slippage sensitivity
-├── fetch_intraday.py        Research: fetch 5-min BankNifty candles from Dhan
-├── fetch_round2_data.py     Research: NSE bhavcopy + participant OI data
 ├── dhan_mcp.py              MCP server: query live positions/P&L from Claude Code
+├── setup_automation.sh      One-shot VM setup: deps, cron, dry-run
 │
-├── BACKTEST_LOG.md          Full run history, decisions, methodology
 └── data/                    CSV files (not in GitHub — lives on GCP VM only)
 ```
 
@@ -140,7 +134,6 @@ python3 auto_trader.py --dry-run
 ```
 4–5 PM IST  →  Get new Dhan token (expires every 24h)
                nano .env → update DHAN_ACCESS_TOKEN
-               python3 test_connection.py
 
              →  Refresh today's data + signal
                python3 data_fetcher.py && python3 signal_engine.py
@@ -149,6 +142,9 @@ python3 auto_trader.py --dry-run
                Dhan Super Order placed
                Telegram alert sent
                No action needed
+
+3:35 PM IST →  portfolio_tracker.py cron logs completed trades + balance
+               (runs on VM, saves to ~/trading_logs/ — never in GitHub)
 ```
 
 ### Token auto-refresh (optional)
