@@ -13,4 +13,5 @@ data/
 
 # Local-only scripts (VM only, never published)
 portfolio_tracker.py
+refresh_token.py
 logs/
