@@ -196,11 +196,16 @@ def run_backtest_on_signals(sig_df, start_capital=STARTING_CAPITAL):
         rows.append({"date": d.date(), "result": result, "pnl": pnl,
                      "cap_before": cap_before, "cap_after": capital})
 
+    if not rows:
+        empty = pd.DataFrame(columns=["date","result","pnl","cap_before","cap_after"])
+        return empty, capital
     return pd.DataFrame(rows), capital
 
 
 def sharpe(trade_df):
     """Simple Sharpe-like ratio on per-trade P&L."""
+    if trade_df.empty or "result" not in trade_df.columns:
+        return -999.0
     active = trade_df[trade_df["result"].isin(["WIN","LOSS","PARTIAL"])]["pnl"]
     if len(active) < 5:
         return -999.0
@@ -245,7 +250,7 @@ def run_walk_forward(df, train_months=12, test_months=3):
         for thr in [1, 2, 3, 4]:
             sigs = score_and_signal(train_df, thr)
             sigs = sigs[sigs["signal"].isin(["CALL","PUT"])]
-            if len(sigs) < 3:
+            if len(sigs) < 15:      # need enough trades for meaningful Sharpe
                 continue
             td, _ = run_backtest_on_signals(sigs)
             s = sharpe(td)
@@ -261,6 +266,12 @@ def run_walk_forward(df, train_months=12, test_months=3):
         oos_td, end_cap = run_backtest_on_signals(active_sigs, start_capital=capital)
         capital = end_cap   # capital flows continuously fold-to-fold
 
+        if oos_td.empty or "result" not in oos_td.columns:
+            print(f"  Fold {i+1:<2}  "
+                  f"{str(tr_s.date())} → {str(tr_e.date())}  "
+                  f"{str(ts_s.date())} → {str(ts_e.date())}  "
+                  f"THR ±{best_thr}       (no trades in test window)")
+            continue
         active = oos_td[oos_td["result"].isin(["WIN","LOSS","PARTIAL"])]
         trades = len(active)
         w      = (active["result"] == "WIN").sum()
