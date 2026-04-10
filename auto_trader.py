@@ -156,11 +156,52 @@ def get_capital() -> float:
 # ── Step 3: Expiry ────────────────────────────────────────────────────────────
 
 def get_expiry() -> date:
+    """
+    Find the nearest valid BankNifty weekly expiry by probing the Dhan option
+    chain API. BankNifty normally expires on Wednesday, but NSE shifts the
+    expiry to the previous trading day when Wednesday is a market holiday.
+    We try Wed → Tue → Mon → Thu (next week) until one succeeds.
+    """
     today = date.today()
-    if today.weekday() == 2:         # today IS Wednesday (expiry day)
-        return today
-    days_ahead = (2 - today.weekday()) % 7
-    return today + timedelta(days=days_ahead)
+    days_ahead = (2 - today.weekday()) % 7   # days to next Wednesday
+    base_wed   = today + timedelta(days=days_ahead)
+
+    # If today IS Wednesday (expiry day), try today first
+    candidates = []
+    if today.weekday() == 2:
+        candidates = [today, today - timedelta(days=1)]
+    else:
+        # Try Wed → Tue → Mon (holiday shift), then next Wed as last resort
+        candidates = [
+            base_wed,
+            base_wed - timedelta(days=1),   # Tuesday
+            base_wed - timedelta(days=2),   # Monday
+            base_wed + timedelta(days=7),   # next Wednesday
+        ]
+        # Filter out past dates
+        candidates = [d for d in candidates if d >= today]
+
+    for expiry in candidates:
+        payload = {
+            "UnderlyingScrip": 25,
+            "UnderlyingSeg":   "IDX_I",
+            "Expiry":          expiry.strftime("%Y-%m-%d"),
+        }
+        try:
+            resp = requests.post(
+                "https://api.dhan.co/v2/optionchain",
+                headers=HEADERS, json=payload, timeout=10
+            )
+            if resp.status_code == 200:
+                notify.log(f"Valid expiry found: {expiry}")
+                return expiry
+            notify.log(f"Expiry {expiry} invalid ({resp.status_code}) — trying next")
+        except Exception as e:
+            notify.log(f"Expiry probe failed for {expiry}: {e}")
+
+    # Fallback: return the calculated Wednesday (let the order fail loudly)
+    notify.log(f"Could not find valid expiry via API — defaulting to {base_wed}")
+    return base_wed
 
 
 # ── Step 4: ATM option security_id ───────────────────────────────────────────
