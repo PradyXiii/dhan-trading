@@ -341,7 +341,7 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "correlationId":   f"at_{date.today().strftime('%Y%m%d')}",
         "transactionType": "BUY",
         "exchangeSegment": "NSE_FNO",
-        "productType":     "INTRADAY",
+        "productType":     "MARGIN",     # NRML — can carry forward if SL/TP not hit
         "orderType":       "MARKET",
         "validity":        "DAY",
         "securityId":      security_id,
@@ -522,7 +522,7 @@ def main():
             f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
             f"Risk  ₹{risk_amt:,.0f}   Reward  ₹{target_amt:,.0f}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>MIS auto-exits at 3:15 PM if SL/TP not triggered.</i>"
+            f"<i>NRML order — carries forward if SL/TP not hit by close.</i>"
         )
     else:
         notify.send(
