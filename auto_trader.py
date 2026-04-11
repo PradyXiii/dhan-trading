@@ -526,8 +526,38 @@ def main():
     rr      = RR
     premium = spot * PREMIUM_K * sqrt(dte)
 
+    # ── Capital safety checks ────────────────────────────────────────────────
+    # Max loss if SL is hit on 1 lot
     max_loss_1lot = LOT_SIZE * premium * SL_PCT
-    lots          = min(MAX_LOTS, max(1, floor(capital * RISK_PCT / max_loss_1lot)))
+    # Margin blocked when buying 1 lot of options (full premium paid upfront)
+    margin_1lot   = LOT_SIZE * premium
+
+    # Lots by 5% risk rule
+    lots_by_risk   = floor(capital * RISK_PCT / max_loss_1lot)
+    # Lots by margin cap (never block more than 85% of capital)
+    lots_by_margin = floor(capital * 0.85 / margin_1lot)
+
+    # Take the stricter limit — no minimum-1-lot override
+    lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+
+    if lots < 1:
+        min_capital_risk   = max_loss_1lot / RISK_PCT          # for 5% rule
+        min_capital_margin = margin_1lot / 0.85                # for margin rule
+        min_capital_needed = max(min_capital_risk, min_capital_margin)
+        notify.send(
+            f"⏸  <b>No Trade — Insufficient Capital</b>\n"
+            f"─────────────────────\n"
+            f"{today_wd}  ·  {today_label}\n\n"
+            f"Signal:  <b>{signal}</b>  (score {score:+d}/{score_max})\n"
+            f"Premium: ₹{premium:.0f}/lot  →  margin ₹{margin_1lot:,.0f}/lot\n"
+            f"5% risk allows: ₹{capital*RISK_PCT:,.0f}  "
+            f"but 1 lot risks ₹{max_loss_1lot:,.0f}\n\n"
+            f"Minimum capital needed: ₹{min_capital_needed:,.0f}\n"
+            f"Current balance: ₹{capital:,.0f}\n\n"
+            f"<i>Skipping today. Top-up or wait for lower-premium setup.</i>"
+        )
+        return
+
     risk_amt      = lots * max_loss_1lot
     target_amt    = lots * LOT_SIZE * premium * SL_PCT * rr - 40  # rough charge estimate
     sl_price      = premium * (1 - SL_PCT)
