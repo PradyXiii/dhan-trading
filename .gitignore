@@ -16,3 +16,6 @@ portfolio_tracker.py
 refresh_token.py
 test_order.py
 logs/
+
+# GAS morning brief scripts — never committed (contain private prompts/logic)
+*.gs
