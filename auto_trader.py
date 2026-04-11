@@ -94,8 +94,8 @@ def check_kill_switch():
                             headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             status = resp.json().get("killSwitchStatus", "")
-            notify.log(f"Kill switch status: {status}")
-            if status == "ACTIVATE":
+            notify.log(f"Kill switch status: {status or 'OFF'}")
+            if "Activated" in status:
                 die(
                     "🔴 Kill switch is ON — no order placed today.\n\n"
                     "To resume trading, run on GCP VM:\n"
@@ -119,12 +119,13 @@ def handle_kill_switch_arg():
         resp = requests.post(
             "https://api.dhan.co/v2/killswitch",
             headers=HEADERS,
-            json={"dhanClientId": CLIENT_ID, "killSwitchStatus": api_status},
+            params={"killSwitchStatus": api_status},   # query param, not body
             timeout=10,
         )
         if resp.status_code == 200:
+            returned_status = resp.json().get("killSwitchStatus", "")
             notify.send(f"🔴 <b>Kill Switch {label}</b>")
-            notify.log(f"Kill switch set: {label}")
+            notify.log(f"Kill switch set: {label} (API: {returned_status})")
         else:
             notify.log(f"Kill switch toggle failed: HTTP {resp.status_code} {resp.text[:100]}")
     except Exception as e:
