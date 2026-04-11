@@ -98,23 +98,13 @@ def load_bn_ohlcv():
 
 # ── Trade simulator ───────────────────────────────────────────────────────────
 
-def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0):
+def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None, flat_rr=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
-    trail_jump_opt: trailing stop in option-price rupees (same unit as Dhan's
-    trailingJump field). 0 = disabled (current fixed SL behaviour).
-
-    How trailing SL works here:
-      - As BN moves favourably, the option price rises by (BN_move × delta).
-      - Every time the option gains trail_jump_opt rupees, the SL ratchets up
-        by trail_jump_opt (i.e. number of steps × trail amount).
-      - The trailing SL can never exceed breakeven (entry price).
-      - TP is unchanged — Dhan fires TP first if both levels are hit.
-
-    Limitation: we only have daily OHLCV, so we approximate the intraday
-    peak and trough using day high/low. Results are directionally correct
-    but less precise than tick-level simulation.
+    trail_jump_opt : trailing stop in option-price rupees (Dhan trailingJump). 0 = off.
+    sl_pct         : override SL_PCT global (e.g. 0.20 for 20% SL). None = use global.
+    flat_rr        : use this RR for every day instead of DAY_RR dict. None = use per-day.
 
     Returns (pnl, result, lots, premium, charges_total, charges_breakdown).
     """
@@ -135,43 +125,43 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0):
     bn_low   = bar["low"]
     bn_close = bar["close"]
 
-    dte     = DAY_DTE.get(weekday, 1)
-    rr      = DAY_RR.get(weekday, 1.4)
+    dte  = DAY_DTE.get(weekday, 1)
+    rr   = flat_rr if flat_rr is not None else DAY_RR.get(weekday, 1.4)
+    sl   = sl_pct  if sl_pct  is not None else SL_PCT
     premium = bn_open * PREMIUM_K * (dte ** 0.5)
 
     # ── Lot sizing ────────────────────────────────────────────────────────────
-    max_loss_1lot = LOT_SIZE * premium * SL_PCT
-    if max_loss_1lot > capital * 0.15:          # even 1 lot is too expensive
+    max_loss_1lot = LOT_SIZE * premium * sl
+    if max_loss_1lot > capital * 0.15:
         return 0.0, "SKIPPED_LOW_CAPITAL", 0, premium, 0.0, zero_breakdown
 
     lots = min(MAX_LOTS, max(1, int((capital * RISK_PCT) / max_loss_1lot)))
 
-    # ── SL / TP levels in underlying points (delta ≈ 0.5 for ATM) ───────────
-    sl_pts = (SL_PCT  * premium) / 0.5          # underlying drop to lose 30% option
-    tp_pts = (rr * SL_PCT * premium) / 0.5      # underlying move to hit target
+    # ── SL / TP levels in BN points (ATM delta ≈ 0.5) ────────────────────────
+    sl_pts = (sl  * premium) / 0.5
+    tp_pts = (rr * sl * premium) / 0.5
 
-    # ── Trailing SL: convert option-price trail → BN-point trail ─────────────
-    # trail_jump_bn = how many BN points make the option move by trail_jump_opt
-    # option_move = bn_move × delta(0.5)  →  bn_move = option_move / 0.5
-    if trail_jump_opt > 0:
-        trail_jump_bn = trail_jump_opt / 0.5    # BN pts per trail step
+    # ── Trailing SL helpers ───────────────────────────────────────────────────
+    trail_jump_bn = (trail_jump_opt / 0.5) if trail_jump_opt > 0 else 0
 
-        def trailing_sl_level(orig_sl, favorable_bn_move):
-            """Ratchet orig_sl up by trail steps. Cap at breakeven."""
-            steps = int(favorable_bn_move / trail_jump_bn)
-            new_sl = orig_sl + steps * trail_jump_bn
-            return min(new_sl, bn_open)          # never trail above entry
-    else:
-        def trailing_sl_level(orig_sl, favorable_bn_move):
-            return orig_sl                       # no trailing — fixed SL
+    def trail_steps(favorable_bn_move):
+        return int(favorable_bn_move / trail_jump_bn) if trail_jump_bn > 0 else 0
 
-    # ── Exit logic ────────────────────────────────────────────────────────────
+    def trail_exit_pnl(favorable_bn_move, n_steps):
+        """P&L when trailing SL fires. Returns (gross_pnl, label)."""
+        opt_exit = premium * (1 - sl) + n_steps * trail_jump_opt
+        opt_exit = min(opt_exit, premium)           # cap at breakeven
+        gross    = (opt_exit - premium) * lots * LOT_SIZE
+        label    = "TRAIL_SL" if opt_exit > premium * (1 - sl) else "LOSS"
+        return gross, label
+
+    # ── CALL exit logic ───────────────────────────────────────────────────────
     if signal == "CALL":
         orig_sl  = bn_open - sl_pts
         tp_level = bn_open + tp_pts
-
-        favorable_move = max(0.0, bn_high - bn_open)
-        sl_level = trailing_sl_level(orig_sl, favorable_move)
+        fav      = max(0.0, bn_high - bn_open)
+        steps    = trail_steps(fav)
+        sl_level = min(orig_sl + steps * trail_jump_bn, bn_open) if trail_jump_bn > 0 else orig_sl
 
         sl_hit = bn_low  <= sl_level
         tp_hit = bn_high >= tp_level
@@ -181,35 +171,23 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0):
         elif tp_hit:
             result = "WIN"
         elif sl_hit:
-            # Trailing SL fired — P&L is based on where SL ratcheted to
-            if trail_jump_opt > 0:
-                opt_exit = premium * (1 - SL_PCT) + int(favorable_move / trail_jump_bn) * trail_jump_opt
-                opt_exit = min(opt_exit, premium)   # cap at breakeven
-                gross = (opt_exit - premium) * lots * LOT_SIZE
-                charges, bd = calculate_charges(premium, lots, breakdown=True)
-                label = "TRAIL_SL" if opt_exit > premium * (1 - SL_PCT) else "LOSS"
+            if trail_jump_opt > 0 and steps > 0:
+                gross, label = trail_exit_pnl(fav, steps)
+                charges, bd  = calculate_charges(premium, lots, breakdown=True)
                 return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd
             result = "LOSS"
-        else:                                    # neither hit — exit at close
+        else:
             gross = (bn_close - bn_open) * 0.5 * lots * LOT_SIZE
             charges, bd = calculate_charges(premium, lots, breakdown=True)
             return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
 
-    else:  # PUT
+    # ── PUT exit logic ────────────────────────────────────────────────────────
+    else:
         orig_sl  = bn_open + sl_pts
         tp_level = bn_open - tp_pts
-
-        favorable_move = max(0.0, bn_open - bn_low)
-        sl_level = trailing_sl_level(orig_sl, favorable_move) if trail_jump_opt == 0 \
-                   else bn_open + sl_pts - int(favorable_move / (trail_jump_opt / 0.5)) * (trail_jump_opt / 0.5)
-        sl_level = max(sl_level, bn_open)  if trail_jump_opt > 0 else sl_level   # cap at entry (PUT mirror)
-
-        # Recalculate cleanly for PUT
-        if trail_jump_opt > 0:
-            trail_jump_bn = trail_jump_opt / 0.5
-            steps    = int(favorable_move / trail_jump_bn)
-            sl_level = orig_sl - steps * trail_jump_bn
-            sl_level = max(sl_level, bn_open)   # never trail below entry for PUT
+        fav      = max(0.0, bn_open - bn_low)
+        steps    = trail_steps(fav)
+        sl_level = max(orig_sl - steps * trail_jump_bn, bn_open) if trail_jump_bn > 0 else orig_sl
 
         sl_hit = bn_high >= sl_level
         tp_hit = bn_low  <= tp_level
@@ -219,12 +197,9 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0):
         elif tp_hit:
             result = "WIN"
         elif sl_hit:
-            if trail_jump_opt > 0:
-                opt_exit = premium * (1 - SL_PCT) + int(favorable_move / trail_jump_bn) * trail_jump_opt
-                opt_exit = min(opt_exit, premium)
-                gross = (opt_exit - premium) * lots * LOT_SIZE
-                charges, bd = calculate_charges(premium, lots, breakdown=True)
-                label = "TRAIL_SL" if opt_exit > premium * (1 - SL_PCT) else "LOSS"
+            if trail_jump_opt > 0 and steps > 0:
+                gross, label = trail_exit_pnl(fav, steps)
+                charges, bd  = calculate_charges(premium, lots, breakdown=True)
                 return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd
             result = "LOSS"
         else:
@@ -234,16 +209,16 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0):
 
     charges, bd = calculate_charges(premium, lots, breakdown=True)
     if result == "WIN":
-        pnl =  lots * LOT_SIZE * premium * rr  * SL_PCT - charges
+        pnl =  lots * LOT_SIZE * premium * rr  * sl - charges
     else:
-        pnl = -lots * LOT_SIZE * premium * SL_PCT - charges
+        pnl = -lots * LOT_SIZE * premium * sl - charges
 
     return round(pnl, 2), result, lots, round(premium, 2), charges, bd
 
 
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
-def run_backtest(trail_jump_opt=0):
+def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None):
     signals  = load_signals()
     bn_ohlcv = load_bn_ohlcv()
 
@@ -255,7 +230,6 @@ def run_backtest(trail_jump_opt=0):
         date      = row["date"]
         month_key = (date.year, date.month)
 
-        # Monthly top-up at the first trade of each new calendar month
         if current_month is None:
             current_month = month_key
         elif month_key != current_month:
@@ -264,7 +238,10 @@ def run_backtest(trail_jump_opt=0):
 
         capital_before = capital
         pnl, result, lots, premium, charges, charges_bd = simulate_trade(
-            row, bn_ohlcv, capital, trail_jump_opt=trail_jump_opt)
+            row, bn_ohlcv, capital,
+            trail_jump_opt=trail_jump_opt,
+            sl_pct=sl_pct,
+            flat_rr=flat_rr)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -306,6 +283,64 @@ def run_backtest(trail_jump_opt=0):
 
 
 # ── Summary printer ───────────────────────────────────────────────────────────
+
+def run_sl_tp_grid(trail_jump_opt=5):
+    """
+    Grid search: SL% × flat RR, all with trail=₹5.
+    Shows net P&L, win rate, max drawdown, and ending capital.
+    """
+    sl_options = [0.20, 0.25, 0.30, 0.35]
+    rr_options = [1.0, 1.5, 2.0]
+    rows = []
+
+    for sl in sl_options:
+        for rr in rr_options:
+            trade_df, _ = run_backtest(trail_jump_opt=trail_jump_opt, sl_pct=sl, flat_rr=rr)
+            active   = trade_df[trade_df["result"].isin(["WIN","LOSS","PARTIAL","TRAIL_SL"])]
+            wins     = (active["result"] == "WIN").sum()
+            losses   = (active["result"] == "LOSS").sum()
+            trail_sl = (active["result"] == "TRAIL_SL").sum()
+            total    = len(active)
+            net_pnl  = active["pnl"].sum()
+            end_cap  = trade_df["capital_after"].iloc[-1]
+            wr       = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+
+            cap_series = trade_df["capital_after"]
+            max_dd     = ((cap_series - cap_series.cummax()) / cap_series.cummax() * 100).min()
+
+            rows.append({
+                "SL%":      f"{int(sl*100)}%",
+                "RR":       f"{rr:.1f}x",
+                "TP%":      f"{int(sl*rr*100)}%",
+                "wins":     wins,
+                "losses":   losses,
+                "trail_sl": trail_sl,
+                "WR%":      f"{wr:.0f}%",
+                "net_pnl":  net_pnl,
+                "end_cap":  end_cap,
+                "max_dd":   f"{max_dd:.1f}%",
+            })
+
+    df = pd.DataFrame(rows)
+
+    # Sort by net P&L descending for easy reading
+    df = df.sort_values("net_pnl", ascending=False).reset_index(drop=True)
+
+    # Format for display
+    df_display = df.copy()
+    df_display["net_pnl"] = df_display["net_pnl"].apply(lambda x: f"₹{x:,.0f}")
+    df_display["end_cap"] = df_display["end_cap"].apply(lambda x: f"₹{x:,.0f}")
+
+    print(f"\n{'='*90}")
+    print(f"  SL% × RR GRID  —  trail=₹{trail_jump_opt}, ranked by net P&L")
+    print(f"  Current config: SL=30%, per-day RR (Fri/Thu=2.0×, Tue=1.4×, Mon=1.6×, Wed=1.0×)")
+    print(f"{'='*90}")
+    print(df_display.drop(columns=["net_pnl_raw"] if "net_pnl_raw" in df_display else [])
+          .to_string(index=True))
+    print(f"{'='*90}")
+    print(f"\n  trail_sl = losses converted to smaller exits by trailing SL")
+    print(f"  WR% = wins / (wins + full losses) — excludes trail_sl and partials\n")
+
 
 def run_trail_comparison():
     """
@@ -552,6 +587,12 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--trail":
         print("Running trail jump comparison (₹0 / ₹5 / ₹10 / ₹20)...")
         run_trail_comparison()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--grid":
+        trail = float(_sys.argv[2]) if len(_sys.argv) > 2 else 5
+        print(f"Running SL% × RR grid with trail=₹{trail:.0f}...")
+        run_sl_tp_grid(trail_jump_opt=trail)
         return
 
     # Read threshold embedded in signals.csv
