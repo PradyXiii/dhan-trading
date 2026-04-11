@@ -153,21 +153,46 @@ if success(r_b, "NSE_EQ CNC AMO (without amoTime)"):
 
 # ── Step 2d: F&O — fetch live BankNifty option chain, place real NSE_FNO AMO ─
 # This is the ACTUAL production path auto_trader.py uses.
-print("\n[2d] Fetching BankNifty option chain for real NSE_FNO CE security_id ...")
+print("\n[2d] Fetching BankNifty expiry list + option chain for NSE_FNO CE ...")
 try:
+    # Step 1: get nearest valid expiry (avoids "Invalid Expiry Date" on weekends)
+    exp_resp = requests.post(
+        "https://api.dhan.co/v2/optionchain/expirylist",
+        headers=HEADERS,
+        json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+        timeout=10,
+    )
+    print(f"  Expiry list HTTP {exp_resp.status_code}")
+    expiry_str = ""
+    if exp_resp.status_code == 200:
+        exp_data = exp_resp.json()
+        expirylist = (exp_data.get("data") or exp_data.get("expiryList")
+                      or exp_data.get("expiry_list") or [])
+        if isinstance(expirylist, list) and expirylist:
+            expiry_str = expirylist[0]
+            print(f"  Using nearest expiry: {expiry_str}")
+        else:
+            print(f"  Expiry list empty or unknown format: {exp_data}")
+    else:
+        print(f"  Expiry list unavailable: {exp_resp.text[:120]}")
+
+    # Step 2: fetch chain with explicit expiry
     chain_resp = requests.post(
         "https://api.dhan.co/v2/optionchain",
         headers=HEADERS,
-        json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": ""},
+        json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": expiry_str},
         timeout=15,
     )
     print(f"  Option chain HTTP {chain_resp.status_code}")
     if chain_resp.status_code != 200:
-        print(f"  Option chain unavailable (weekend/holiday): {chain_resp.text[:120]}")
+        print(f"  Option chain unavailable: {chain_resp.text[:120]}")
         raise RuntimeError("chain not available")
     chain = chain_resp.json()
     if not isinstance(chain, dict):
         raise RuntimeError(f"unexpected response type: {type(chain)}")
+    if chain.get("status") == "failed":
+        print(f"  Chain returned failed: {chain}")
+        raise RuntimeError("chain status=failed")
 
     # Parse: chain['data']['811']['oc'] = {strike: {ce: {...}, pe: {...}}}
     inner = (chain.get("data") or {}).get("811") or {}
