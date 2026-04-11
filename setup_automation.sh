@@ -19,11 +19,13 @@ echo "    Created: $LOG_DIR"
 # ── 2. Check Python dependencies ─────────────────────────────────────────────
 echo ""
 echo "[2] Checking Python dependencies..."
-python3 -c "import dhanhq"    2>/dev/null && echo "    dhanhq       ✓" || { echo "    dhanhq       ✗  (run: pip install dhanhq --break-system-packages)"; }
-python3 -c "import pandas"    2>/dev/null && echo "    pandas       ✓" || { echo "    pandas       ✗  (run: pip install pandas --break-system-packages)"; }
-python3 -c "import requests"  2>/dev/null && echo "    requests     ✓" || { echo "    requests     ✗  (run: pip install requests --break-system-packages)"; }
-python3 -c "import dotenv"    2>/dev/null && echo "    python-dotenv ✓" || { echo "    python-dotenv ✗  (run: pip install python-dotenv --break-system-packages)"; }
-python3 -c "import yfinance"  2>/dev/null && echo "    yfinance     ✓" || { echo "    yfinance     ✗  (run: pip install yfinance --break-system-packages)"; }
+python3 -c "import dhanhq"    2>/dev/null && echo "    dhanhq        ✓" || { echo "    dhanhq        ✗  (run: pip3 install dhanhq --break-system-packages)"; }
+python3 -c "import pandas"    2>/dev/null && echo "    pandas        ✓" || { echo "    pandas        ✗  (run: pip3 install pandas --break-system-packages)"; }
+python3 -c "import numpy"     2>/dev/null && echo "    numpy         ✓" || { echo "    numpy         ✗  (run: pip3 install numpy --break-system-packages)"; }
+python3 -c "import requests"  2>/dev/null && echo "    requests      ✓" || { echo "    requests      ✗  (run: pip3 install requests --break-system-packages)"; }
+python3 -c "import dotenv"    2>/dev/null && echo "    python-dotenv ✓" || { echo "    python-dotenv ✗  (run: pip3 install python-dotenv --break-system-packages)"; }
+python3 -c "import yfinance"  2>/dev/null && echo "    yfinance      ✓" || { echo "    yfinance      ✗  (run: pip3 install yfinance --break-system-packages)"; }
+python3 -c "import sklearn"   2>/dev/null && echo "    scikit-learn  ✓" || { echo "    scikit-learn  ✗  (run: pip3 install scikit-learn --break-system-packages)"; }
 
 # ── 3. Check .env has required keys ──────────────────────────────────────────
 echo ""
