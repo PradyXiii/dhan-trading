@@ -661,8 +661,8 @@ def run_sl_tp_grid(trail_jump_opt=5):
     Grid search: SL% × flat RR, all with trail=₹5.
     Shows net P&L, win rate, max drawdown, and ending capital.
     """
-    sl_options = [0.20, 0.25, 0.30, 0.35]
-    rr_options = [1.0, 1.5, 2.0]
+    sl_options = [0.15, 0.20, 0.25, 0.30]
+    rr_options = [1.5, 2.0, 2.5]
     rows = []
 
     for sl in sl_options:
@@ -698,7 +698,7 @@ def run_sl_tp_grid(trail_jump_opt=5):
 
     print(f"\n{'='*90}")
     print(f"  SL% × RR GRID  —  trail=₹{trail_jump_opt}, ranked by net P&L")
-    print(f"  Live config: SL=20%, flat RR=2.0×, trail=₹5  (TP=+40% of premium)")
+    print(f"  Live config: SL=15%, flat RR=2.0×, trail=₹5  (TP=+30% of premium)")
     print(f"{'='*90}")
     print(df.drop(columns=["net_pnl"]).to_string(index=True))
     print(f"{'='*90}")

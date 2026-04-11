@@ -100,8 +100,7 @@ def _renew_token():
     try:
         resp = requests.put(
             "https://api.dhan.co/v2/RenewToken",
-            headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID,
-                     "Content-Type": "application/json"},
+            headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
             timeout=10,
         )
         if resp.status_code == 200:
