@@ -386,6 +386,7 @@ def place_super_order(security_id: str, signal: str, lots: int,
         return {"status": "DRY_RUN", "sl": sl_price, "tp": tp_price}
 
     # Primary: Super Order (entry + SL + TP in one call)
+    # Note: SuperOrderRequest spec does NOT include "validity" — omit it
     payload = {
         "dhanClientId":    CLIENT_ID,
         "correlationId":   f"at_{date.today().strftime('%Y%m%d')}",
@@ -393,7 +394,6 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "exchangeSegment": "NSE_FNO",
         "productType":     "MARGIN",     # NRML — can carry forward if SL/TP not hit
         "orderType":       "MARKET",
-        "validity":        "DAY",
         "securityId":      security_id,
         "quantity":        qty,
         "price":           0,
@@ -412,17 +412,29 @@ def place_super_order(security_id: str, signal: str, lots: int,
         notify.log(f"Super Order exception: {e}")
 
     # Fallback: market buy + SL-M sell
-    buy_payload = {**payload, "orderType": "MARKET", "targetPrice": 0,
-                   "stopLossPrice": 0, "trailingJump": 0,
-                   "triggerPrice": 0, "disclosedQuantity": 0,
-                   "correlationId": f"at_buy_{date.today().strftime('%Y%m%d')}"}
+    # Build a clean OrderRequest payload — no super-order-specific fields
+    buy_payload = {
+        "dhanClientId":      CLIENT_ID,
+        "correlationId":     f"at_buy_{date.today().strftime('%Y%m%d')}",
+        "transactionType":   "BUY",
+        "exchangeSegment":   "NSE_FNO",
+        "productType":       "MARGIN",
+        "orderType":         "MARKET",
+        "validity":          "DAY",
+        "securityId":        security_id,
+        "quantity":          qty,
+        "price":             0,
+        "triggerPrice":      0,
+        "disclosedQuantity": 0,
+    }
     buy_resp   = requests.post("https://api.dhan.co/v2/orders",
                                headers=HEADERS, json=buy_payload, timeout=15)
     time.sleep(2)
-    sl_payload = {**buy_payload, "transactionType": "SELL",
-                  "orderType": "STOP_LOSS_MARKET",
-                  "triggerPrice": sl_price,
-                  "correlationId": f"at_sl_{date.today().strftime('%Y%m%d')}"}
+    sl_payload = {**buy_payload,
+                  "transactionType": "SELL",
+                  "orderType":       "STOP_LOSS_MARKET",
+                  "triggerPrice":    sl_price,
+                  "correlationId":   f"at_sl_{date.today().strftime('%Y%m%d')}"}
     sl_resp    = requests.post("https://api.dhan.co/v2/orders",
                                headers=HEADERS, json=sl_payload, timeout=15)
     return {"buy_order": buy_resp.json(), "sl_order": sl_resp.json(), "mode": "FALLBACK",
