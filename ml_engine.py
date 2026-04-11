@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
 """
-ml_engine.py — Walk-forward ML signal enhancement for BankNifty options.
+ml_engine.py — Walk-forward ML direction engine for BankNifty options.
 
-Approach
---------
-1. For every Mon/Tue/Thu/Fri trading day, compute 18 features from OHLCV + global data.
-2. Simulate true CALL and PUT outcomes (WIN/LOSS/PARTIAL) using the same SL/TP logic as
-   backtest_engine.py — zero look-ahead because labels use the SAME day's bar that the
-   rule-based system already trades on.
-3. Assign a 3-class target: CALL (CALL wins, PUT loses), PUT (PUT wins, CALL loses),
-   NONE (both, neither, or PARTIAL).
-4. Walk-forward RandomForest: at day t, train on days 1…t-1, predict t.
-   Retrain every 5 days; rolling 3-year window.
-5. Enter only when model confidence ≥ ml_threshold (default 0.55).
-6. Apply RBI MPC + Budget event filter (same as signal_engine).
-7. Save data/signals_ml.csv — same schema as signals.csv so backtest_engine works
-   unchanged when called with --ml.
+Design intent
+-------------
+The ML engine is a DIRECTION ORACLE, not a filter. It does not reduce the number
+of trades — it takes the same eligible trading days and predicts the better direction
+(CALL or PUT) using pattern recognition across all indicators.
 
-Usage
+For every Mon/Tue/Thu/Fri:
+  1. Compute 21 features from OHLCV + global market data.
+  2. Walk-forward RandomForest (train on past, predict present) outputs:
+       P(CALL) = probability the day favours a bullish options trade
+       P(PUT)  = probability the day favours a bearish options trade
+  3. Signal = argmax(P(CALL), P(PUT)) — ALWAYS a direction, no skipping.
+  4. Event days (RBI MPC, Budget) → NONE override.
+  5. Pre-warmup (first 252 days) → fallback to rule-based direction.
+
+Result: same trade count as rule-based; ML improves directional accuracy.
+
+Labels for training
+-------------------
+Binary direction label derived from SL/TP simulation:
+  CALL  if CALL trade wins and PUT does not  (definitive bullish day)
+  PUT   if PUT  trade wins and CALL does not (definitive bearish day)
+  tie   if both win or both lose             (argmax tiebreak from close vs open)
+
+No NONE class — every day gets a direction label, so the RF always outputs one.
+
+Modes
 -----
-  python3 ml_engine.py                   # ML-only signals, threshold 0.55
-  python3 ml_engine.py 0.60              # stricter confidence gate
-  python3 ml_engine.py --combined        # both rule-based score AND ML must agree
-  python3 ml_engine.py --combined 0.58   # combined + stricter threshold
-  python3 ml_engine.py --analyze         # feature importance + walk-forward stats
-
-Then backtest:
-  python3 backtest_engine.py --ml        # reads signals_ml.csv
-
-Walk-forward note
------------------
-The first 252 trading days have no ML prediction (cold-start). Those days are
-assigned signal=NONE and not traded, so backtest results start from ~year 2 of data.
-This is intentional — we want clean out-of-sample performance only.
+  python3 ml_engine.py                  # direction oracle (default, all trades)
+  python3 ml_engine.py --filter 0.60    # confidence gate: fewer trades, higher WR
+  python3 ml_engine.py --analyze        # feature importance + confusion matrix
+  python3 backtest_engine.py --ml       # backtest with signals_ml.csv
 """
 
 import os
@@ -40,14 +41,12 @@ import sys
 import warnings
 import numpy as np
 import pandas as pd
-from datetime import date as _date, timedelta
 
 warnings.filterwarnings("ignore")
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 
-# ── Import get_dte from backtest_engine (no sys.argv at module level there) ───
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import get_dte, PREMIUM_K
 
@@ -58,15 +57,14 @@ SL_PCT    = 0.15
 RR        = 2.0
 TP_PCT    = SL_PCT * RR   # 0.30
 
-# Walk-forward hyperparams
-MIN_TRAIN      = 252   # ~1 year of trading days
-RETRAIN_EVERY  = 5     # retrain every N trading days
-MAX_TRAIN_DAYS = 756   # rolling 3-year window (avoids stale patterns)
+# Walk-forward params
+MIN_TRAIN      = 252   # ~1 year before first ML prediction
+RETRAIN_EVERY  = 5     # retrain every 5 trading days
+MAX_TRAIN_DAYS = 756   # rolling 3-year window
 
-# Rule-based score threshold — only relevant in --combined mode
-SCORE_THRESHOLD = 1
+SCORE_THRESHOLD = 1    # rule-based fallback threshold (pre-warmup)
 
-# ── Event calendar (duplicated from signal_engine to avoid sys.argv conflict) ─
+# ── Event calendar ─────────────────────────────────────────────────────────────
 _RBI_MPC = {
     "2021-10-08","2021-12-08",
     "2022-02-10","2022-04-08","2022-06-08","2022-08-05","2022-09-30","2022-12-07",
@@ -82,19 +80,28 @@ _BUDGET = {
 EVENT_DATES = {pd.Timestamp(d).date() for d in (_RBI_MPC | _BUDGET)}
 
 # ── CLI parsing ────────────────────────────────────────────────────────────────
-MODE         = "ml"       # "ml" | "combined" | "analyze"
-ML_THRESHOLD = 0.55
+MODE         = "direction"  # "direction" | "filter" | "analyze"
+ML_THRESHOLD = 0.55         # only used in --filter mode
 
-for arg in sys.argv[1:]:
-    if arg == "--combined":
-        MODE = "combined"
-    elif arg == "--analyze":
+_args = sys.argv[1:]
+i = 0
+while i < len(_args):
+    if _args[i] == "--filter":
+        MODE = "filter"
+        if i + 1 < len(_args):
+            try:
+                ML_THRESHOLD = float(_args[i + 1])
+                i += 1
+            except ValueError:
+                pass
+    elif _args[i] == "--analyze":
         MODE = "analyze"
     else:
         try:
-            ML_THRESHOLD = float(arg)
+            ML_THRESHOLD = float(_args[i])
         except ValueError:
             pass
+    i += 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,7 +109,6 @@ for arg in sys.argv[1:]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_all_data():
-    """Load and merge all OHLCV CSVs. Returns master daily DataFrame."""
     bn  = pd.read_csv(f"{DATA_DIR}/banknifty.csv",     parse_dates=["date"])
     nf  = pd.read_csv(f"{DATA_DIR}/nifty50.csv",       parse_dates=["date"])
     vix = pd.read_csv(f"{DATA_DIR}/india_vix.csv",     parse_dates=["date"])
@@ -111,7 +117,7 @@ def load_all_data():
     spf = pd.read_csv(f"{DATA_DIR}/sp500_futures.csv", parse_dates=["date"])
 
     bn  = bn [["date","open","high","low","close"]].rename(columns={
-              "open":"bn_open","high":"bn_high","low":"bn_low","close":"bn_close"})
+               "open":"bn_open","high":"bn_high","low":"bn_low","close":"bn_close"})
     nf  = nf [["date","close"]].rename(columns={"close":"nf_close"})
     vix = vix[["date","close"]].rename(columns={"close":"vix_close"})
     sp  = sp [["date","close"]].rename(columns={"close":"sp_close"})
@@ -123,16 +129,15 @@ def load_all_data():
         df = df.merge(other, on="date", how="left")
 
     df = df.sort_values("date").reset_index(drop=True)
-
     ff_cols = ["nf_close","vix_close","sp_close","nk_close","spf_open","spf_close"]
     df[ff_cols] = df[ff_cols].ffill(limit=3)
-    df = df.dropna(subset=["bn_close","nf_close","vix_close","sp_close","nk_close",
-                            "spf_open","spf_close"])
+    df = df.dropna(subset=["bn_close","nf_close","vix_close","sp_close",
+                            "nk_close","spf_open","spf_close"])
     return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  INDICATOR & FEATURE COMPUTATION
+#  INDICATORS & FEATURES
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rsi(series, period=14):
@@ -147,13 +152,12 @@ def _rsi(series, period=14):
 
 def compute_features(df):
     """
-    Compute 18-feature matrix from raw OHLCV + global data.
-    All features are derived from CLOSE prices (no same-day intraday).
-    Returns DataFrame with 'date' column plus feature columns.
+    Compute 21-feature matrix. All features derived from close prices or
+    prior-day data — no same-day intraday leakage.
     """
     d = df.copy()
 
-    # ── Core technicals (mirrored from signal_engine) ─────────────────────────
+    # ── Core technicals ───────────────────────────────────────────────────────
     d["ema20"]      = d["bn_close"].ewm(span=20, adjust=False).mean()
     d["rsi14"]      = _rsi(d["bn_close"], 14)
     d["trend5"]     = (d["bn_close"] - d["bn_close"].shift(5)) / d["bn_close"].shift(5) * 100
@@ -168,124 +172,105 @@ def compute_features(df):
     d["hv20"]       = log_ret.rolling(20).std() * np.sqrt(252) * 100
     d["bn_gap"]     = (d["bn_open"] - d["bn_close"].shift(1)) / d["bn_close"].shift(1) * 100
 
-    # ── Rule-based score (4 active indicators — used in --combined mode) ──────
+    # ── Rule-based score (4 active indicators) ────────────────────────────────
     d["s_ema20"]     = np.where(d["bn_close"] > d["ema20"], 1, -1)
     d["s_trend5"]    = np.where(d["trend5"] > 1.0, 1, np.where(d["trend5"] < -1.0, -1, 0))
-    d["s_vix"]       = np.where(d["vix_dir"] < 0,  1, np.where(d["vix_dir"]  > 0, -1, 0))
+    d["s_vix"]       = np.where(d["vix_dir"] < 0,  1, np.where(d["vix_dir"] > 0, -1, 0))
     d["s_bn_nf_div"] = np.where(d["bn_nf_div"] > 0.5, 1, np.where(d["bn_nf_div"] < -0.5, -1, 0))
     d["rule_score"]  = d["s_ema20"] + d["s_trend5"] + d["s_vix"] + d["s_bn_nf_div"]
     d["rule_signal"] = np.where(d["rule_score"] >= SCORE_THRESHOLD, "CALL",
                        np.where(d["rule_score"] <= -SCORE_THRESHOLD, "PUT", "NONE"))
 
-    # ── Extended ML features (not in rule-based system) ───────────────────────
-    d["ema20_pct"]   = (d["bn_close"] - d["ema20"]) / d["ema20"] * 100   # EMA distance %
-    d["vix_level"]   = d["vix_close"]                                      # abs VIX level
-    d["vix_pct_chg"] = d["vix_dir"] / d["vix_close"].shift(1) * 100       # VIX % change
-    d["vix_hv_ratio"]= d["vix_close"] / d["hv20"].replace(0, np.nan)      # IV/HV proxy
-    d["bn_ret1"]     = (d["bn_close"] / d["bn_close"].shift(1) - 1) * 100
-    d["bn_ret20"]    = (d["bn_close"] / d["bn_close"].shift(20) - 1) * 100
-    d["dow"]         = d["date"].dt.weekday                                  # 0=Mon 4=Fri
-    d["dte"]         = d["date"].apply(
-                           lambda x: get_dte(x.date() if hasattr(x, "date") else x))
+    # ── Extended ML features ──────────────────────────────────────────────────
+    d["ema20_pct"]    = (d["bn_close"] - d["ema20"]) / d["ema20"] * 100
+    d["vix_level"]    = d["vix_close"]
+    d["vix_pct_chg"]  = d["vix_dir"] / d["vix_close"].shift(1) * 100
+    d["vix_hv_ratio"] = d["vix_close"] / d["hv20"].replace(0, np.nan)
+    d["bn_ret1"]      = (d["bn_close"] / d["bn_close"].shift(1) - 1) * 100
+    d["bn_ret20"]     = (d["bn_close"] / d["bn_close"].shift(20) - 1) * 100
+    d["dow"]          = d["date"].dt.weekday
+    d["dte"]          = d["date"].apply(
+                            lambda x: get_dte(x.date() if hasattr(x, "date") else x))
 
-    # Drop rows with NaNs in required columns
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "bn_nf_div","hv20","bn_gap","vix_pct_chg","vix_hv_ratio","bn_ret20"]
-    d = d.dropna(subset=req)
-    return d
+    return d.dropna(subset=req)
 
 
-# Feature columns fed into the RandomForest
+# 21 features fed into the RF
 FEATURE_COLS = [
-    # Rule-based signals (score components) — does ML learn to reweight them?
+    # Rule-based score components (discrete ±1 signals)
     "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",
     # Continuous versions of same signals
     "ema20_pct", "trend5", "vix_dir", "bn_nf_div",
-    # Other technical indicators (inactive in rule-based)
+    # Additional technical indicators
     "rsi14", "hv20", "bn_gap",
-    # Global market signals
+    # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
-    # Vol regime features
+    # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
-    # Momentum features
+    # Momentum
     "bn_ret1", "bn_ret20",
-    # Calendar features
+    # Calendar
     "dow", "dte",
 ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  LABEL COMPUTATION (WIN / LOSS / PARTIAL for each day)
+#  LABEL COMPUTATION — binary direction
 # ─────────────────────────────────────────────────────────────────────────────
 
 def simulate_outcome(bn_open, bn_high, bn_low, bn_close, signal, premium):
-    """
-    Simulate WIN / LOSS / PARTIAL for one trade using same-day OHLCV.
-    Mirrors backtest_engine.simulate_trade exactly (SL=15%, TP=30%, RR=2.0).
-    """
+    """Simulate WIN/LOSS/PARTIAL for one trade (mirrors backtest_engine exactly)."""
     sl_pts = (SL_PCT * premium) / 0.5
     tp_pts = (TP_PCT * premium) / 0.5
 
     if signal == "CALL":
-        sl_level = bn_open - sl_pts
-        tp_level = bn_open + tp_pts
-        sl_hit   = bn_low  <= sl_level
-        tp_hit   = bn_high >= tp_level
+        sl_hit = bn_low  <= bn_open - sl_pts
+        tp_hit = bn_high >= bn_open + tp_pts
         if sl_hit and tp_hit:
             return "WIN" if bn_close > bn_open else "LOSS"
-        elif tp_hit:
-            return "WIN"
-        elif sl_hit:
-            return "LOSS"
-        return "PARTIAL"
-    else:  # PUT
-        sl_level = bn_open + sl_pts
-        tp_level = bn_open - tp_pts
-        sl_hit   = bn_high >= sl_level
-        tp_hit   = bn_low  <= tp_level
+        return "WIN" if tp_hit else ("LOSS" if sl_hit else "PARTIAL")
+    else:
+        sl_hit = bn_high >= bn_open + sl_pts
+        tp_hit = bn_low  <= bn_open - tp_pts
         if sl_hit and tp_hit:
             return "WIN" if bn_close < bn_open else "LOSS"
-        elif tp_hit:
-            return "WIN"
-        elif sl_hit:
-            return "LOSS"
-        return "PARTIAL"
+        return "WIN" if tp_hit else ("LOSS" if sl_hit else "PARTIAL")
 
 
 def compute_labels(df):
     """
-    For each row in df, simulate both CALL and PUT outcomes.
-    Returns df with call_out, put_out, target columns.
+    Binary direction label for every trading day — no NONE class.
 
-    Target assignment:
-      CALL  — CALL=WIN and PUT=LOSS  (unambiguous bullish winning day)
-      PUT   — PUT=WIN  and CALL=LOSS (unambiguous bearish winning day)
-      NONE  — everything else (both WIN, both LOSS, either PARTIAL)
+    Priority:
+      1. CALL wins + PUT loses → CALL
+      2. PUT wins + CALL loses → PUT
+      3. Tie (both WIN, both LOSS, both PARTIAL) → sign of (close - open)
+         — bullish tiebreak → CALL, bearish → PUT
+
+    Result: every day has a CALL or PUT label. RF always predicts a direction.
     """
     rows = []
     for _, r in df.iterrows():
-        bn_open  = r["bn_open"]
-        bn_high  = r["bn_high"]
-        bn_low   = r["bn_low"]
-        bn_close = r["bn_close"]
-        date     = r["date"]
+        o, h, l, c = r["bn_open"], r["bn_high"], r["bn_low"], r["bn_close"]
+        date  = r["date"]
+        dte   = get_dte(date.date() if hasattr(date, "date") else date)
+        prem  = o * PREMIUM_K * (dte ** 0.5)
 
-        dte     = get_dte(date.date() if hasattr(date, "date") else date)
-        premium = bn_open * PREMIUM_K * (dte ** 0.5)
+        call_out = simulate_outcome(o, h, l, c, "CALL", prem)
+        put_out  = simulate_outcome(o, h, l, c, "PUT",  prem)
 
-        call_out = simulate_outcome(bn_open, bn_high, bn_low, bn_close, "CALL", premium)
-        put_out  = simulate_outcome(bn_open, bn_high, bn_low, bn_close, "PUT",  premium)
-
-        if call_out == "WIN" and put_out == "LOSS":
-            target = "CALL"
-        elif put_out == "WIN" and call_out == "LOSS":
-            target = "PUT"
+        if call_out == "WIN" and put_out != "WIN":
+            label = "CALL"
+        elif put_out == "WIN" and call_out != "WIN":
+            label = "PUT"
         else:
-            target = "NONE"
+            # Tie: use net open-to-close direction as tiebreak
+            label = "CALL" if c > o else "PUT"
 
         rows.append({"date": date, "call_out": call_out, "put_out": put_out,
-                     "target": target})
-
+                     "label": label})
     return pd.DataFrame(rows)
 
 
@@ -293,49 +278,51 @@ def compute_labels(df):
 #  WALK-FORWARD PREDICTION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_walkforward(X, y_str, dates, ml_threshold):
+def run_walkforward(X, y_bin, dates, mode="direction", ml_threshold=0.55,
+                    rule_signals=None):
     """
-    Walk-forward RandomForest prediction.
+    Walk-forward binary RandomForest.
 
-    For each day i ≥ MIN_TRAIN:
-      - Train on X[max(0,i-MAX_TRAIN_DAYS):i], y[same]
-      - Predict class probabilities for X[i]
-      - Assign ml_signal based on confidence threshold
+    For every day i:
+      - If i < MIN_TRAIN: fallback to rule_signals[i] (pre-warmup)
+      - Else: train on X[start:i], predict P(CALL) for X[i]
 
-    Returns DataFrame: date, ml_signal, ml_p_call, ml_p_put, ml_p_none, ml_conf, ml_trained.
+    mode="direction" : always output CALL or PUT — argmax, no threshold gate
+    mode="filter"    : output CALL/PUT only when max(P) >= ml_threshold, else NONE
+
+    Returns DataFrame: date, ml_signal, ml_p_call, ml_p_put, ml_conf, ml_trained.
     """
-    LABEL_TO_INT = {"NONE": 0, "CALL": 1, "PUT": 2}
-    INT_TO_LABEL = {0: "NONE", 1: "CALL", 2: "PUT"}
-
-    y = np.array([LABEL_TO_INT[l] for l in y_str])
-    n = len(X)
+    n      = len(X)
+    y      = np.array([1 if l == "CALL" else 0 for l in y_bin])   # CALL=1, PUT=0
 
     results      = []
     model        = None
-    last_retrain = -RETRAIN_EVERY  # force train on first eligible day
+    last_retrain = -RETRAIN_EVERY
 
     for i in range(n):
         date = dates[i]
 
+        # ── Pre-warmup: fallback to rule-based direction ──────────────────────
         if i < MIN_TRAIN:
+            fallback = rule_signals[i] if rule_signals is not None else "NONE"
+            # Rule says NONE on score=0 days → force a direction using trend5 tiebreak
+            if fallback == "NONE":
+                fallback = "CALL" if X[i][FEATURE_COLS.index("trend5")] >= 0 else "PUT"
             results.append({
-                "date": date, "ml_signal": "NONE",
-                "ml_p_call": 0.0, "ml_p_put": 0.0,
-                "ml_p_none": 1.0, "ml_conf": 0.0, "ml_trained": False,
+                "date": date, "ml_signal": fallback,
+                "ml_p_call": 0.5, "ml_p_put": 0.5, "ml_conf": 0.5, "ml_trained": False,
             })
             continue
 
-        # ── Retrain? ─────────────────────────────────────────────────────────
+        # ── Retrain? ──────────────────────────────────────────────────────────
         if (i - last_retrain) >= RETRAIN_EVERY:
-            train_start = max(0, i - MAX_TRAIN_DAYS)
-            X_tr = X[train_start:i]
-            y_tr = y[train_start:i]
-
-            if len(np.unique(y_tr)) >= 2:
+            start = max(0, i - MAX_TRAIN_DAYS)
+            X_tr, y_tr = X[start:i], y[start:i]
+            if len(np.unique(y_tr)) == 2:
                 model = RandomForestClassifier(
                     n_estimators=300,
                     max_depth=6,
-                    min_samples_leaf=15,
+                    min_samples_leaf=10,
                     max_features="sqrt",
                     class_weight="balanced",
                     random_state=42,
@@ -346,37 +333,39 @@ def run_walkforward(X, y_str, dates, ml_threshold):
 
         if model is None:
             results.append({
-                "date": date, "ml_signal": "NONE",
-                "ml_p_call": 0.0, "ml_p_put": 0.0,
-                "ml_p_none": 1.0, "ml_conf": 0.0, "ml_trained": False,
+                "date": date, "ml_signal": "CALL" if y[i] == 1 else "PUT",
+                "ml_p_call": 0.5, "ml_p_put": 0.5, "ml_conf": 0.5, "ml_trained": False,
             })
             continue
 
         # ── Predict ───────────────────────────────────────────────────────────
         proba   = model.predict_proba(X[i].reshape(1, -1))[0]
-        classes = model.classes_
-        p       = {INT_TO_LABEL[c]: proba[j] for j, c in enumerate(classes)}
+        # model.classes_ is sorted: [0=PUT, 1=CALL] or [0=CALL, 1=PUT]
+        cls_map = {c: j for j, c in enumerate(model.classes_)}
+        p_call  = float(proba[cls_map[1]])   # P(CALL)
+        p_put   = float(proba[cls_map[0]])   # P(PUT)
 
-        p_call = p.get("CALL", 0.0)
-        p_put  = p.get("PUT",  0.0)
-        p_none = p.get("NONE", 0.0)
-
-        if p_call >= p_put and p_call >= ml_threshold:
-            ml_signal = "CALL"
-            ml_conf   = p_call
-        elif p_put > p_call and p_put >= ml_threshold:
-            ml_signal = "PUT"
-            ml_conf   = p_put
+        if mode == "filter":
+            # Confidence-gated: skip low-confidence days
+            if p_call >= ml_threshold and p_call >= p_put:
+                ml_signal = "CALL"
+                ml_conf   = p_call
+            elif p_put >= ml_threshold and p_put > p_call:
+                ml_signal = "PUT"
+                ml_conf   = p_put
+            else:
+                ml_signal = "NONE"
+                ml_conf   = max(p_call, p_put)
         else:
-            ml_signal = "NONE"
-            ml_conf   = max(p_call, p_put, p_none)
+            # Direction oracle: always output best direction (no threshold)
+            ml_signal = "CALL" if p_call > p_put else "PUT"
+            ml_conf   = max(p_call, p_put)
 
         results.append({
             "date":      date,
             "ml_signal": ml_signal,
             "ml_p_call": round(p_call, 4),
             "ml_p_put":  round(p_put,  4),
-            "ml_p_none": round(p_none, 4),
             "ml_conf":   round(ml_conf, 4),
             "ml_trained": True,
         })
@@ -388,13 +377,13 @@ def run_walkforward(X, y_str, dates, ml_threshold):
 #  MAIN PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_ml_signals(ml_threshold=0.55, mode="ml"):
+def generate_ml_signals(mode="direction", ml_threshold=0.55):
     """
-    Full pipeline:
-      load → indicators → labels → walk-forward RF → save signals_ml.csv
+    Full pipeline: load → indicators → labels → walk-forward → save signals_ml.csv.
 
-    mode : "ml"       — use ML signal as final signal
-           "combined" — require both rule-based score AND ML to agree
+    mode="direction" : ML direction oracle — CALL or PUT on every eligible day.
+                       Trade count ≥ rule-based. WR improves via better direction.
+    mode="filter"    : confidence gate — fewer trades, higher WR.
     """
     print("Loading data...")
     raw = load_all_data()
@@ -402,69 +391,56 @@ def generate_ml_signals(ml_threshold=0.55, mode="ml"):
           f"({raw['date'].min().date()} to {raw['date'].max().date()})")
 
     print("Computing indicators and features...")
-    df = compute_features(raw)
-
-    # ── Filter to trading weekdays (Mon/Tue/Thu/Fri — same as signal_engine) ──
+    df      = compute_features(raw)
     trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
     print(f"  Trading days (Mon/Tue/Thu/Fri): {len(trading)}")
 
-    # ── Compute labels ────────────────────────────────────────────────────────
-    print("Simulating trade outcomes for all trading days (labels)...")
+    print("Computing directional labels...")
     labels_df = compute_labels(trading)
+    dist      = labels_df["label"].value_counts()
+    tot_lbl   = len(labels_df)
+    print(f"  Labels: CALL={dist.get('CALL',0)} ({dist.get('CALL',0)/tot_lbl*100:.1f}%)  "
+          f"PUT={dist.get('PUT',0)} ({dist.get('PUT',0)/tot_lbl*100:.1f}%)")
 
-    # Distribution check
-    dist = labels_df["target"].value_counts()
-    total_lbl = len(labels_df)
-    print(f"  Label distribution: "
-          f"CALL={dist.get('CALL',0)} ({dist.get('CALL',0)/total_lbl*100:.1f}%)  "
-          f"PUT={dist.get('PUT',0)} ({dist.get('PUT',0)/total_lbl*100:.1f}%)  "
-          f"NONE={dist.get('NONE',0)} ({dist.get('NONE',0)/total_lbl*100:.1f}%)")
+    # ── Feature matrix ────────────────────────────────────────────────────────
+    X            = trading[FEATURE_COLS].values.astype(float)
+    y_bin        = labels_df["label"].values
+    dates        = trading["date"].values
+    rule_signals = trading["rule_signal"].values
 
-    # ── Build feature matrix ──────────────────────────────────────────────────
-    X       = trading[FEATURE_COLS].values.astype(float)
-    y_str   = labels_df["target"].values
-    dates   = trading["date"].values
+    # ── Walk-forward ──────────────────────────────────────────────────────────
+    desc = ("direction oracle — all trades, ML picks direction"
+            if mode == "direction"
+            else f"filter mode — threshold={ml_threshold}, fewer trades, higher WR")
+    print(f"Running walk-forward [{desc}]...")
 
-    # ── Walk-forward prediction ───────────────────────────────────────────────
-    print(f"Running walk-forward prediction  "
-          f"[min_train={MIN_TRAIN}, retrain_every={RETRAIN_EVERY}, "
-          f"window={MAX_TRAIN_DAYS}, threshold={ml_threshold}]")
+    preds_df = run_walkforward(X, y_bin, dates, mode=mode,
+                               ml_threshold=ml_threshold,
+                               rule_signals=rule_signals)
 
-    preds_df = run_walkforward(X, y_str, dates, ml_threshold)
-
-    # ── Merge predictions with features ──────────────────────────────────────
+    # ── Merge ─────────────────────────────────────────────────────────────────
     merged = trading.copy()
     merged = merged.merge(preds_df, on="date", how="left")
-    merged = merged.merge(labels_df[["date","call_out","put_out","target"]],
+    merged = merged.merge(labels_df[["date","call_out","put_out","label"]],
                           on="date", how="left")
 
-    # ── Apply event day filter ────────────────────────────────────────────────
+    # ── Event day override ────────────────────────────────────────────────────
     merged["event_day"] = merged["date"].apply(
         lambda d: (d.date() if hasattr(d, "date") else d) in EVENT_DATES)
 
-    # ── Determine final signal ────────────────────────────────────────────────
-    if mode == "combined":
-        # Enter only when BOTH rule-based score AND ML agree on direction
-        def combined_signal(row):
-            if row["event_day"]:
-                return "NONE"
-            if not row["ml_trained"]:
-                return "NONE"
-            rule = row["rule_signal"]
-            ml   = row["ml_signal"]
-            return rule if rule == ml and rule != "NONE" else "NONE"
-        merged["signal"] = merged.apply(combined_signal, axis=1)
-    else:
-        # ML-only: use ML prediction, override to NONE on event days
-        merged["signal"] = np.where(
-            merged["event_day"] | ~merged["ml_trained"],
-            "NONE",
-            merged["ml_signal"]
-        )
+    # Final signal: ML direction, except event days → NONE
+    merged["signal"] = np.where(merged["event_day"], "NONE", merged["ml_signal"])
 
-    # ── Build output in signals.csv-compatible format ─────────────────────────
-    merged["weekday"] = merged["date"].dt.day_name()
-    merged["date"]    = merged["date"].dt.date
+    # ── Tidy up output ────────────────────────────────────────────────────────
+    merged["weekday"]   = merged["date"].dt.day_name()
+    merged["date"]      = merged["date"].dt.date
+    merged["score"]     = merged["rule_score"]
+    merged["threshold"] = 1
+
+    for col in ["bn_close","ema20","rsi14","trend5","vix_dir",
+                "sp500_chg","nikkei_chg","spf_gap","bn_nf_div","hv20","bn_gap"]:
+        if col in merged.columns:
+            merged[col] = merged[col].round(2)
 
     out_cols = [
         "date", "weekday", "event_day",
@@ -472,55 +448,51 @@ def generate_ml_signals(ml_threshold=0.55, mode="ml"):
         "sp500_chg", "nikkei_chg", "spf_gap", "bn_nf_div", "hv20", "bn_gap",
         "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",
         "rule_score", "rule_signal",
-        "ml_signal", "ml_p_call", "ml_p_put", "ml_p_none", "ml_conf", "ml_trained",
-        "call_out", "put_out", "target",
-        "signal",
+        "ml_signal", "ml_p_call", "ml_p_put", "ml_conf", "ml_trained",
+        "call_out", "put_out", "label",
+        "score", "signal", "threshold",
     ]
-    # Add score column (same as rule_score, for backtest compatibility)
-    merged["score"]    = merged["rule_score"]
-    merged["threshold"] = 1   # embed for backtest_engine to read
-
-    # Round numeric columns
-    for col in ["bn_close","ema20","rsi14","trend5","vix_dir",
-                "sp500_chg","nikkei_chg","spf_gap","bn_nf_div","hv20","bn_gap"]:
-        if col in merged.columns:
-            merged[col] = merged[col].round(2)
-
-    final_cols = out_cols + ["score", "threshold"]
-    out = merged[[c for c in final_cols if c in merged.columns]]
+    out = merged[[c for c in out_cols if c in merged.columns]]
     out.to_csv(f"{DATA_DIR}/signals_ml.csv", index=False)
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    traded    = out[out["signal"].isin(["CALL", "PUT"])]
-    n_call    = (traded["signal"] == "CALL").sum()
-    n_put     = (traded["signal"] == "PUT").sum()
-    n_none    = (out["signal"] == "NONE").sum()
-    n_event   = out["event_day"].sum()
-    n_trained = out["ml_trained"].sum()
-    total_td  = len(out)
+    traded  = out[out["signal"].isin(["CALL","PUT"])]
+    n_call  = (traded["signal"] == "CALL").sum()
+    n_put   = (traded["signal"] == "PUT").sum()
+    n_event = int(out["event_day"].sum())
+    n_none  = int((out["signal"] == "NONE").sum())
+    total   = len(out)
 
-    print(f"\n{'='*60}")
-    print(f"  ML ENGINE OUTPUT  [{mode.upper()} mode, threshold={ml_threshold}]")
-    print(f"{'='*60}")
-    print(f"  Trading days scanned     : {total_td}")
-    print(f"  Days with trained model  : {n_trained}  (first {MIN_TRAIN} = warmup)")
-    print(f"  CALL signals             : {n_call}  ({n_call/total_td*100:.1f}%)")
-    print(f"  PUT  signals             : {n_put}  ({n_put/total_td*100:.1f}%)")
-    print(f"  NONE (event filter)      : {n_event}")
-    print(f"  NONE (low confidence)    : {n_none - n_event}")
-    print(f"{'─'*60}")
+    # Compare vs rule-based
+    rule_traded = out[out["rule_signal"].isin(["CALL","PUT"])]
+    n_agree  = (traded["signal"] == traded["rule_signal"]).sum() if len(traded) > 0 else 0
+    n_flip   = len(traded) - n_agree
+    warmup   = int((~out["ml_trained"]).sum())
 
-    # Per-day breakdown
-    for day in ["Monday","Tuesday","Wednesday","Thursday","Friday"]:
+    print(f"\n{'='*62}")
+    print(f"  ML ENGINE  [{mode.upper()} mode]")
+    print(f"{'='*62}")
+    print(f"  Total trading days       : {total}")
+    print(f"  CALL signals             : {n_call}  ({n_call/total*100:.1f}%)")
+    print(f"  PUT  signals             : {n_put}  ({n_put/total*100:.1f}%)")
+    print(f"  NONE (event days)        : {n_event}")
+    if mode == "filter":
+        print(f"  NONE (low confidence)    : {n_none - n_event}")
+    print(f"  Warmup days (rule-based fallback): {warmup}")
+    print(f"{'─'*62}")
+    print(f"  vs rule-based ({len(rule_traded)} trades):")
+    print(f"  ML agrees with rule      : {n_agree}  ({n_agree/len(traded)*100:.1f}% of ML trades)")
+    print(f"  ML flipped direction     : {n_flip}  (rule said X, ML says opposite)")
+    print(f"{'─'*62}")
+    for day in ["Monday","Tuesday","Thursday","Friday"]:
         d = traded[traded["weekday"] == day]
         if len(d) == 0:
             continue
         dc = (d["signal"] == "CALL").sum()
         dp = (d["signal"] == "PUT").sum()
         print(f"  {day:<10}: {len(d):>3} trades | CALL {dc} | PUT {dp}")
-    print(f"{'='*60}")
+    print(f"{'='*62}")
     print(f"\nSaved → {DATA_DIR}/signals_ml.csv")
-
     return out
 
 
@@ -529,96 +501,89 @@ def generate_ml_signals(ml_threshold=0.55, mode="ml"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_analysis():
-    """
-    Load signals_ml.csv and print:
-      - Walk-forward accuracy vs actual labels
-      - Confusion matrix
-      - Feature importance (from final model fit)
-      - Comparison: ML signals vs rule-based signals
-    """
+    """Feature importance, directional accuracy, and signal-vs-label cross-tab."""
     print("Loading data for analysis...")
-    raw = load_all_data()
-    df  = compute_features(raw)
+    raw     = load_all_data()
+    df      = compute_features(raw)
     trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
 
     print("Computing labels...")
-    labels_df = compute_labels(trading)
+    labels_df    = compute_labels(trading)
+    X            = trading[FEATURE_COLS].values.astype(float)
+    y_bin        = labels_df["label"].values
+    dates        = trading["date"].values
+    rule_signals = trading["rule_signal"].values
 
-    X     = trading[FEATURE_COLS].values.astype(float)
-    y_str = labels_df["target"].values
-    dates = trading["date"].values
+    print("Running walk-forward (direction mode) for analysis...")
+    preds_df = run_walkforward(X, y_bin, dates, mode="direction",
+                               rule_signals=rule_signals)
 
-    print("Running walk-forward for analysis (threshold=0.50 for max coverage)...")
-    preds_df = run_walkforward(X, y_str, dates, ml_threshold=0.50)
-
+    # ── Directional accuracy (trained days only) ──────────────────────────────
     trained = preds_df[preds_df["ml_trained"]].copy()
-    trained_idx = trained.index.tolist()
-    y_true  = y_str[trained_idx]
+    idx     = trained.index.tolist()
+    y_true  = y_bin[idx]
     y_pred  = trained["ml_signal"].values
 
-    print(f"\n{'='*65}")
-    print(f"  WALK-FORWARD PERFORMANCE  (threshold=0.50, trained days only)")
-    print(f"{'='*65}")
-    print(classification_report(y_true, y_pred, target_names=["CALL","NONE","PUT"],
-                                 labels=["CALL","NONE","PUT"], zero_division=0))
+    correct = (y_true == y_pred).sum()
+    total   = len(y_true)
+    print(f"\n{'='*60}")
+    print(f"  WALK-FORWARD DIRECTIONAL ACCURACY  (trained days only)")
+    print(f"{'='*60}")
+    print(f"  Correct direction: {correct} / {total}  ({correct/total*100:.1f}%)")
+    print(f"  (baseline: 50% = random, rule-based: ~55-60% estimated)")
+    print()
+    print(classification_report(y_true, y_pred, target_names=["CALL","PUT"],
+                                 labels=["CALL","PUT"], zero_division=0))
 
-    print(f"  Confusion matrix  (rows=actual, cols=predicted):")
-    cm = confusion_matrix(y_true, y_pred, labels=["CALL","NONE","PUT"])
-    cm_df = pd.DataFrame(cm, index=["Act:CALL","Act:NONE","Act:PUT"],
-                             columns=["Pred:CALL","Pred:NONE","Pred:PUT"])
+    cm = confusion_matrix(y_true, y_pred, labels=["CALL","PUT"])
+    cm_df = pd.DataFrame(cm, index=["Act:CALL","Act:PUT"],
+                             columns=["Pred:CALL","Pred:PUT"])
+    print("  Confusion matrix (rows=actual, cols=predicted):")
     print(cm_df.to_string())
-    print(f"{'='*65}")
 
-    # Feature importance from a full-data fit
-    print(f"\nFitting full model for feature importance...")
-    LABEL_TO_INT = {"NONE": 0, "CALL": 1, "PUT": 2}
-    y_int = np.array([LABEL_TO_INT[l] for l in y_str])
+    # ── Feature importance ────────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  FEATURE IMPORTANCE (full-data RF fit)")
+    print(f"{'='*60}")
+    LABEL_MAP = {"CALL": 1, "PUT": 0}
+    y_int = np.array([LABEL_MAP[l] for l in y_bin])
     full_model = RandomForestClassifier(n_estimators=300, max_depth=6,
-                                         min_samples_leaf=15, max_features="sqrt",
+                                         min_samples_leaf=10, max_features="sqrt",
                                          class_weight="balanced", random_state=42,
                                          n_jobs=-1)
     full_model.fit(X, y_int)
+    imps = pd.Series(full_model.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
 
-    importances = pd.Series(full_model.feature_importances_, index=FEATURE_COLS)
-    importances = importances.sort_values(ascending=False)
+    print(f"  {'Feature':<20} {'Importance':>10}  Bar")
+    print(f"  {'─'*50}")
+    for feat, imp in imps.items():
+        bar = "█" * int(imp * 300)
+        print(f"  {feat:<20} {imp:>10.4f}  {bar}")
 
-    print(f"\n  FEATURE IMPORTANCE (Gini impurity, full-data fit)")
-    print(f"  {'Feature':<20} {'Importance':>12}  {'Bar':}")
-    print(f"  {'─'*55}")
-    for feat, imp in importances.items():
-        bar = "█" * int(imp * 200)
-        print(f"  {feat:<20} {imp:>11.4f}  {bar}")
+    # ── Comparison: rule vs ML direction ─────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  ML vs RULE-BASED DIRECTION COMPARISON")
+    print(f"{'='*60}")
+    agree_ml   = (y_true == y_pred).sum()
+    agree_rule = (y_true == rule_signals[idx]).sum() if len(idx) > 0 else 0
+    print(f"  ML correct direction  : {correct}/{total} = {correct/total*100:.1f}%")
+    print(f"  Rule correct direction: {agree_rule}/{total} = {agree_rule/total*100:.1f}%")
+    print(f"  ML improvement        : +{(correct-agree_rule)/total*100:.1f}pp")
 
-    # ── Signal comparison: rule-based vs ML ───────────────────────────────────
-    print(f"\n{'='*65}")
-    print(f"  SIGNAL AGREEMENT ANALYSIS")
-    print(f"{'='*65}")
-
-    try:
-        sig_csv  = pd.read_csv(f"{DATA_DIR}/signals_ml.csv", parse_dates=["date"])
-        agree    = sig_csv[sig_csv["rule_signal"] == sig_csv["ml_signal"]]
-        disagree = sig_csv[sig_csv["rule_signal"] != sig_csv["ml_signal"]]
-        total    = len(sig_csv)
-        print(f"  Total days      : {total}")
-        print(f"  Agree           : {len(agree)}  ({len(agree)/total*100:.1f}%)")
-        print(f"  Disagree        : {len(disagree)}  ({len(disagree)/total*100:.1f}%)")
-
-        print(f"\n  Signal cross-tab:")
-        ct = pd.crosstab(sig_csv["rule_signal"], sig_csv["ml_signal"],
-                         rownames=["Rule"], colnames=["ML"])
-        print(ct.to_string())
-
-        # Win rate by signal agreement
-        trade_sig = sig_csv[sig_csv["signal"].isin(["CALL","PUT"])]
-        if len(trade_sig) > 0:
-            agree_trade = trade_sig[trade_sig["rule_signal"] == trade_sig["ml_signal"]]
-            disag_trade = trade_sig[trade_sig["rule_signal"] != trade_sig["ml_signal"]]
-            print(f"\n  Among traded signals:")
-            print(f"  Rule=ML agree:    {len(agree_trade)} trades")
-            print(f"  Rule≠ML disagree: {len(disag_trade)} trades")
-    except FileNotFoundError:
-        print("  signals_ml.csv not found — run without --analyze first.")
-    print(f"{'='*65}")
+    # On days where rule and ML disagree — who was right?
+    preds_merged = preds_df.copy()
+    preds_merged["true_label"]   = pd.Series(y_bin)
+    preds_merged["rule_signal"]  = pd.Series(rule_signals)
+    trained_full = preds_merged[preds_merged["ml_trained"]].copy()
+    disagree = trained_full[trained_full["ml_signal"] != trained_full["rule_signal"]]
+    if len(disagree) > 0:
+        ml_right_on_flip   = (disagree["ml_signal"]   == disagree["true_label"]).sum()
+        rule_right_on_flip = (disagree["rule_signal"]  == disagree["true_label"]).sum()
+        print(f"\n  On days where ML and rule DISAGREE ({len(disagree)} days):")
+        print(f"  ML was right  : {ml_right_on_flip} ({ml_right_on_flip/len(disagree)*100:.1f}%)")
+        print(f"  Rule was right: {rule_right_on_flip} ({rule_right_on_flip/len(disagree)*100:.1f}%)")
+        print(f"  → ML gains WR by flipping these {len(disagree)} trades correctly")
+    print(f"{'='*60}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -630,13 +595,15 @@ def main():
         run_analysis()
         return
 
-    print(f"ML Engine  [{MODE.upper()} mode | threshold={ML_THRESHOLD}]")
-    generate_ml_signals(ml_threshold=ML_THRESHOLD, mode=MODE)
-    print(f"\nRun backtest:")
-    print(f"  python3 backtest_engine.py --ml")
-    if MODE == "ml":
-        print(f"\nOr try combined mode (stricter, higher WR):")
-        print(f"  python3 ml_engine.py --combined {ML_THRESHOLD}")
+    generate_ml_signals(mode=MODE, ml_threshold=ML_THRESHOLD)
+
+    if MODE == "direction":
+        print(f"\nRun backtest:")
+        print(f"  python3 backtest_engine.py --ml")
+        print(f"\nFor analysis (feature importance + accuracy):")
+        print(f"  python3 ml_engine.py --analyze")
+        print(f"\nFor fewer-trades / higher-WR filter mode:")
+        print(f"  python3 ml_engine.py --filter 0.60")
         print(f"  python3 backtest_engine.py --ml")
 
 
