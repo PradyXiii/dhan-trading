@@ -99,6 +99,11 @@ if diag.get("errorCode") != "DH-906":
 print("  → DH-906 confirmed — base params valid.\n")
 
 
+# ── NOTE: Dhan AMO acceptance window is WEEKDAYS ONLY ────────────────────────
+# Mon-Fri after 3:30 PM IST until next day 8:59 AM IST.
+# On Saturday/Sunday Dhan returns DH-906 "Account not enabled for Online Trading"
+# for ANY afterMarketOrder:true request — this is a misleading error; the account
+# IS enabled, Dhan just doesn't accept AMO orders on weekends.
 # ── Step 2b: Equity CNC AMO with amoTime ──────────────────────────────────────
 r_a = post_order(
     "[2b] NSE_EQ CNC LIMIT AMO — price ₹1000, amoTime=OPEN",
@@ -156,8 +161,13 @@ try:
         json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": ""},
         timeout=15,
     )
-    chain = chain_resp.json()
     print(f"  Option chain HTTP {chain_resp.status_code}")
+    if chain_resp.status_code != 200:
+        print(f"  Option chain unavailable (weekend/holiday): {chain_resp.text[:120]}")
+        raise RuntimeError("chain not available")
+    chain = chain_resp.json()
+    if not isinstance(chain, dict):
+        raise RuntimeError(f"unexpected response type: {type(chain)}")
 
     # Parse: chain['data']['811']['oc'] = {strike: {ce: {...}, pe: {...}}}
     inner = (chain.get("data") or {}).get("811") or {}

@@ -625,6 +625,7 @@ def place_super_order(security_id: str, signal: str, lots: int,
             "triggerPrice":      0,
             "disclosedQuantity": 0,
             "afterMarketOrder":  True,
+            "amoTime":           "OPEN",   # required by Dhan v2 alongside afterMarketOrder
         }
         try:
             amo_resp = requests.post("https://api.dhan.co/v2/orders",
