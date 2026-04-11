@@ -22,6 +22,28 @@ WEDNESDAY_WEEKLY_START = _date(2024,  3,  1)   # weekly shifted Thu → Wed
 WEEKLY_DISCONTINUED    = _date(2024, 11, 20)   # SEBI: weekly BN options removed
 TUESDAY_EXPIRY_FROM    = _date(2025,  9,  1)   # NSE: monthly shifted Wed → Tue
 
+# ── Historical lot sizes ──────────────────────────────────────────────────────
+# SEBI mandate (min contract value ₹15L) drove these changes.
+# Source: NSE circulars + PL Capital research
+_LOT_15_UNTIL  = _date(2024, 11, 20)   # before SEBI mandate: lot = 15
+_LOT_30_BRIEF  = _date(2025,  1,  1)   # briefly 30 (Nov–Dec 2024)
+_LOT_35_UNTIL  = _date(2026,  1, 27)   # 2025 lot = 35 (first monthly expiry Jan 2026 ends this)
+# Jan 27 2026 onwards: lot = 30 (current)
+# NOTE: if you find the exact date 30→35 changed (likely Feb 2025), update _LOT_30_BRIEF
+
+def get_lot_size(d):
+    """Return the correct BankNifty lot size for a historical trade date."""
+    if isinstance(d, pd.Timestamp):
+        d = d.date()
+    if d < _LOT_15_UNTIL:
+        return 15
+    elif d < _LOT_30_BRIEF:
+        return 30
+    elif d < _LOT_35_UNTIL:
+        return 35
+    else:
+        return 30
+
 
 def last_wednesday(year, month):
     """Last Wednesday of the given year/month."""
@@ -120,12 +142,15 @@ def fmt_inr(amount):
 #   Stamp duty     : 0.003% on buy-side premium
 #   SEBI turnover  : 0.0001% on total turnover (both sides) — negligible
 
-def calculate_charges(premium, lots, breakdown=False):
+def calculate_charges(premium, lots, lot_size=None, breakdown=False):
     """
     Return total round-trip transaction cost for one trade.
     If breakdown=True, returns (total, dict_of_components).
+    lot_size defaults to current LOT_SIZE (30) if not provided.
     """
-    pv = lots * LOT_SIZE * premium          # total premium value
+    if lot_size is None:
+        lot_size = LOT_SIZE
+    pv = lots * lot_size * premium          # total premium value
 
     brokerage  = 40.0                       # ₹20 × 2 orders
     stt        = 0.000625 * pv              # 0.0625% on sell side
@@ -173,7 +198,8 @@ def load_bn_ohlcv():
 
 def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                    flat_rr=None, day_rr_override=None,
-                   bn_tp_pts=None, bn_sl_pts=None, dte_override=None):
+                   bn_tp_pts=None, bn_sl_pts=None, dte_override=None,
+                   lot_size=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
@@ -213,6 +239,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         rr = DAY_RR.get(weekday, 1.4)
     sl   = sl_pct  if sl_pct  is not None else SL_PCT
     premium = bn_open * PREMIUM_K * (dte ** 0.5)
+    ls    = lot_size if lot_size is not None else LOT_SIZE   # historical lot size
 
     # ── SL / TP levels in BN points (ATM delta ≈ 0.5) ────────────────────────
     if bn_tp_pts is not None and bn_sl_pts is not None:
@@ -220,12 +247,12 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         sl_pts = bn_sl_pts
         tp_pts = bn_tp_pts
         option_sl_loss = bn_sl_pts * 0.5       # option price drop at SL (delta=0.5)
-        max_loss_1lot  = LOT_SIZE * option_sl_loss
+        max_loss_1lot  = ls * option_sl_loss
     else:
         # Premium% mode: SL/TP as % of option premium
         sl_pts = (sl * premium) / 0.5
         tp_pts = (rr * sl * premium) / 0.5
-        max_loss_1lot = LOT_SIZE * premium * sl
+        max_loss_1lot = ls * premium * sl
 
     # ── Lot sizing ────────────────────────────────────────────────────────────
     if max_loss_1lot > capital * 0.15:
@@ -244,7 +271,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         No breakeven cap — trail SL can exit profitably when price moves far enough.
         """
         opt_exit = premium * (1 - sl) + n_steps * trail_jump_opt
-        gross    = (opt_exit - premium) * lots * LOT_SIZE
+        gross    = (opt_exit - premium) * lots * ls
         label    = "TRAIL_SL" if opt_exit > premium * (1 - sl) else "LOSS"
         return gross, label
 
@@ -267,12 +294,12 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         elif sl_hit:
             if trail_jump_opt > 0 and steps > 0:
                 gross, label = trail_exit_pnl(fav, steps)
-                charges, bd  = calculate_charges(premium, lots, breakdown=True)
+                charges, bd  = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
                 return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd
             result = "LOSS"
         else:
-            gross = (bn_close - bn_open) * 0.5 * lots * LOT_SIZE
-            charges, bd = calculate_charges(premium, lots, breakdown=True)
+            gross = (bn_close - bn_open) * 0.5 * lots * ls
+            charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
             return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
 
     # ── PUT exit logic ────────────────────────────────────────────────────────
@@ -294,26 +321,26 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         elif sl_hit:
             if trail_jump_opt > 0 and steps > 0:
                 gross, label = trail_exit_pnl(fav, steps)
-                charges, bd  = calculate_charges(premium, lots, breakdown=True)
+                charges, bd  = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
                 return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd
             result = "LOSS"
         else:
-            gross = (bn_open - bn_close) * 0.5 * lots * LOT_SIZE
-            charges, bd = calculate_charges(premium, lots, breakdown=True)
+            gross = (bn_open - bn_close) * 0.5 * lots * ls
+            charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
             return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
 
-    charges, bd = calculate_charges(premium, lots, breakdown=True)
+    charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
     if bn_tp_pts is not None and bn_sl_pts is not None:
         # BN-point mode: P&L based on fixed BN-point SL/TP, delta=0.5
         if result == "WIN":
-            pnl =  lots * LOT_SIZE * bn_tp_pts * 0.5 - charges
+            pnl =  lots * ls * bn_tp_pts * 0.5 - charges
         else:
-            pnl = -lots * LOT_SIZE * bn_sl_pts * 0.5 - charges
+            pnl = -lots * ls * bn_sl_pts * 0.5 - charges
     else:
         if result == "WIN":
-            pnl =  lots * LOT_SIZE * premium * rr * sl - charges
+            pnl =  lots * ls * premium * rr * sl - charges
         else:
-            pnl = -lots * LOT_SIZE * premium * sl - charges
+            pnl = -lots * ls * premium * sl - charges
 
     return round(pnl, 2), result, lots, round(premium, 2), charges, bd
 
@@ -340,7 +367,8 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             current_month = month_key
 
         capital_before = capital
-        actual_dte = get_dte(date) if use_actual_dte else None
+        actual_dte  = get_dte(date) if use_actual_dte else None
+        actual_lots = get_lot_size(date)
         pnl, result, lots, premium, charges, charges_bd = simulate_trade(
             row, bn_ohlcv, capital,
             trail_jump_opt=trail_jump_opt,
@@ -349,7 +377,8 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             day_rr_override=day_rr_override,
             bn_tp_pts=bn_tp_pts,
             bn_sl_pts=bn_sl_pts,
-            dte_override=actual_dte)
+            dte_override=actual_dte,
+            lot_size=actual_lots)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -363,7 +392,8 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             "bn_open":        round(bn_open, 2) if bn_open else None,
             "premium":        premium,
             "lots":           lots,
-            "risk_amt":       round(lots * LOT_SIZE * premium * SL_PCT, 2),
+            "lot_size":       actual_lots,
+            "risk_amt":       round(lots * actual_lots * premium * SL_PCT, 2),
             "charges":        charges,
             **charges_bd,
             "result":         result,
