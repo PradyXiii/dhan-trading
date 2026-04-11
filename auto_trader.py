@@ -172,8 +172,8 @@ def get_capital() -> float:
 def get_expiry() -> date:
     """
     Find the nearest valid BankNifty expiry using the /optionchain/expirylist endpoint.
-    Returns the nearest upcoming expiry date. Falls back to Wednesday calculation
-    if the API is unavailable.
+    Returns the nearest upcoming expiry date. Falls back to last-Tuesday calculation
+    if the API is unavailable. Phase 4 (Sep 2025+): monthly, last Tuesday of month.
     """
     today = date.today()
     try:
@@ -191,9 +191,9 @@ def get_expiry() -> date:
                 expiry = min(upcoming)
                 notify.log(f"Expiry from API: {expiry}  (all: {[e for e in expiries[:4]]})")
                 return expiry
-        notify.log(f"Expiry list API returned {resp.status_code} — falling back to Wednesday calc")
+        notify.log(f"Expiry list API returned {resp.status_code} — falling back to last-Tuesday calc")
     except Exception as e:
-        notify.log(f"Expiry list API failed ({e}) — falling back to Wednesday calc")
+        notify.log(f"Expiry list API failed ({e}) — falling back to last-Tuesday calc")
 
     # Fallback: last Tuesday of current month (BN monthly expires last Tuesday).
     # If that date is in the past, use next month's last Tuesday.
@@ -520,7 +520,7 @@ def main():
         )
 
     # 5. Sizing — calculate actual DTE from today to expiry (monthly expiry now)
-    # BN switched to monthly expiry (last Wed of month). DTE varies 0–28 across the month.
+    # Phase 4 (Sep 2025+): monthly expiry, last Tuesday of month. DTE varies 1–28.
     # MIN 0.25 so expiry-day premium is nonzero; +1 because options trade on expiry morning.
     dte     = max(0.25, (expiry - date.today()).days + 1)
     rr      = RR
