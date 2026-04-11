@@ -298,6 +298,8 @@ def run_walkforward(X, y_bin, dates, mode="direction", ml_threshold=0.55,
     results      = []
     model        = None
     last_retrain = -RETRAIN_EVERY
+    n_retrains   = 0
+    print(f"  0/{n} days  (retraining every {RETRAIN_EVERY} days from day {MIN_TRAIN})", end="\r", flush=True)
 
     for i in range(n):
         date = dates[i]
@@ -320,7 +322,7 @@ def run_walkforward(X, y_bin, dates, mode="direction", ml_threshold=0.55,
             X_tr, y_tr = X[start:i], y[start:i]
             if len(np.unique(y_tr)) == 2:
                 model = RandomForestClassifier(
-                    n_estimators=300,
+                    n_estimators=100,       # 100 trees: fast + stable for financial data
                     max_depth=6,
                     min_samples_leaf=10,
                     max_features="sqrt",
@@ -329,7 +331,9 @@ def run_walkforward(X, y_bin, dates, mode="direction", ml_threshold=0.55,
                     n_jobs=-1,
                 )
                 model.fit(X_tr, y_tr)
+                n_retrains += 1
             last_retrain = i
+            print(f"  {i}/{n} days  [{n_retrains} models trained]", end="\r", flush=True)
 
         if model is None:
             results.append({
