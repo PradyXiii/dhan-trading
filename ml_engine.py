@@ -43,6 +43,8 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+# Suppress warnings in joblib worker processes (they don't inherit filterwarnings)
+os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
@@ -506,21 +508,21 @@ def generate_ml_signals(mode="direction", ml_threshold=0.55):
 
 def run_analysis():
     """Feature importance, directional accuracy, and signal-vs-label cross-tab."""
-    print("Loading data for analysis...")
+    print("Step 1/3: Loading data and computing labels...")
     raw     = load_all_data()
     df      = compute_features(raw)
     trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
 
-    print("Computing labels...")
     labels_df    = compute_labels(trading)
     X            = trading[FEATURE_COLS].values.astype(float)
     y_bin        = labels_df["label"].values
     dates        = trading["date"].values
     rule_signals = trading["rule_signal"].values
 
-    print("Running walk-forward (direction mode) for analysis...")
+    print("Step 2/3: Walk-forward (direction mode) — ~2 min...")
     preds_df = run_walkforward(X, y_bin, dates, mode="direction",
                                rule_signals=rule_signals)
+    print("  Walk-forward done.")
 
     # ── Directional accuracy (trained days only) ──────────────────────────────
     trained = preds_df[preds_df["ml_trained"]].copy()
@@ -546,12 +548,13 @@ def run_analysis():
     print(cm_df.to_string())
 
     # ── Feature importance ────────────────────────────────────────────────────
+    print(f"\nStep 3/3: Training full model for feature importance...")
     print(f"\n{'='*60}")
     print(f"  FEATURE IMPORTANCE (full-data RF fit)")
     print(f"{'='*60}")
     LABEL_MAP = {"CALL": 1, "PUT": 0}
     y_int = np.array([LABEL_MAP[l] for l in y_bin])
-    full_model = RandomForestClassifier(n_estimators=300, max_depth=6,
+    full_model = RandomForestClassifier(n_estimators=100, max_depth=6,
                                          min_samples_leaf=10, max_features="sqrt",
                                          class_weight="balanced", random_state=42,
                                          n_jobs=-1)
