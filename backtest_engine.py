@@ -13,40 +13,41 @@ MONTHLY_TOPUP    = 10_000
 PREMIUM_K        = 0.004
 MAX_LOTS         = 20
 
-# BN switched from weekly (every Wed) to monthly (last Wed of month) in Sep 2024
-# NSE removed weekly BN expiry; only Nifty50 kept weekly after SEBI directive
+# BN switched from weekly (every Wed) to monthly (last Tue of month) in Sep 2024.
+# NSE removed weekly BN expiry after SEBI directive; monthly expires last Tuesday.
+# Quarterly far-month contracts also exist (Mar/Jun/Sep/Dec) but we use nearest.
 MONTHLY_EXPIRY_FROM = _date(2024, 9, 11)   # first monthly expiry date
 
 
-def last_wednesday(year, month):
-    """Last Wednesday of the given year/month."""
+def last_tuesday(year, month):
+    """Last Tuesday of the given year/month."""
     last_day = _cal.monthrange(year, month)[1]
     for d in range(last_day, last_day - 7, -1):
-        if _date(year, month, d).weekday() == 2:
+        if _date(year, month, d).weekday() == 1:   # 1 = Tuesday
             return _date(year, month, d)
 
 
 def get_expiry(d):
     """
     Returns the relevant BN expiry date for a given trading date.
-    - Before Sep 2024: weekly (next Wednesday, or same if today is Wednesday)
-    - Sep 2024 onwards: monthly (last Wednesday of the month; if past it, next month)
+    - Before Sep 2024: weekly (next Wednesday — NSE weekly BN options expired Wed)
+    - Sep 2024 onwards: monthly (last Tuesday of the month; if past it, next month)
     """
     if isinstance(d, pd.Timestamp):
         d = d.date()
     if d < MONTHLY_EXPIRY_FROM:
-        # Weekly: next Wednesday
+        # Weekly: next Wednesday (weekday 2)
         days_ahead = (2 - d.weekday()) % 7
         if days_ahead == 0:
             days_ahead = 7
         return d + timedelta(days=days_ahead)
     else:
-        # Monthly: last Wednesday of this month, else next month
-        last_wed = last_wednesday(d.year, d.month)
-        if d > last_wed:
+        # Monthly: last Tuesday of this month, else next month
+        last_tue = last_tuesday(d.year, d.month)
+        if d > last_tue:
             nxt = d.replace(day=1) + timedelta(days=32)
-            last_wed = last_wednesday(nxt.year, nxt.month)
-        return last_wed
+            last_tue = last_tuesday(nxt.year, nxt.month)
+        return last_tue
 
 
 def get_dte(d):

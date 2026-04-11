@@ -180,22 +180,22 @@ def get_expiry() -> date:
     except Exception as e:
         notify.log(f"Expiry list API failed ({e}) — falling back to Wednesday calc")
 
-    # Fallback: last Wednesday of current month (BN is now monthly expiry).
-    # If that date is in the past, use next month's last Wednesday.
+    # Fallback: last Tuesday of current month (BN monthly expires last Tuesday).
+    # If that date is in the past, use next month's last Tuesday.
     import calendar as _cal
-    def _last_wed(year, month):
+    def _last_tue(year, month):
         last_day = _cal.monthrange(year, month)[1]
         d = date(year, month, last_day)
-        while d.weekday() != 2:   # 2 = Wednesday
+        while d.weekday() != 1:   # 1 = Tuesday
             d -= timedelta(days=1)
         return d
 
-    lw = _last_wed(today.year, today.month)
-    if lw < today:
+    lt = _last_tue(today.year, today.month)
+    if lt < today:
         nxt = (today.replace(day=1) + timedelta(days=32))
-        lw  = _last_wed(nxt.year, nxt.month)
-    notify.log(f"Using last-Wednesday-of-month expiry (fallback): {lw}")
-    return lw
+        lt  = _last_tue(nxt.year, nxt.month)
+    notify.log(f"Using last-Tuesday-of-month expiry (fallback): {lt}")
+    return lt
 
 
 # ── Step 4: ATM option security_id ───────────────────────────────────────────
