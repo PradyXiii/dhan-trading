@@ -335,7 +335,7 @@ def fetch_rollingoption(from_date, to_date):
                 "securityId":      25,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
-                "expiryCode":      0,          # nearest expiry (0 = current)
+                "expiryCode":      1,          # nearest expiry (1 = current; 0 treated as missing)
                 "strike":          "ATM",
                 "drvOptionType":   opt_type,
                 "requiredData":    ["open", "strike"],
