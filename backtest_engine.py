@@ -1,40 +1,70 @@
 import pandas as pd
 import numpy as np
 import os
+import calendar as _cal
+from datetime import date as _date, timedelta
 
 DATA_DIR         = "data"
 LOT_SIZE         = 30
-RISK_PCT         = 0.05     # 5% of capital risked per trade
-SL_PCT           = 0.20     # stop-loss = 20% of premium
+RISK_PCT         = 0.05
+SL_PCT           = 0.20
 STARTING_CAPITAL = 30_000
 MONTHLY_TOPUP    = 10_000
+PREMIUM_K        = 0.004
+MAX_LOTS         = 20
 
-# ATM premium as % of spot using sqrt(DTE) scaling.
-# Calibrated from: Tuesday (1 DTE) = 0.4%, Friday (5 DTE) = 0.9%
-# Formula: premium = spot × PREMIUM_K × sqrt(DTE)
-# Verification: 0.004 × √1 = 0.4% ✓   0.004 × √5 = 0.894% ≈ 0.9% ✓
-PREMIUM_K = 0.004
-MAX_LOTS  = 20      # cap to keep backtest realistic (liquidity + margin constraints)
+# BN switched from weekly (every Wed) to monthly (last Wed of month) in Sep 2024
+# NSE removed weekly BN expiry; only Nifty50 kept weekly after SEBI directive
+MONTHLY_EXPIRY_FROM = _date(2024, 9, 11)   # first monthly expiry date
 
-# Days to expiry per weekday (BankNifty expires Wednesday)
-# Wednesday = 0 DTE (expiry day): ~6 hours of trading at open ≈ 0.25 of a day
+
+def last_wednesday(year, month):
+    """Last Wednesday of the given year/month."""
+    last_day = _cal.monthrange(year, month)[1]
+    for d in range(last_day, last_day - 7, -1):
+        if _date(year, month, d).weekday() == 2:
+            return _date(year, month, d)
+
+
+def get_expiry(d):
+    """
+    Returns the relevant BN expiry date for a given trading date.
+    - Before Sep 2024: weekly (next Wednesday, or same if today is Wednesday)
+    - Sep 2024 onwards: monthly (last Wednesday of the month; if past it, next month)
+    """
+    if isinstance(d, pd.Timestamp):
+        d = d.date()
+    if d < MONTHLY_EXPIRY_FROM:
+        # Weekly: next Wednesday
+        days_ahead = (2 - d.weekday()) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        return d + timedelta(days=days_ahead)
+    else:
+        # Monthly: last Wednesday of this month, else next month
+        last_wed = last_wednesday(d.year, d.month)
+        if d > last_wed:
+            nxt = d.replace(day=1) + timedelta(days=32)
+            last_wed = last_wednesday(nxt.year, nxt.month)
+        return last_wed
+
+
+def get_dte(d):
+    """
+    Days to expiry for date d. Minimum 0.25 (expiry morning still has ~6h of trading).
+    +1 because options are live on the expiry date itself until 3:30 PM.
+    """
+    expiry = get_expiry(d)
+    days   = (expiry - (d.date() if isinstance(d, pd.Timestamp) else d)).days
+    return max(0.25, float(days) + 1)
+
+
+# Legacy weekday DTE dict kept ONLY for --compare / old modes that don't pass dte_override
 DAY_DTE = {
-    "Monday":    2,      # Mon → Wed = 2 days
-    "Tuesday":   1,      # Tue → Wed = 1 day
-    "Wednesday": 0.25,   # expiry day — ~6 hrs trading left at open
-    "Thursday":  6,      # Thu → next Wed = 6 days
-    "Friday":    5,      # Fri → next Wed = 5 days
+    "Monday": 2, "Tuesday": 1, "Wednesday": 0.25, "Thursday": 6, "Friday": 5,
 }
-
-# Reward-to-risk ratios per day — flat 2.0x across all days
-# Chosen from SL%×RR grid backtest (trail=₹5): SL=20%, RR=2.0x gives best net P&L
-# TP = entry_premium × (1 + SL_PCT × RR) = +40% of premium
 DAY_RR = {
-    "Monday":    2.0,
-    "Tuesday":   2.0,
-    "Wednesday": 2.0,
-    "Thursday":  2.0,
-    "Friday":    2.0,
+    "Monday": 2.0, "Tuesday": 2.0, "Wednesday": 2.0, "Thursday": 2.0, "Friday": 2.0,
 }
 
 
@@ -111,7 +141,7 @@ def load_bn_ohlcv():
 
 def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                    flat_rr=None, day_rr_override=None,
-                   bn_tp_pts=None, bn_sl_pts=None):
+                   bn_tp_pts=None, bn_sl_pts=None, dte_override=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
@@ -121,6 +151,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     day_rr_override : dict like DAY_RR to use instead of the module-level DAY_RR.
     bn_tp_pts       : fixed BN-point target (e.g. 500). Overrides premium% TP if set.
     bn_sl_pts       : fixed BN-point stop-loss (e.g. 150). Overrides premium% SL if set.
+    dte_override    : actual DTE calculated from real expiry date. Overrides DAY_DTE dict.
 
     Returns (pnl, result, lots, premium, charges_total, charges_breakdown).
     """
@@ -141,7 +172,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     bn_low   = bar["low"]
     bn_close = bar["close"]
 
-    dte  = DAY_DTE.get(weekday, 1)
+    dte  = dte_override if dte_override is not None else DAY_DTE.get(weekday, 1)
     if flat_rr is not None:
         rr = flat_rr
     elif day_rr_override is not None:
@@ -258,7 +289,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
 def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None,
-                 bn_tp_pts=None, bn_sl_pts=None):
+                 bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True):
     signals  = load_signals()
     bn_ohlcv = load_bn_ohlcv()
 
@@ -277,6 +308,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             current_month = month_key
 
         capital_before = capital
+        actual_dte = get_dte(date) if use_actual_dte else None
         pnl, result, lots, premium, charges, charges_bd = simulate_trade(
             row, bn_ohlcv, capital,
             trail_jump_opt=trail_jump_opt,
@@ -284,7 +316,8 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             flat_rr=flat_rr,
             day_rr_override=day_rr_override,
             bn_tp_pts=bn_tp_pts,
-            bn_sl_pts=bn_sl_pts)
+            bn_sl_pts=bn_sl_pts,
+            dte_override=actual_dte)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -375,6 +408,91 @@ def run_sl_tp_grid(trail_jump_opt=5):
     print(f"{'='*90}")
     print(f"\n  trail_sl = losses converted to smaller exits by trailing SL")
     print(f"  WR% = wins / (wins + full losses) — excludes trail_sl and partials\n")
+
+
+def run_range_validation():
+    """
+    Analyse historical BN daily moves to validate whether TP% targets are realistic.
+
+    For each trading day:
+      - favorable_call = High - Open  (BN pts BN moves UP from open)
+      - favorable_put  = Open - Low   (BN pts BN moves DOWN from open)
+      - Combined favorable = max of both (whichever side our signal is on)
+
+    For each DTE bucket, compute ATM premium and check what % of days
+    a given TP% would actually be hit by the favorable move.
+    """
+    bn = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+    bn["date_dt"]  = bn["date"].dt.date
+    bn["fav_call"] = bn["high"]  - bn["open"]   # BN pts if trade is CALL
+    bn["fav_put"]  = bn["open"]  - bn["low"]    # BN pts if trade is PUT
+    bn["fav_max"]  = bn[["fav_call","fav_put"]].max(axis=1)  # best case direction
+    bn["range"]    = bn["high"]  - bn["low"]
+    bn["dte"]      = bn["date_dt"].apply(get_dte)
+
+    print(f"\n{'='*80}")
+    print(f"  BANKNIFTY DAILY MOVE ANALYSIS — {len(bn)} trading days")
+    print(f"  Source: data/banknifty.csv   (weekly expiry → Sep 2024, monthly after)")
+    print(f"{'='*80}")
+
+    # Overall directional move stats (CALL or PUT, whoever is right)
+    for pct in [25, 50, 75, 90, 95]:
+        print(f"  {pct:>2}th pct favorable move: {bn['fav_max'].quantile(pct/100):>6.0f} BN pts")
+
+    print(f"\n  NOTE: 'favorable move' = move in trade direction (CALL = up from open)")
+    print(f"  Median H-L range = {bn['range'].median():.0f} pts   Max = {bn['range'].max():.0f} pts\n")
+
+    # DTE buckets — what premium and what TP BN-pts threshold at each bucket
+    dte_buckets = [
+        ("  0–2  DTE  (expiry week Tue/Wed)", 0,   2),
+        ("  3–7  DTE  (expiry week Mon/Thu/Fri)", 3,  7),
+        ("  8–15 DTE  (2 weeks out)", 8,  15),
+        (" 16–25 DTE  (3–4 weeks out)", 16, 25),
+    ]
+
+    sl_vals = [0.15, 0.20, 0.25, 0.30]
+    rr_vals = [1.5, 2.0, 2.5, 3.0]
+
+    print(f"  {'DTE bucket':<35}  {'avg DTE':>7}  {'avg prem':>9}  "
+          f"{'TP20%':>6} {'TP30%':>6} {'TP40%':>6} {'TP50%':>6}  ← BN pts needed")
+    print(f"  {'-'*35}  {'-'*7}  {'-'*9}  {'-'*6} {'-'*6} {'-'*6} {'-'*6}")
+
+    for label, lo, hi in dte_buckets:
+        sub = bn[(bn["dte"] >= lo) & (bn["dte"] <= hi)]
+        if sub.empty:
+            continue
+        avg_dte  = sub["dte"].mean()
+        avg_spot = sub["open"].mean()
+        avg_prem = avg_spot * PREMIUM_K * (avg_dte ** 0.5)
+
+        # BN pts needed to hit TP at each % level (delta=0.5)
+        tp_pts = {tp: avg_prem * tp / 0.5 for tp in [0.20, 0.30, 0.40, 0.50]}
+
+        print(f"  {label:<35}  {avg_dte:>7.1f}  ₹{avg_prem:>7.0f}  "
+              f"{tp_pts[0.20]:>6.0f} {tp_pts[0.30]:>6.0f} "
+              f"{tp_pts[0.40]:>6.0f} {tp_pts[0.50]:>6.0f}")
+
+    print(f"\n  {'DTE bucket':<35}  {'HIT%  TP=20%':>12} {'TP=30%':>8} {'TP=40%':>8} {'TP=50%':>8}")
+    print(f"  {'-'*35}  {'-'*12} {'-'*8} {'-'*8} {'-'*8}")
+    for label, lo, hi in dte_buckets:
+        sub = bn[(bn["dte"] >= lo) & (bn["dte"] <= hi)]
+        if sub.empty:
+            continue
+        avg_dte  = sub["dte"].mean()
+        avg_spot = sub["open"].mean()
+        avg_prem = avg_spot * PREMIUM_K * (avg_dte ** 0.5)
+
+        hits = {}
+        for tp in [0.20, 0.30, 0.40, 0.50]:
+            needed = avg_prem * tp / 0.5
+            hits[tp] = (sub["fav_max"] >= needed).mean() * 100
+
+        print(f"  {label:<35}  {hits[0.20]:>12.0f}% {hits[0.30]:>7.0f}% "
+              f"{hits[0.40]:>7.0f}% {hits[0.50]:>7.0f}%")
+
+    print(f"\n  HIT% = % of days where BN moved enough in trade direction to hit that TP")
+    print(f"  (uses average premium per bucket; actual will vary by spot price)")
+    print(f"{'='*80}\n")
 
 
 def run_rr_comparison(sl_pct=0.20, trail_jump_opt=5):
@@ -752,6 +870,11 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--compare":
         print("Running full threshold comparison (±1 through ±4)...")
         run_comparison()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--validate":
+        print("Analysing historical BN daily moves vs TP% targets...")
+        run_range_validation()
         return
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--rr":
