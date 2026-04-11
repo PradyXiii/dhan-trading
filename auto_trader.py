@@ -46,12 +46,13 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-DATA_DIR  = "data"
-LOT_SIZE  = 30
-SL_PCT    = 0.15   # 15% stop-loss on premium
-RISK_PCT  = 0.05
-MAX_LOTS  = 20
-PREMIUM_K = 0.004
+DATA_DIR      = "data"
+LOT_SIZE      = 30
+SL_PCT        = 0.15   # 15% stop-loss on premium
+RISK_PCT      = 0.05
+MAX_LOTS      = 20
+PREMIUM_K     = 0.004
+ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
 
 RR = 2.0   # reward:risk ratio — SL=15%, TP=+30% of premium (RR=2.0x)
 
@@ -318,25 +319,33 @@ def _get_bn_ltp() -> float:
 def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
                                      max_otm_strikes=10):
     """
-    Walk ATM → OTM in 100pt increments. Return the first strike whose REAL
-    market premium fits the user's capital under both the 5% risk rule and
-    the 85% margin cap.
+    Find the optimal strike in the live option chain for the given capital.
 
-    Returns (security_id, strike, ltp, lots, distance_in_strikes) or None.
-      distance_in_strikes: 0 = ATM, 1 = 100pt OTM, 2 = 200pt OTM, ...
+    Walk logic (mirrors capital reality):
+      Phase 1 — OTM scan:  try dist=0 (ATM), 1, 2, … until capital fits dual
+                guard (5% risk + 85% margin). If a non-ATM strike is needed,
+                return it immediately (no ITM walk — can't afford ATM).
+      Phase 2 — ITM probe: ATM fits → probe 200pt then 100pt ITM (deepest
+                first). ITM has higher delta → better payoff on trend days.
+                Return deepest ITM the capital supports.
+                Fall back to ATM if no ITM fits.
+
+    dist_100pts convention (return value index [4]):
+      negative = ITM  (-1 = 100pt ITM, -2 = 200pt ITM)
+      0        = ATM
+      positive = OTM  (+1 = 100pt OTM, +2 = 200pt OTM, …)
     """
     opt_type_lc = "ce" if signal == "CALL" else "pe"
     opt_type_uc = opt_type_lc.upper()
-    step = 100 if signal == "CALL" else -100   # OTM direction
+    # OTM step: CALL raises strike (56000→56100), PUT lowers (56000→55900)
+    otm_step = 100 if signal == "CALL" else -100
 
     oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
     if not oc or not atm_strike:
         return None
 
-    for dist in range(0, max_otm_strikes + 1):
-        strike = atm_strike + (dist * step)
-
-        # Dhan uses multiple key formats: "55900.000000", "55900", "55900.0"
+    def _check_strike(strike):
+        """Return (sid, strike, ltp, lots) or None."""
         key = None
         for k_try in [f"{float(strike):.6f}",
                       str(int(strike)),
@@ -345,29 +354,49 @@ def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
                 key = k_try
                 break
         if key is None:
-            continue
-
+            return None
         sub = oc[key].get(opt_type_lc) or oc[key].get(opt_type_uc) or {}
         sid = sub.get("security_id") or sub.get("securityId")
         ltp = float(sub.get("last_price") or sub.get("ltp") or
                     sub.get("lastPrice") or 0)
-
         if not sid or ltp <= 0:
-            continue
-
+            return None
         loss_per_lot   = LOT_SIZE * ltp * SL_PCT
         margin_per_lot = LOT_SIZE * ltp
         if loss_per_lot <= 0 or margin_per_lot <= 0:
-            continue
-
+            return None
         lots_by_risk   = floor(capital * RISK_PCT / loss_per_lot)
         lots_by_margin = floor(capital * 0.85    / margin_per_lot)
         lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+        return (str(sid), float(strike), ltp, int(lots)) if lots >= 1 else None
 
-        if lots >= 1:
-            return (str(sid), float(strike), ltp, int(lots), dist)
+    # ── Phase 1: find cheapest acceptable strike (ATM → OTM) ─────────────────
+    atm_result = None
+    for dist in range(0, max_otm_strikes + 1):
+        strike = atm_strike + (dist * otm_step)
+        r = _check_strike(strike)
+        if r:
+            if dist == 0:
+                atm_result = r   # ATM fits — attempt ITM in Phase 2
+            else:
+                return (r[0], r[1], r[2], r[3], dist)   # OTM fallback
+            break  # stop OTM walk whether ATM fit or not
 
-    return None
+    if atm_result is None:
+        return None   # nothing fits even at max OTM
+
+    # ── Phase 2: ATM fits → probe ITM for better delta ───────────────────────
+    # ITM step is the reverse of OTM step:
+    #   CALL ITM → lower strike (55900, 55800); PUT ITM → higher strike
+    itm_step = -otm_step
+    for itm_dist in range(ITM_WALK_MAX, 0, -1):   # try 200pt, then 100pt
+        strike = atm_strike + (itm_dist * itm_step)
+        r = _check_strike(strike)
+        if r:
+            return (r[0], r[1], r[2], r[3], -itm_dist)   # negative = ITM
+
+    # ATM is the best achievable
+    return (atm_result[0], atm_result[1], atm_result[2], atm_result[3], 0)
 
 
 def get_affordable_option(signal: str, expiry: date, capital: float):
@@ -412,6 +441,10 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
                         notify.log(f"Using fallback expiry {exp} (primary {expiry} failed)")
                     if dist == 0:
                         notify.log(f"ATM {opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s)")
+                    elif dist < 0:
+                        notify.log(f"Capital flush — selected {abs(dist)*100}pt ITM "
+                                   f"{opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s) "
+                                   f"(higher delta)")
                     else:
                         notify.log(f"ATM too expensive — selected {dist*100}pt OTM "
                                    f"{opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s)")
@@ -695,9 +728,11 @@ def main():
     opt_type  = "CE" if signal == "CALL" else "PE"
     opt_emoji = "📈" if signal == "CALL" else "📉"
     opt_sym   = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(atm_strike)} {opt_type}"
-    # OTM label — otm_distance 0 = ATM, N = N*100pt OTM (ATM was too expensive)
+    # Strike label — shows context for why this strike was chosen
     if otm_distance and otm_distance >= 1:
         otm_label = f"  ({otm_distance*100}pt OTM — ATM too pricey for budget)"
+    elif otm_distance and otm_distance <= -1:
+        otm_label = f"  ({abs(otm_distance)*100}pt ITM — capital flush, higher delta)"
     else:
         otm_label = "  (ATM)"
     cap_label = f"₹{capital:,.0f}" + ("  [DRY RUN]" if DRY_RUN else "")

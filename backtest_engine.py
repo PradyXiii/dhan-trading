@@ -1,8 +1,10 @@
 import pandas as pd
 import numpy as np
 import os
+import math as _math
 import calendar as _cal
 from datetime import date as _date, timedelta
+from math import floor
 
 DATA_DIR         = "data"
 LOT_SIZE         = 30
@@ -12,6 +14,9 @@ STARTING_CAPITAL = 30_000
 MONTHLY_TOPUP    = 10_000
 PREMIUM_K        = 0.004
 MAX_LOTS         = 20
+ITM_WALK_MAX     = 2    # probe up to 200pt ITM when capital is flush
+OTM_WALK_MAX     = 10   # probe up to 1000pt OTM when capital is thin
+_DEFAULT_IV      = 0.20 # assumed annualized IV for premium/delta approximation
 
 # BankNifty expiry timeline (4 phases):
 # Phase 1: Sep 2021 – Feb 2024    → weekly, every Thursday
@@ -246,6 +251,116 @@ def load_bn_ohlcv():
 
 # ── Trade simulator ───────────────────────────────────────────────────────────
 
+def _norm_cdf(x):
+    """Standard normal CDF — Abramowitz & Stegun approximation (error < 1e-5)."""
+    a = abs(x)
+    t = 1.0 / (1.0 + 0.2316419 * a)
+    poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937
+           + t * (-1.821255978 + t * 1.330274429))))
+    p = 1.0 - _math.exp(-0.5 * x * x) / _math.sqrt(2 * _math.pi) * poly
+    return p if x >= 0 else 1.0 - p
+
+
+def _otm_params(dist_100pts, bn_open, dte_days):
+    """
+    Return (premium_factor, delta) for a strike dist_100pts × 100 pts from ATM.
+
+    dist_100pts convention (matches auto_trader.py otm_distance):
+      negative  = ITM  (-1 = 100pt ITM for CALL, strike below spot)
+      0         = ATM
+      positive  = OTM  (+3 = 300pt OTM for CALL, strike above spot)
+
+    Uses Bachelier / Black-Scholes approximation:
+      • time-value decays as Gaussian around ATM (extrinsic value)
+      • ITM premium = extrinsic + intrinsic/ATM_premium ratio
+      • delta = N(-z) where z = dist_pts / (σ√T × spot)
+        CALL delta: ATM→0.50, deep-OTM→0.05, deep-ITM→0.95
+    """
+    if dist_100pts == 0:
+        return 1.0, 0.50
+
+    dist_pts    = dist_100pts * 100
+    t_years     = max(0.001, dte_days / 252.0)
+    sigma_t_pts = _DEFAULT_IV * bn_open * _math.sqrt(t_years)   # 1σ in BN pts
+
+    if sigma_t_pts == 0:
+        return 1.0, 0.50
+
+    z = dist_pts / sigma_t_pts   # + = OTM for CALL, − = ITM for CALL
+
+    # Extrinsic (time) value decays symmetrically around ATM
+    extrinsic_factor = _math.exp(-0.5 * z * z)
+
+    if dist_pts < 0:
+        # ITM: extrinsic + intrinsic. Intrinsic scaled to ATM premium.
+        atm_premium  = bn_open * PREMIUM_K * _math.sqrt(max(0.25, dte_days))
+        intrinsic    = abs(dist_pts)
+        pf = extrinsic_factor + (intrinsic / atm_premium if atm_premium > 0 else 0)
+        pf = min(3.0, max(0.05, pf))
+    else:
+        pf = max(0.05, extrinsic_factor)
+
+    # CALL delta: N(−z) → 0.50 at ATM, <0.50 OTM, >0.50 ITM
+    delta = _norm_cdf(-z)
+    delta = max(0.05, min(0.95, delta))
+    return pf, delta
+
+
+def _select_strike(bn_open, capital, dte_days, lot_size):
+    """
+    Simulate the live ATM/OTM/ITM strike selection for a given capital level.
+
+    Mirrors the logic in auto_trader._find_affordable_strike_in_chain:
+      Phase 1 — OTM scan:  try dist=0 (ATM), 1, 2 … OTM_WALK_MAX.
+                           Return first OTM that fits dual-guard sizing.
+                           If ATM itself fits, stop and go to Phase 2.
+      Phase 2 — ITM probe: ATM fits → try deepest ITM first (2, 1).
+                           Return first ITM the capital supports.
+                           Fall back to ATM if nothing deeper fits.
+
+    Returns (dist_100pts, adj_premium, lots, delta) or None if nothing fits.
+    dist_100pts: negative=ITM, 0=ATM, positive=OTM
+    """
+    atm_premium = bn_open * PREMIUM_K * (dte_days ** 0.5)
+    atm_result  = None
+
+    for dist in range(0, OTM_WALK_MAX + 1):
+        pf, delta = _otm_params(dist, bn_open, dte_days)
+        premium   = atm_premium * pf
+        loss_1lot = lot_size * premium * SL_PCT
+        marg_1lot = lot_size * premium
+        if loss_1lot <= 0 or marg_1lot <= 0:
+            continue
+        lots_r = floor(capital * RISK_PCT / loss_1lot)
+        lots_m = floor(capital * 0.85    / marg_1lot)
+        lots   = min(MAX_LOTS, lots_r, lots_m)
+        if lots >= 1:
+            if dist == 0:
+                atm_result = (0, premium, lots, delta)
+                break   # ATM fits — try ITM in Phase 2
+            else:
+                return (dist, premium, lots, delta)   # OTM fallback, return now
+
+    if atm_result is None:
+        return None   # nothing affordable in OTM window
+
+    # Phase 2 — ITM probe: deepest first (200pt, then 100pt)
+    for itm in range(ITM_WALK_MAX, 0, -1):
+        pf, delta = _otm_params(-itm, bn_open, dte_days)
+        premium   = atm_premium * pf
+        loss_1lot = lot_size * premium * SL_PCT
+        marg_1lot = lot_size * premium
+        if loss_1lot <= 0 or marg_1lot <= 0:
+            continue
+        lots_r = floor(capital * RISK_PCT / loss_1lot)
+        lots_m = floor(capital * 0.85    / marg_1lot)
+        lots   = min(MAX_LOTS, lots_r, lots_m)
+        if lots >= 1:
+            return (-itm, premium, lots, delta)
+
+    return atm_result   # ATM is the best achievable
+
+
 def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                    flat_rr=None, day_rr_override=None,
                    bn_tp_pts=None, bn_sl_pts=None, dte_override=None,
@@ -261,7 +376,8 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     bn_sl_pts       : fixed BN-point stop-loss (e.g. 150). Overrides premium% SL if set.
     dte_override    : actual DTE calculated from real expiry date. Overrides DAY_DTE dict.
 
-    Returns (pnl, result, lots, premium, charges_total, charges_breakdown).
+    Returns (pnl, result, lots, premium, charges_total, charges_breakdown, strike_dist).
+      strike_dist: negative=ITM, 0=ATM, positive=OTM (0=unknown for skipped)
     """
     date    = row["date"]
     weekday = row["weekday"]
@@ -272,7 +388,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                        "c_gst","c_stamp_duty","c_sebi"]}
 
     if date not in bn_ohlcv.index:
-        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_breakdown
+        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_breakdown, 0
 
     bar      = bn_ohlcv.loc[date]
     bn_open  = bar["open"]
@@ -287,31 +403,35 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         rr = day_rr_override.get(weekday, 1.4)
     else:
         rr = DAY_RR.get(weekday, 1.4)
-    sl   = sl_pct  if sl_pct  is not None else SL_PCT
-    premium = bn_open * PREMIUM_K * (dte ** 0.5)
-    ls    = lot_size if lot_size is not None else LOT_SIZE   # historical lot size
+    sl = sl_pct if sl_pct is not None else SL_PCT
+    ls = lot_size if lot_size is not None else LOT_SIZE   # historical lot size
 
-    # ── SL / TP levels in BN points (ATM delta ≈ 0.5) ────────────────────────
+    # ── Strike / lot selection (simulates live OTM→ATM→ITM walk) ─────────────
+    # Mirrors auto_trader._find_affordable_strike_in_chain logic:
+    #   capital thin  → walk OTM until affordable (cheaper premium, lower delta)
+    #   capital OK    → ATM (default)
+    #   capital flush → probe ITM for better delta (higher payoff on trend days)
     if bn_tp_pts is not None and bn_sl_pts is not None:
-        # BN-point mode: SL/TP defined directly in BankNifty points
+        # BN-point mode: strike selection still determines premium/lots
+        sel = _select_strike(bn_open, capital, dte, ls)
+        if sel is None:
+            return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
+        _dist, premium, lots, delta = sel
         sl_pts = bn_sl_pts
         tp_pts = bn_tp_pts
-        option_sl_loss = bn_sl_pts * 0.5       # option price drop at SL (delta=0.5)
-        max_loss_1lot  = ls * option_sl_loss
+        max_loss_1lot = ls * bn_sl_pts * delta   # delta scales option loss per BN pt
     else:
-        # Premium% mode: SL/TP as % of option premium
-        sl_pts = (sl * premium) / 0.5
-        tp_pts = (rr * sl * premium) / 0.5
+        sel = _select_strike(bn_open, capital, dte, ls)
+        if sel is None:
+            return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
+        _dist, premium, lots, delta = sel
+        # SL/TP in BN points — use actual delta, not hardcoded 0.5
+        sl_pts = (sl * premium) / delta
+        tp_pts = (rr * sl * premium) / delta
         max_loss_1lot = ls * premium * sl
 
-    # ── Lot sizing ────────────────────────────────────────────────────────────
-    if max_loss_1lot > capital * 0.15:
-        return 0.0, "SKIPPED_LOW_CAPITAL", 0, premium, 0.0, zero_breakdown
-
-    lots = min(MAX_LOTS, max(1, int((capital * RISK_PCT) / max_loss_1lot)))
-
     # ── Trailing SL helpers ───────────────────────────────────────────────────
-    trail_jump_bn = (trail_jump_opt / 0.5) if trail_jump_opt > 0 else 0
+    trail_jump_bn = (trail_jump_opt / delta) if trail_jump_opt > 0 else 0
 
     def trail_steps(favorable_bn_move):
         return int(favorable_bn_move / trail_jump_bn) if trail_jump_bn > 0 else 0
@@ -345,12 +465,12 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
             if trail_jump_opt > 0 and steps > 0:
                 gross, label = trail_exit_pnl(fav, steps)
                 charges, bd  = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
-                return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd
+                return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd, _dist
             result = "LOSS"
         else:
-            gross = (bn_close - bn_open) * 0.5 * lots * ls
+            gross = (bn_close - bn_open) * delta * lots * ls
             charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
-            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
+            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd, _dist
 
     # ── PUT exit logic ────────────────────────────────────────────────────────
     else:
@@ -372,27 +492,27 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
             if trail_jump_opt > 0 and steps > 0:
                 gross, label = trail_exit_pnl(fav, steps)
                 charges, bd  = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
-                return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd
+                return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd, _dist
             result = "LOSS"
         else:
-            gross = (bn_open - bn_close) * 0.5 * lots * ls
+            gross = (bn_open - bn_close) * delta * lots * ls
             charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
-            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
+            return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd, _dist
 
     charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
     if bn_tp_pts is not None and bn_sl_pts is not None:
-        # BN-point mode: P&L based on fixed BN-point SL/TP, delta=0.5
+        # BN-point mode: P&L based on fixed BN-point SL/TP, actual delta
         if result == "WIN":
-            pnl =  lots * ls * bn_tp_pts * 0.5 - charges
+            pnl =  lots * ls * bn_tp_pts * delta - charges
         else:
-            pnl = -lots * ls * bn_sl_pts * 0.5 - charges
+            pnl = -lots * ls * bn_sl_pts * delta - charges
     else:
         if result == "WIN":
             pnl =  lots * ls * premium * rr * sl - charges
         else:
             pnl = -lots * ls * premium * sl - charges
 
-    return round(pnl, 2), result, lots, round(premium, 2), charges, bd
+    return round(pnl, 2), result, lots, round(premium, 2), charges, bd, _dist
 
 
 # ── Backtest loop ─────────────────────────────────────────────────────────────
@@ -419,7 +539,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
         capital_before = capital
         actual_dte  = get_dte(date) if use_actual_dte else None
         actual_lots = get_lot_size(date)
-        pnl, result, lots, premium, charges, charges_bd = simulate_trade(
+        pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade(
             row, bn_ohlcv, capital,
             trail_jump_opt=trail_jump_opt,
             sl_pct=sl_pct,
@@ -443,6 +563,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             "premium":        premium,
             "lots":           lots,
             "lot_size":       actual_lots,
+            "strike_dist":    strike_dist,   # <0=ITM, 0=ATM, >0=OTM in 100pt units
             "risk_amt":       round(lots * actual_lots * premium * SL_PCT, 2),
             "charges":        charges,
             **charges_bd,
