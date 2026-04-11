@@ -96,42 +96,57 @@ def refresh_data_and_signal():
     if r2.returncode != 0:
         die(f"signal_engine.py failed:\n{r2.stderr[-200:]}")
 
+    notify.log("Running ML direction engine...")
+    r3 = subprocess.run(
+        [sys.executable, "ml_engine.py", "--predict-today"],
+        capture_output=True, text=True, timeout=60
+    )
+    if r3.returncode != 0:
+        notify.log(f"ml_engine.py --predict-today failed (falling back to rule signal):\n{r3.stderr[-300:]}")
+
 
 def get_todays_signal() -> tuple:
     """
     Returns (signal_dict, sig_note_str).
-    sig_note is empty if today's date matches, or a label like "08 Apr close" if fallback.
+    Reads signals_ml.csv (ML direction oracle) with fallback to signals.csv.
 
-    Why the fallback exists:
-      At 9:15 AM IST, US markets haven't closed → today's row may be absent.
-      Yesterday's signal is correct — it reflects the latest complete close data.
+    sig_note is empty if today's date matches, or a label like "08 Apr ML" if fallback.
     """
-    try:
-        df    = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
-        df    = df.drop(columns=["threshold"], errors="ignore")
-        today = pd.Timestamp(date.today())
+    today = pd.Timestamp(date.today())
 
-        row = df[df["date"] == today]
-        if not row.empty:
-            return row.iloc[0].to_dict(), ""
+    # Try ML signals first, fall back to rule-based if unavailable
+    for csv_path, label in [
+        (f"{DATA_DIR}/signals_ml.csv", "ML"),
+        (f"{DATA_DIR}/signals.csv",    "rule"),
+    ]:
+        try:
+            df = pd.read_csv(csv_path, parse_dates=["date"])
+            df = df.drop(columns=["threshold"], errors="ignore")
 
-        last     = df.iloc[-1]
-        days_gap = (today - last["date"]).days
+            row = df[df["date"] == today]
+            if not row.empty:
+                source = "ML" if "ml" in csv_path else "rule"
+                if source == "rule":
+                    notify.log("Using rule-based signal (signals_ml.csv unavailable)")
+                return row.iloc[0].to_dict(), ""
 
-        if days_gap <= 4:
-            note = f"signal from {last['date'].strftime('%d %b')} close"
-            notify.log(f"Today's signal not in CSV — using {note}")
-            return last.to_dict(), note
+            last     = df.iloc[-1]
+            days_gap = (today - last["date"]).days
 
-        notify.send(
-            f"⚠️ <b>Stale signal</b> ({days_gap} days old)\n\n"
-            f"Last signal: {last['date'].date()}\n"
-            f"Run data_fetcher.py + signal_engine.py manually."
-        )
-        return None, ""
+            if days_gap <= 4:
+                note = f"signal from {last['date'].strftime('%d %b')} {label}"
+                notify.log(f"Today's signal not in {csv_path} — using {note}")
+                return last.to_dict(), note
 
-    except Exception as e:
-        die(f"Cannot read signals.csv: {e}")
+        except Exception:
+            continue  # try next file
+
+    notify.send(
+        f"⚠️ <b>Stale signal</b>\n\n"
+        f"Neither signals_ml.csv nor signals.csv has a recent row.\n"
+        f"Run data_fetcher.py + signal_engine.py + ml_engine.py manually."
+    )
+    return None, ""
 
 
 # ── Step 2: Capital ───────────────────────────────────────────────────────────

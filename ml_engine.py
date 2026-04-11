@@ -98,6 +98,8 @@ while i < len(_args):
                 pass
     elif _args[i] == "--analyze":
         MODE = "analyze"
+    elif _args[i] == "--predict-today":
+        MODE = "predict_today"
     else:
         try:
             ML_THRESHOLD = float(_args[i])
@@ -594,12 +596,133 @@ def run_analysis():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  PREDICT TODAY  (fast — single model, ~10 sec — used by auto_trader.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def predict_today():
+    """
+    Train ONE model on all historical data and predict today's ML direction.
+    Appends/overwrites today's row in signals_ml.csv.
+
+    This is the live-trading path — fast (~10 sec) because it trains one model,
+    not the full walk-forward (127 models). Called by auto_trader.py each morning.
+
+    Requires signals_ml.csv to already exist (from a full ml_engine.py run).
+    If signals_ml.csv is missing, falls back to signals.csv rule-based signal.
+    """
+    from datetime import date as _date
+    import os as _os
+
+    today_dt  = _date.today()
+    today_ts  = pd.Timestamp(today_dt)
+    signals_ml_path = f"{DATA_DIR}/signals_ml.csv"
+
+    print(f"ML predict-today: {today_dt} ...")
+
+    # Load and compute features
+    raw     = load_all_data()
+    df      = compute_features(raw)
+    trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
+
+    # Check today is a scheduled trading day (Mon/Tue/Thu/Fri)
+    today_rows = trading[trading["date"] == today_ts]
+    if today_rows.empty:
+        print(f"  {today_dt} is not a Mon/Tue/Thu/Fri — no ML prediction needed.")
+        return
+
+    today_idx = today_rows.index[0]
+    X_all     = trading[FEATURE_COLS].values.astype(float)
+
+    # Labels for training (need all historical rows to compute properly)
+    labels_df = compute_labels(trading)
+    y_all     = np.array([1 if l == "CALL" else 0 for l in labels_df["label"].values])
+
+    # Train on everything BEFORE today
+    X_train = X_all[:today_idx]
+    y_train = y_all[:today_idx]
+    X_today = X_all[today_idx : today_idx + 1]
+
+    rule_row  = trading.iloc[today_idx]
+    rule_sig  = rule_row.get("rule_signal", "NONE")
+    rule_score= rule_row.get("rule_score", 0)
+
+    # Need at least MIN_TRAIN days and both classes
+    if today_idx < MIN_TRAIN or len(np.unique(y_train)) < 2:
+        print(f"  Not enough history ({today_idx} days) — using rule-based fallback.")
+        ml_signal = rule_sig if rule_sig in ("CALL", "PUT") else "CALL"
+        ml_conf   = 0.5
+        ml_trained = False
+    else:
+        model = RandomForestClassifier(
+            n_estimators=100, max_depth=6, min_samples_leaf=10,
+            max_features="sqrt", class_weight="balanced",
+            random_state=42, n_jobs=-1,
+        )
+        model.fit(X_train, y_train)
+        proba   = model.predict_proba(X_today)[0]
+        classes = list(model.classes_)
+        p_call  = proba[classes.index(1)] if 1 in classes else 0.0
+        p_put   = proba[classes.index(0)] if 0 in classes else 0.0
+        ml_signal  = "CALL" if p_call >= p_put else "PUT"
+        ml_conf    = max(p_call, p_put)
+        ml_trained = True
+        print(f"  Model trained on {today_idx} days.")
+        print(f"  P(CALL)={p_call:.3f}  P(PUT)={p_put:.3f}  → {ml_signal}  (conf {ml_conf:.1%})")
+
+    # Event day override
+    is_event = today_dt in EVENT_DATES
+    final_signal = "NONE" if is_event else ml_signal
+    if is_event:
+        print(f"  Event day override → NONE")
+
+    # Build the today row (keep same column shape as signals_ml.csv)
+    today_row = {
+        "date":        today_dt,
+        "weekday":     today_ts.day_name(),
+        "event_day":   is_event,
+        "score":       int(rule_score),
+        "threshold":   1,
+        "rule_signal": rule_sig,
+        "rule_score":  int(rule_score),
+        "ml_signal":   ml_signal,
+        "ml_p_call":   round(p_call if ml_trained else 0.5, 4),
+        "ml_p_put":    round(p_put  if ml_trained else 0.5, 4),
+        "ml_conf":     round(ml_conf, 4),
+        "ml_trained":  ml_trained,
+        "signal":      final_signal,
+    }
+
+    # Upsert into signals_ml.csv
+    if _os.path.exists(signals_ml_path):
+        existing = pd.read_csv(signals_ml_path, parse_dates=["date"])
+        existing = existing[existing["date"].dt.date != today_dt]  # drop old today row
+        new_row  = pd.DataFrame([today_row])
+        out      = pd.concat([existing, new_row], ignore_index=True)
+    else:
+        # signals_ml.csv missing — create minimal version from signals.csv + today
+        print(f"  signals_ml.csv not found — creating from signals.csv + today.")
+        base = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+        new_row = pd.DataFrame([today_row])
+        out = pd.concat([base, new_row], ignore_index=True)
+
+    out["date"] = pd.to_datetime(out["date"]).dt.date
+    out = out.sort_values("date").reset_index(drop=True)
+    out.to_csv(signals_ml_path, index=False)
+    print(f"  Saved → {signals_ml_path}  (today: {final_signal})")
+    return today_row
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     if MODE == "analyze":
         run_analysis()
+        return
+
+    if MODE == "predict_today":
+        predict_today()
         return
 
     generate_ml_signals(mode=MODE, ml_threshold=ML_THRESHOLD)
