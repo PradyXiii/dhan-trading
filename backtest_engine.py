@@ -682,6 +682,74 @@ def run_trail_comparison():
     print(f"  significantly increasing max drawdown vs the no-trail baseline.\n")
 
 
+def run_tp_fixed_grid(tp_pct=0.30, trail_jump_opt=5):
+    """
+    Fix TP% and sweep SL% options — find the best SL for a given TP target.
+    RR is computed as tp_pct / sl_pct for each row.
+    All runs use trail=₹5 and actual calendar DTE (monthly expiry aware).
+    """
+    sl_options = [0.10, 0.15, 0.20, 0.25, 0.30]
+    rows = []
+
+    print(f"\n  Fixed TP = {tp_pct*100:.0f}%  |  trail=₹{trail_jump_opt}")
+    print(f"  Testing SL: {[f'{s*100:.0f}%' for s in sl_options]}")
+    print()
+
+    for sl in sl_options:
+        rr = tp_pct / sl
+        trade_df, _ = run_backtest(
+            trail_jump_opt=trail_jump_opt,
+            sl_pct=sl,
+            flat_rr=rr,
+            use_actual_dte=True,
+        )
+        active   = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL", "TRAIL_SL"])]
+        wins     = (active["result"] == "WIN").sum()
+        losses   = (active["result"] == "LOSS").sum()
+        trail_sl = (active["result"] == "TRAIL_SL").sum()
+        partial  = (active["result"] == "PARTIAL").sum()
+        total    = len(active)
+        net_pnl  = active["pnl"].sum()
+        end_cap  = trade_df["capital_after"].iloc[-1]
+        wr       = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+
+        cap_series = trade_df["capital_after"]
+        max_dd     = ((cap_series - cap_series.cummax()) / cap_series.cummax() * 100).min()
+
+        rows.append({
+            "SL%":      f"{sl*100:.0f}%",
+            "RR":       f"{rr:.2f}x",
+            "trades":   total,
+            "wins":     wins,
+            "losses":   losses,
+            "trail_sl": trail_sl,
+            "partial":  partial,
+            "WR%":      f"{wr:.1f}%",
+            "net_pnl":  net_pnl,
+            "P&L":      fmt_inr(net_pnl),
+            "end_cap":  fmt_inr(end_cap),
+            "max_dd":   f"{max_dd:.1f}%",
+        })
+        print(f"  SL={sl*100:.0f}%  RR={rr:.2f}x: trades={total} | W={wins} L={losses}"
+              f" T={trail_sl} | WR={wr:.1f}% | Net={fmt_inr(net_pnl)}"
+              f" | Cap={fmt_inr(end_cap)} | DD={max_dd:.1f}%")
+
+    df = pd.DataFrame(rows).sort_values("net_pnl", ascending=False).reset_index(drop=True)
+
+    print(f"\n{'='*100}")
+    print(f"  FIXED TP={tp_pct*100:.0f}%  —  SL SWEEP  |  trail=₹{trail_jump_opt}  |  actual calendar DTE")
+    print(f"  Ranked by net P&L (best first)")
+    print(f"{'='*100}")
+    print(df.drop(columns=["net_pnl"]).to_string(index=False))
+    print(f"{'='*100}")
+    best = df.iloc[0]
+    print(f"\n  BEST CONFIG:  SL={best['SL%']}  RR={best['RR']}  →  P&L={best['P&L']}  DD={best['max_dd']}  WR={best['WR%']}")
+    print(f"\n  To update auto_trader.py:")
+    print(f"    SL_PCT = {float(best['SL%'].strip('%'))/100:.2f}")
+    print(f"    RR     = {best['RR']}")
+    print()
+
+
 def print_summary(trade_df, monthly, threshold=None):
     active   = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL", "TRAIL_SL"])]
     wins     = (active["result"] == "WIN").sum()
@@ -897,6 +965,12 @@ def main():
         trail = float(_sys.argv[2]) if len(_sys.argv) > 2 else 5
         print(f"Running SL% × RR grid with trail=₹{trail:.0f}...")
         run_sl_tp_grid(trail_jump_opt=trail)
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--tp":
+        tp = float(_sys.argv[2]) if len(_sys.argv) > 2 else 30
+        print(f"Running fixed TP={tp:.0f}% SL sweep with trail=₹5 and actual DTE...")
+        run_tp_fixed_grid(tp_pct=tp / 100, trail_jump_opt=5)
         return
 
     # Read threshold embedded in signals.csv
