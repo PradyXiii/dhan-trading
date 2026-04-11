@@ -37,6 +37,16 @@ DAY_RR = {
     "Friday":    2.0,
 }
 
+
+def fmt_inr(amount):
+    """Format rupee amount in Indian crore/lakh notation."""
+    if abs(amount) >= 1e7:
+        return f"₹{amount/1e7:.2f}Cr"
+    elif abs(amount) >= 1e5:
+        return f"₹{amount/1e5:.1f}L"
+    else:
+        return f"₹{amount:,.0f}"
+
 # ── Dhan brokerage + statutory charges (per round-trip trade) ─────────────────
 # Source: dhan.co/pricing + NSE circulars (as of 2024-25)
 #
@@ -100,7 +110,8 @@ def load_bn_ohlcv():
 # ── Trade simulator ───────────────────────────────────────────────────────────
 
 def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
-                   flat_rr=None, day_rr_override=None):
+                   flat_rr=None, day_rr_override=None,
+                   bn_tp_pts=None, bn_sl_pts=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
@@ -108,6 +119,8 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     sl_pct          : override SL_PCT global (e.g. 0.20 for 20% SL). None = use global.
     flat_rr         : use this RR for every day instead of DAY_RR dict. None = use per-day.
     day_rr_override : dict like DAY_RR to use instead of the module-level DAY_RR.
+    bn_tp_pts       : fixed BN-point target (e.g. 500). Overrides premium% TP if set.
+    bn_sl_pts       : fixed BN-point stop-loss (e.g. 150). Overrides premium% SL if set.
 
     Returns (pnl, result, lots, premium, charges_total, charges_breakdown).
     """
@@ -138,16 +151,24 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     sl   = sl_pct  if sl_pct  is not None else SL_PCT
     premium = bn_open * PREMIUM_K * (dte ** 0.5)
 
+    # ── SL / TP levels in BN points (ATM delta ≈ 0.5) ────────────────────────
+    if bn_tp_pts is not None and bn_sl_pts is not None:
+        # BN-point mode: SL/TP defined directly in BankNifty points
+        sl_pts = bn_sl_pts
+        tp_pts = bn_tp_pts
+        option_sl_loss = bn_sl_pts * 0.5       # option price drop at SL (delta=0.5)
+        max_loss_1lot  = LOT_SIZE * option_sl_loss
+    else:
+        # Premium% mode: SL/TP as % of option premium
+        sl_pts = (sl * premium) / 0.5
+        tp_pts = (rr * sl * premium) / 0.5
+        max_loss_1lot = LOT_SIZE * premium * sl
+
     # ── Lot sizing ────────────────────────────────────────────────────────────
-    max_loss_1lot = LOT_SIZE * premium * sl
     if max_loss_1lot > capital * 0.15:
         return 0.0, "SKIPPED_LOW_CAPITAL", 0, premium, 0.0, zero_breakdown
 
     lots = min(MAX_LOTS, max(1, int((capital * RISK_PCT) / max_loss_1lot)))
-
-    # ── SL / TP levels in BN points (ATM delta ≈ 0.5) ────────────────────────
-    sl_pts = (sl  * premium) / 0.5
-    tp_pts = (rr * sl * premium) / 0.5
 
     # ── Trailing SL helpers ───────────────────────────────────────────────────
     trail_jump_bn = (trail_jump_opt / 0.5) if trail_jump_opt > 0 else 0
@@ -219,17 +240,25 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
             return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd
 
     charges, bd = calculate_charges(premium, lots, breakdown=True)
-    if result == "WIN":
-        pnl =  lots * LOT_SIZE * premium * rr  * sl - charges
+    if bn_tp_pts is not None and bn_sl_pts is not None:
+        # BN-point mode: P&L based on fixed BN-point SL/TP, delta=0.5
+        if result == "WIN":
+            pnl =  lots * LOT_SIZE * bn_tp_pts * 0.5 - charges
+        else:
+            pnl = -lots * LOT_SIZE * bn_sl_pts * 0.5 - charges
     else:
-        pnl = -lots * LOT_SIZE * premium * sl - charges
+        if result == "WIN":
+            pnl =  lots * LOT_SIZE * premium * rr * sl - charges
+        else:
+            pnl = -lots * LOT_SIZE * premium * sl - charges
 
     return round(pnl, 2), result, lots, round(premium, 2), charges, bd
 
 
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
-def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None):
+def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None,
+                 bn_tp_pts=None, bn_sl_pts=None):
     signals  = load_signals()
     bn_ohlcv = load_bn_ohlcv()
 
@@ -253,7 +282,9 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             trail_jump_opt=trail_jump_opt,
             sl_pct=sl_pct,
             flat_rr=flat_rr,
-            day_rr_override=day_rr_override)
+            day_rr_override=day_rr_override,
+            bn_tp_pts=bn_tp_pts,
+            bn_sl_pts=bn_sl_pts)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -329,26 +360,18 @@ def run_sl_tp_grid(trail_jump_opt=5):
                 "trail_sl": trail_sl,
                 "WR%":      f"{wr:.0f}%",
                 "net_pnl":  net_pnl,
-                "end_cap":  end_cap,
+                "net_pnl_fmt": fmt_inr(net_pnl),
+                "end_cap":  fmt_inr(end_cap),
                 "max_dd":   f"{max_dd:.1f}%",
             })
 
-    df = pd.DataFrame(rows)
-
-    # Sort by net P&L descending for easy reading
-    df = df.sort_values("net_pnl", ascending=False).reset_index(drop=True)
-
-    # Format for display
-    df_display = df.copy()
-    df_display["net_pnl"] = df_display["net_pnl"].apply(lambda x: f"₹{x:,.0f}")
-    df_display["end_cap"] = df_display["end_cap"].apply(lambda x: f"₹{x:,.0f}")
+    df = pd.DataFrame(rows).sort_values("net_pnl", ascending=False).reset_index(drop=True)
 
     print(f"\n{'='*90}")
     print(f"  SL% × RR GRID  —  trail=₹{trail_jump_opt}, ranked by net P&L")
     print(f"  Live config: SL=20%, flat RR=2.0×, trail=₹5  (TP=+40% of premium)")
     print(f"{'='*90}")
-    print(df_display.drop(columns=["net_pnl_raw"] if "net_pnl_raw" in df_display else [])
-          .to_string(index=True))
+    print(df.drop(columns=["net_pnl"]).to_string(index=True))
     print(f"{'='*90}")
     print(f"\n  trail_sl = losses converted to smaller exits by trailing SL")
     print(f"  WR% = wins / (wins + full losses) — excludes trail_sl and partials\n")
@@ -402,8 +425,8 @@ def run_rr_comparison(sl_pct=0.20, trail_jump_opt=5):
             "trail_sl":   trail_sl,
             "WR%":        f"{wr:.0f}%",
             "net_pnl":    net_pnl,
-            "net_pnl_fmt":f"₹{net_pnl:,.0f}",
-            "end_cap":    f"₹{end_cap:,.0f}",
+            "net_pnl_fmt":fmt_inr(net_pnl),
+            "end_cap":    fmt_inr(end_cap),
             "max_dd":     f"{max_dd:.1f}%",
         })
 
@@ -414,6 +437,79 @@ def run_rr_comparison(sl_pct=0.20, trail_jump_opt=5):
     print(f"{'='*95}")
     print(df.drop(columns=["net_pnl"]).to_string(index=True))
     print(f"{'='*95}\n")
+
+
+def run_pts_grid(tp_pts=500, trail_jump_opt=5):
+    """
+    Fixed BN-point target grid: TP fires when BN moves tp_pts in one direction.
+    Tests various SL values (in BN points), computes resulting RR.
+    Shows what SL to use and what that means as % of premium per day.
+    """
+    sl_options = [100, 150, 200, 250, 300]
+    rows = []
+
+    # Representative premium per day at BN=54000 (for reference only)
+    ref_spot = 54_000
+    ref_prems = {d: ref_spot * PREMIUM_K * (dte ** 0.5)
+                 for d, dte in DAY_DTE.items()}
+
+    print(f"\n  Fixed TP = {tp_pts} BN pts  →  option gain = ₹{tp_pts*0.5:.0f}  (delta=0.5)")
+    print(f"  Reference spot = ₹{ref_spot:,}. Premium per day:")
+    for day, p in ref_prems.items():
+        sl_pct_fri = (tp_pts * 0.5) / p
+        print(f"    {day:<10}: premium ~₹{p:.0f}  →  TP is {tp_pts*0.5/p*100:.0f}% of premium")
+    print()
+
+    for sl_bn in sl_options:
+        rr = tp_pts / sl_bn
+        trade_df, _ = run_backtest(
+            trail_jump_opt=trail_jump_opt,
+            bn_tp_pts=tp_pts,
+            bn_sl_pts=sl_bn,
+        )
+        active   = trade_df[trade_df["result"].isin(["WIN","LOSS","PARTIAL","TRAIL_SL"])]
+        wins     = (active["result"] == "WIN").sum()
+        losses   = (active["result"] == "LOSS").sum()
+        trail_sl = (active["result"] == "TRAIL_SL").sum()
+        net_pnl  = active["pnl"].sum()
+        end_cap  = trade_df["capital_after"].iloc[-1]
+        wr       = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+
+        cap_series = trade_df["capital_after"]
+        max_dd     = ((cap_series - cap_series.cummax()) / cap_series.cummax() * 100).min()
+
+        # SL as % of Friday premium (most common high-DTE trade)
+        sl_opt_loss   = sl_bn * 0.5
+        fri_prem      = ref_prems["Friday"]
+        sl_pct_fri    = sl_opt_loss / fri_prem * 100
+        tue_prem      = ref_prems["Tuesday"]
+        sl_pct_tue    = sl_opt_loss / tue_prem * 100
+
+        rows.append({
+            "SL(BN pts)": sl_bn,
+            "SL opt(₹)":  f"₹{sl_opt_loss:.0f}",
+            "SL%(Fri)":   f"{sl_pct_fri:.0f}%",
+            "SL%(Tue)":   f"{sl_pct_tue:.0f}%",
+            "RR":         f"{rr:.1f}x",
+            "wins":       wins,
+            "losses":     losses,
+            "trail_sl":   trail_sl,
+            "WR%":        f"{wr:.0f}%",
+            "net_pnl":    net_pnl,
+            "net_pnl_fmt":fmt_inr(net_pnl),
+            "end_cap":    fmt_inr(end_cap),
+            "max_dd":     f"{max_dd:.1f}%",
+        })
+
+    df = pd.DataFrame(rows).sort_values("net_pnl", ascending=False).reset_index(drop=True)
+
+    print(f"{'='*110}")
+    print(f"  BN-POINT TARGET: TP fires when BN moves {tp_pts} pts  |  trail=₹{trail_jump_opt}")
+    print(f"  SL%(Fri) = SL as % of Friday premium (~₹{ref_prems['Friday']:.0f})")
+    print(f"  SL%(Tue) = SL as % of Tuesday premium (~₹{ref_prems['Tuesday']:.0f})")
+    print(f"{'='*110}")
+    print(df.drop(columns=["net_pnl"]).to_string(index=True))
+    print(f"{'='*110}\n")
 
 
 def run_trail_comparison():
@@ -661,6 +757,12 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--rr":
         print("Running RR comparison (per-day original vs flat 1.0–3.0×, SL=20%, trail=₹5)...")
         run_rr_comparison()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--pts":
+        tp = int(_sys.argv[2]) if len(_sys.argv) > 2 else 500
+        print(f"Running BN-point target grid: TP={tp} pts, trail=₹5...")
+        run_pts_grid(tp_pts=tp, trail_jump_opt=5)
         return
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--trail":
