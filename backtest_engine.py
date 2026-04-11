@@ -24,25 +24,33 @@ TUESDAY_EXPIRY_FROM    = _date(2025,  9,  1)   # NSE: monthly shifted Wed → Tu
 
 # ── Historical lot sizes ──────────────────────────────────────────────────────
 # SEBI mandate (min contract value ₹15L) drove these changes.
-# Source: NSE circulars + PL Capital research
-_LOT_15_UNTIL  = _date(2024, 11, 20)   # before SEBI mandate: lot = 15
-_LOT_30_BRIEF  = _date(2025,  1,  1)   # briefly 30 (Nov–Dec 2024)
-_LOT_35_UNTIL  = _date(2026,  1, 27)   # 2025 lot = 35 (first monthly expiry Jan 2026 ends this)
-# Jan 27 2026 onwards: lot = 30 (current)
-# NOTE: if you find the exact date 30→35 changed (likely Feb 2025), update _LOT_30_BRIEF
+# Source: NSE circulars / PL Capital research
+#
+# Timeline:
+#   Before Nov 20 2024         → lot = 15
+#   Nov 20 2024 – Jun 25 2025  → lot = 30
+#     (Apr/May/Jun 2025 monthly contracts pre-existed the Apr 24 mandate,
+#      so they kept lot=30 through their June 25 2025 expiry)
+#   Jun 26 2025 – Jan 26 2026  → lot = 35
+#     (Jul 2025 was first monthly contract created after Apr 24 → lot=35)
+#   Jan 27 2026 onwards        → lot = 30  (current)
+
+_LOT_15_UNTIL = _date(2024, 11, 20)   # SEBI mandate: 15 → 30
+_LOT_35_FROM  = _date(2025,  6, 26)   # day after Jun 2025 expiry: 30 → 35
+_LOT_30B_FROM = _date(2026,  1, 27)   # first Jan 2026 monthly expiry: 35 → 30
 
 def get_lot_size(d):
     """Return the correct BankNifty lot size for a historical trade date."""
     if isinstance(d, pd.Timestamp):
         d = d.date()
     if d < _LOT_15_UNTIL:
-        return 15
-    elif d < _LOT_30_BRIEF:
-        return 30
-    elif d < _LOT_35_UNTIL:
-        return 35
+        return 15   # Sep 2021 – Nov 2024
+    elif d < _LOT_35_FROM:
+        return 30   # Nov 2024 – Jun 2025
+    elif d < _LOT_30B_FROM:
+        return 35   # Jul 2025 – Jan 2026
     else:
-        return 30
+        return 30   # Jan 2026 onwards
 
 
 def last_wednesday(year, month):
