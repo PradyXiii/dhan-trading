@@ -212,50 +212,34 @@ def get_capital() -> float:
 
 def get_expiry() -> date:
     """
-    Find the nearest valid BankNifty weekly expiry by probing the Dhan option
-    chain API. BankNifty normally expires on Wednesday, but NSE shifts the
-    expiry to the previous trading day when Wednesday is a market holiday.
-    We try Wed → Tue → Mon → Thu (next week) until one succeeds.
+    Find the nearest valid BankNifty expiry using the /optionchain/expirylist endpoint.
+    Returns the nearest upcoming expiry date. Falls back to Wednesday calculation
+    if the API is unavailable.
     """
     today = date.today()
-    days_ahead = (2 - today.weekday()) % 7   # days to next Wednesday
-    base_wed   = today + timedelta(days=days_ahead)
-
-    # If today IS Wednesday (expiry day), try today first
-    candidates = []
-    if today.weekday() == 2:
-        candidates = [today, today - timedelta(days=1)]
-    else:
-        # Try Wed → Tue → Mon (holiday shift), then next Wed as last resort
-        candidates = [
-            base_wed,
-            base_wed - timedelta(days=1),   # Tuesday
-            base_wed - timedelta(days=2),   # Monday
-            base_wed + timedelta(days=7),   # next Wednesday
-        ]
-        # Filter out past dates
-        candidates = [d for d in candidates if d >= today]
-
-    for expiry in candidates:
-        payload = {
-            "UnderlyingScrip": 25,
-            "UnderlyingSeg":   "IDX_I",
-            "Expiry":          expiry.strftime("%Y-%m-%d"),
-        }
-        try:
-            resp = requests.post(
-                "https://api.dhan.co/v2/optionchain",
-                headers=HEADERS, json=payload, timeout=10
-            )
-            if resp.status_code == 200:
-                notify.log(f"Valid expiry found: {expiry}")
+    try:
+        resp = requests.post(
+            "https://api.dhan.co/v2/optionchain/expirylist",
+            headers=HEADERS,
+            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            expiries = resp.json().get("data", [])
+            # Find the nearest expiry that is today or in the future
+            upcoming = [date.fromisoformat(e) for e in expiries if date.fromisoformat(e) >= today]
+            if upcoming:
+                expiry = min(upcoming)
+                notify.log(f"Expiry from API: {expiry}  (all: {[e for e in expiries[:4]]})")
                 return expiry
-            notify.log(f"Expiry {expiry} invalid ({resp.status_code}) — trying next")
-        except Exception as e:
-            notify.log(f"Expiry probe failed for {expiry}: {e}")
+        notify.log(f"Expiry list API returned {resp.status_code} — falling back to Wednesday calc")
+    except Exception as e:
+        notify.log(f"Expiry list API failed ({e}) — falling back to Wednesday calc")
 
-    # Fallback: return the calculated Wednesday (let the order fail loudly)
-    notify.log(f"Could not find valid expiry via API — defaulting to {base_wed}")
+    # Fallback: calculate nearest Wednesday
+    days_ahead = (2 - today.weekday()) % 7 or 7
+    base_wed   = today + timedelta(days=days_ahead)
+    notify.log(f"Using calculated Wednesday expiry: {base_wed}")
     return base_wed
 
 
@@ -296,16 +280,27 @@ def _fetch_option_chain(expiry: date) -> tuple:
 
 
 def _parse_security_id(data, inner, atm_strike, opt_type) -> tuple:
-    """Extract security_id from option chain response. Returns (sid, strike) or (None, None)."""
+    """Extract security_id from option chain response. Returns (sid, strike) or (None, None).
+
+    Dhan API returns strike keys as float strings ("55900.000000") and option type
+    keys as lowercase ("ce"/"pe") — handle both formats defensively.
+    """
     oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
     if oc and atm_strike:
         for delta in [0, 100, -100, 200, -200]:
-            key = str(int(atm_strike + delta))
-            if key in oc:
-                sub = oc[key].get(opt_type, {})
-                sid = sub.get("security_id") or sub.get("securityId")
-                if sid:
-                    return str(sid), float(key)
+            strike = atm_strike + delta
+            # Try float string key first ("55900.000000"), then int string ("55900")
+            key = (f"{float(strike):.6f}" if f"{float(strike):.6f}" in oc
+                   else str(int(strike))   if str(int(strike))        in oc
+                   else None)
+            if key is None:
+                continue
+            # Try lowercase first ("ce"/"pe"), then uppercase ("CE"/"PE")
+            sub = (oc[key].get(opt_type.lower()) or
+                   oc[key].get(opt_type)          or {})
+            sid = sub.get("security_id") or sub.get("securityId")
+            if sid:
+                return str(sid), float(key)
 
     options = data.get("options") or data.get("OptionChain") or []
     if isinstance(options, list) and atm_strike:
