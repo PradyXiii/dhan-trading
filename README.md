@@ -1,6 +1,6 @@
 # BankNifty Options Auto-Trader
 
-Fully automated weekly BankNifty ATM options system. Runs every trading day at 9:15 AM IST on a GCP VM — fetches data, scores signals, sizes the position, places a Dhan intraday Super Order, and sends a Telegram alert. No human input required during market hours.
+Fully automated weekly BankNifty ATM options system. Runs every trading day at 9:15 AM IST on a GCP VM — fetches data, runs an ML direction engine, sizes the position, places a Dhan intraday Super Order, and sends a Telegram alert. No human input required during market hours.
 
 ---
 
@@ -9,18 +9,30 @@ Fully automated weekly BankNifty ATM options system. Runs every trading day at 9
 
 ---
 
-## How the Strategy Works
+## How It Works
 
 ```
-Each trading day (Mon–Fri) at 9:15 AM IST:
+Each trading day (Mon / Tue / Thu / Fri) at 9:15 AM IST:
 
-  Score 4 indicators  →  CALL / PUT / NONE
+  Fetch latest OHLCV + global data
         ↓
-  CALL / PUT  →  ATM weekly option, Dhan Super Order
-  NONE        →  No trade, Telegram notification
+  Rule-based signal engine  →  signals.csv
+        ↓
+  ML direction oracle       →  signals_ml.csv  (84.8% directional accuracy)
+        ↓
+  CALL / PUT  →  ATM weekly option, Dhan Super Order + trailing SL
+  NONE        →  No trade (event day override), Telegram notification
 ```
 
-### Signal Engine — 4 Active Indicators
+Wednesday is excluded — expiry day premium decay makes intraday directional plays unfavourable.
+
+---
+
+## Signal Engine
+
+Four rule-based indicators produce a directional score. The ML engine then overrides direction using a walk-forward Random Forest trained on 4.5 years of data.
+
+### Rule-based indicators (4 active)
 
 | Indicator | Bullish (+1) | Bearish (−1) |
 |---|---|---|
@@ -29,23 +41,34 @@ Each trading day (Mon–Fri) at 9:15 AM IST:
 | VIX direction | VIX falling | VIX rising |
 | BN-NF divergence | BN outperforms Nifty50 > +0.5% | underperforms > −0.5% |
 
-Score ≥ +1 → BUY CALL · Score ≤ −1 → BUY PUT · Score = 0 → No trade
+Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT · Score = 0 → No trade
 
-Macro signals (S&P500, Nikkei, S&P futures, BN overnight gap) were tested and found to be net negative drag — attribution analysis showed India-only technical signals significantly outperform.
+### ML Direction Oracle
 
-### Trade Parameters
+A walk-forward Random Forest trained on 21 features overrides the rule-based direction. It is a **direction oracle, not a filter** — it always outputs CALL or PUT (no skipping trades), and it disagrees with the rule-based direction on ~35% of days. On those days, ML is correct 86% of the time vs the rules at 7.5%.
 
-| Day | DTE | Premium | RR | Breakeven WR |
-|---|---|---|---|---|
-| Monday | 2 | spot × 0.57% | 1.6× | 38.5% |
-| Tuesday | 1 | spot × 0.40% | 1.4× | 41.7% |
-| Wednesday | 0.25 | spot × 0.20% | 1.0× | 50.0% |
-| Thursday | 6 | spot × 0.98% | 2.0× | 33.3% |
-| Friday | 5 | spot × 0.89% | 2.0× | 33.3% |
+Top features by importance:
+- `bn_ret1` (40%) — yesterday's BankNifty return (momentum)
+- `bn_nf_div` (12%) — BankNifty vs Nifty50 divergence
+- `bn_gap` (12%) — overnight gap
 
-- Stop-loss: 30% of premium
-- Lot size: 30 | Max lots: 20 (capital-based sizing at 5% risk per trade)
-- No carryforward — MIS intraday, auto-exits at 3:15 PM
+---
+
+## Trade Parameters
+
+| | Value |
+|---|---|
+| Trading days | Mon / Tue / Thu / Fri |
+| Stop-loss | 15% of premium |
+| Target | 30% of premium (RR = 2.0×) |
+| Trailing stop | ₹5 option price jump |
+| Risk per trade | 5% of available capital |
+| Lot size | 30 (post Jun 2025 NSE mandate) |
+| Max lots | 20 |
+| Exit | Intraday only — MIS, no carryforward |
+
+Premium approximation (no intraday options data used for sizing):
+`premium = BN_open × 0.004 × sqrt(actual_DTE)`
 
 ---
 
@@ -54,15 +77,19 @@ Macro signals (S&P500, Nikkei, S&P futures, BN overnight gap) were tested and fo
 ```
 dhan-trading/
 │
-├── auto_trader.py           Morning automation: signal → Dhan order → Telegram
-├── signal_engine.py         Computes indicators, generates CALL/PUT/NONE signals
-├── backtest_engine.py       Simulates trades on historical data with full cost model
-├── data_fetcher.py          Fetches all market data → data/
-├── notify.py                Telegram notification helper
-├── dhan_mcp.py              MCP server: query live positions/P&L from Claude Code
-├── setup_automation.sh      One-shot VM setup: deps, cron, dry-run
+├── auto_trader.py       Morning automation: data → ML signal → Dhan order → Telegram
+├── signal_engine.py     Rule-based indicators → signals.csv
+├── ml_engine.py         Walk-forward ML oracle → signals_ml.csv
+├── backtest_engine.py   Historical simulation with full cost model
+├── data_fetcher.py      Fetches OHLCV + global data → data/
+├── notify.py            Telegram notification helper
+├── dhan_mcp.py          MCP server: query live positions/P&L from Claude Code
+├── setup_automation.sh  One-shot VM setup: deps, cron, dry-run
 │
-└── data/                    CSV files (not in GitHub — lives on GCP VM only)
+└── data/                CSV files (gitignored — lives on GCP VM only)
+    ├── banknifty.csv
+    ├── signals.csv
+    └── signals_ml.csv
 ```
 
 ### Data Sources
@@ -88,7 +115,7 @@ dhan-trading/
 ```bash
 git clone https://github.com/PradyXiii/dhan-trading.git
 cd dhan-trading
-pip3 install pandas numpy yfinance requests python-dotenv mcp --break-system-packages
+pip3 install pandas numpy yfinance requests python-dotenv scikit-learn mcp --break-system-packages
 ```
 
 ### 2. Configure credentials
@@ -98,25 +125,27 @@ cp .env.example .env
 nano .env
 ```
 
-```env
+```
 DHAN_ACCESS_TOKEN=eyJ...           # from dhan.co → API settings (expires every 24h)
 DHAN_CLIENT_ID=your_client_id      # found in Dhan API settings
 TELEGRAM_BOT_TOKEN=your_bot_token  # from t.me/BotFather
 TELEGRAM_CHAT_ID=your_chat_id      # your Telegram user/channel ID
 ```
 
-### 3. Fetch historical data + run backtest
+### 3. Fetch data, generate signals, run ML walk-forward
 
 ```bash
-python3 data_fetcher.py          # downloads all market data → data/
-python3 signal_engine.py         # generates signals.csv
-python3 backtest_engine.py       # runs backtest, prints summary
+python3 data_fetcher.py      # downloads all market data → data/
+python3 signal_engine.py     # generates data/signals.csv
+python3 ml_engine.py         # walk-forward ML (~2 min) → data/signals_ml.csv
+python3 backtest_engine.py   # optional: run backtest, print summary
+python3 backtest_engine.py --ml   # optional: ML backtest
 ```
 
 ### 4. Install automation
 
 ```bash
-bash setup_automation.sh         # sets up cron, tests connection, dry-run
+bash setup_automation.sh     # sets up cron, tests connection, dry-run
 ```
 
 ### 5. Test dry-run
@@ -133,34 +162,31 @@ python3 auto_trader.py --dry-run
 4–5 PM IST  →  Get new Dhan token (expires every 24h)
                nano .env → update DHAN_ACCESS_TOKEN
 
-             →  Refresh today's data + signal
-               python3 data_fetcher.py && python3 signal_engine.py
-
-9:15 AM IST →  Cron fires automatically
-               Dhan Super Order placed
-               Telegram alert sent
+9:15 AM IST →  Cron fires automatically:
+               1. data_fetcher.py       — pulls latest data
+               2. signal_engine.py      — rule-based signal
+               3. ml_engine.py --predict-today  — ML direction (~10 sec)
+               4. Dhan Super Order placed
+               5. Telegram alert sent
                No action needed
-
-3:35 PM IST →  portfolio_tracker.py cron logs completed trades + balance
-               (runs on VM, saves to ~/trading_logs/ — never in GitHub)
 ```
 
 ### Token auto-refresh (optional)
 
-If you have a Dhan account with TOTP enabled, `refresh_token.py` (separate repo) can automate the token refresh. Set up as a cron at 1 AM UTC (6:30 AM IST):
+If your Dhan account has TOTP enabled, a separate `refresh_token.py` script can automate the daily token rotation. Set up as a cron at 6:30 AM IST (1 AM UTC):
 
 ```cron
-0 1 * * 1-5 python3 /home/user/dhan/refresh_token.py >> /home/user/dhan/token.log 2>&1
+0 1 * * 1-5 python3 /home/user/dhan-trading/refresh_token.py >> ~/token.log 2>&1
 ```
 
 ---
 
 ## Live P&L via Claude Code
 
-An MCP server (`dhan_mcp.py`) lets you query your live Dhan positions directly from Claude Code:
+`dhan_mcp.py` is an MCP server that lets you query live Dhan positions directly from Claude Code:
 
-> "Show me my current positions"
-> "What's today's P&L?"
+> "Show me my current positions"  
+> "What's today's P&L?"  
 > "Did my stop-loss trigger?"
 
 Add to `~/.claude/claude.json`:
@@ -178,11 +204,23 @@ Add to `~/.claude/claude.json`:
 
 ---
 
+## ML Engine Modes
+
+```bash
+python3 ml_engine.py                   # full walk-forward (backtest use)
+python3 ml_engine.py --predict-today   # fast single prediction (live use, ~10 sec)
+python3 ml_engine.py --analyze         # feature importance + accuracy report
+python3 ml_engine.py --filter 0.60     # confidence-gate mode (fewer trades, higher WR)
+```
+
+---
+
 ## Built With
 
 - **Python** — core language
 - **Dhan API v2** — order placement, option chain, positions, fund limit
 - **pandas / numpy** — data processing and backtesting
+- **scikit-learn** — walk-forward Random Forest ML engine
 - **yfinance** — global market data (VIX, S&P500, Nikkei)
 - **Telegram Bot API** — trade notifications
 - **MCP (Model Context Protocol)** — Claude Code integration for live P&L queries
@@ -195,17 +233,15 @@ Add to `~/.claude/claude.json`:
 
 | Decision | Why |
 |---|---|
-| Directional long (not straddle) | BN avg daily range ~586 pts < straddle breakeven (800–1960 pts). Directional significantly outperforms straddle across the backtest period |
-| 4 indicators (not 10) | Attribution showed macro signals (US/Japan) are noise. India-only technical signals significantly outperform the full 10-indicator set |
-| All 5 days including Wed (0 DTE) | Wed (expiry day, 0 DTE) has the highest win rate of any weekday. All-5-days gives best P&L and lowest drawdown |
-| Threshold ±1 | Signal direction matters; score magnitude adds no edge |
-| 20-lot cap | Prevents unrealistically large position sizes as capital compounds — liquidity and margin constraint |
-| 5% risk per trade | Balances growth with drawdown control |
+| ML as direction oracle, not filter | Rules are directionally correct only ~50% of the time. ML hits 84.8% directional accuracy — same trade count, better direction |
+| No Wednesday trading | Expiry day. 0.25 DTE premium decays too fast for intraday directional plays |
+| 4 rule-based indicators | Attribution showed macro signals (US/Japan) add noise. India-only technicals outperform the full 10-indicator set |
+| 15% SL / 30% TP / 2.0× RR | Optimised over SL sweep (10–30%). 15% SL with 2.0× RR gives best P&L with -5.5% max drawdown |
+| Trailing stop ₹5 | Locks in profit as the trade moves. Allows partial exits rather than binary WIN/LOSS |
+| 5% risk per trade | Balances compounding growth with drawdown control |
+| 20-lot cap | Liquidity and margin constraint as capital grows |
+| No carryforward | Intraday MIS only. No overnight risk |
 
 ---
 
-*Strategy: BankNifty ATM weekly options, intraday, MIS*
-
----
-
-> **Risk Warning**: Options trading carries a high level of risk and may not be appropriate for all investors. You can lose more than your initial investment. This system is provided as-is, with no warranty of fitness for live trading. Use at your own risk.
+> **Risk Warning**: Options trading carries a high level of risk. You can lose more than your initial investment. This system is provided as-is with no warranty of fitness for live trading. Use at your own risk.
