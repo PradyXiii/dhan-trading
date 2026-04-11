@@ -331,11 +331,11 @@ def fetch_rollingoption(from_date, to_date):
         for opt_type in ["CALL", "PUT"]:
             payload = {
                 "exchangeSegment": "NSE_FNO",
-                "interval":        "1",       # 1-minute → first candle = 9:15 AM open
+                "interval":        "15",      # 15-min bars; first bar open = 9:15 AM open
                 "securityId":      25,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
-                "expiryCode":      0,          # nearest expiry
+                "expiryCode":      0,          # nearest expiry (0 = current)
                 "strike":          "ATM",
                 "drvOptionType":   opt_type,
                 "requiredData":    ["open", "strike"],
@@ -351,7 +351,7 @@ def fetch_rollingoption(from_date, to_date):
                 )
                 if resp.status_code != 200:
                     print(f"  rollingoption {opt_type} [{current}→{chunk_end}]: "
-                          f"HTTP {resp.status_code} — {resp.text[:80]}")
+                          f"HTTP {resp.status_code} — {resp.text[:400]}")
                     time.sleep(0.4)
                     continue
 
