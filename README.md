@@ -24,7 +24,7 @@ Each trading day (Mon / Tue / Thu / Fri) at 9:15 AM IST:
   NONE        →  No trade (event day override), Telegram notification
 ```
 
-Wednesday is excluded — expiry day premium decay makes intraday directional plays unfavourable.
+All 5 weekdays traded. Phase 4 (Sep 2025+): monthly last-Tuesday expiry, so Wednesday is a normal trading day with 5–20 DTE.
 
 ---
 
@@ -58,7 +58,7 @@ Top features by importance:
 
 | | Value |
 |---|---|
-| Trading days | Mon / Tue / Thu / Fri |
+| Trading days | Mon / Tue / Wed / Thu / Fri (all 5 — Phase 4 monthly expiry) |
 | Stop-loss | 15% of premium |
 | Target | 30% of premium (RR = 2.0×) |
 | Trailing stop | ₹5 option price jump |
@@ -234,7 +234,7 @@ python3 ml_engine.py --filter 0.60     # confidence-gate mode (fewer trades, hig
 | Decision | Why |
 |---|---|
 | ML as direction oracle, not filter | Rules are directionally correct only ~50% of the time. ML hits 84.8% directional accuracy — same trade count, better direction |
-| No Wednesday trading | Expiry day. 0.25 DTE premium decays too fast for intraday directional plays |
+| All 5 weekdays traded | Phase 4 (Sep 2025+): BankNifty is monthly last-Tuesday expiry. Wednesday is a normal trade day with 5–20 DTE, not expiry day |
 | 4 rule-based indicators | Attribution showed macro signals (US/Japan) add noise. India-only technicals outperform the full 10-indicator set |
 | 15% SL / 30% TP / 2.0× RR | Optimised over SL sweep (10–30%). 15% SL with 2.0× RR gives best P&L with -5.5% max drawdown |
 | Trailing stop ₹5 | Locks in profit as the trade moves. Allows partial exits rather than binary WIN/LOSS |

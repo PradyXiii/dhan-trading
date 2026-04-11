@@ -121,9 +121,11 @@ def get_dte(d):
     return max(0.25, float(days) + 1)
 
 
-# Legacy weekday DTE dict kept ONLY for --compare / old modes that don't pass dte_override
+# Legacy weekday DTE dict kept ONLY for --compare / old modes that don't pass dte_override.
+# Phase 4 (Sep 2025+): monthly last-Tuesday expiry — Wednesday is a normal trade day.
+# use_actual_dte=True (default for all backtests) ignores this dict entirely.
 DAY_DTE = {
-    "Monday": 2, "Tuesday": 1, "Wednesday": 0.25, "Thursday": 6, "Friday": 5,
+    "Monday": 2, "Tuesday": 1, "Wednesday": 6, "Thursday": 6, "Friday": 5,
 }
 DAY_RR = {
     "Monday": 2.0, "Tuesday": 2.0, "Wednesday": 2.0, "Thursday": 2.0, "Friday": 2.0,

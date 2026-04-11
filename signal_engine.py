@@ -28,7 +28,7 @@ _raw_days = sys.argv[2] if len(sys.argv) > 2 else "mon,tue,wed,thu,fri"
 TRADE_WEEKDAYS = [_DAY_MAP[d.strip().lower()] for d in _raw_days.split(",")
                   if d.strip().lower() in _DAY_MAP]
 if not TRADE_WEEKDAYS:
-    TRADE_WEEKDAYS = [0, 1, 3, 4]  # fallback to all 4
+    TRADE_WEEKDAYS = [0, 1, 2, 3, 4]  # fallback: all 5 weekdays
 
 
 # ── Event calendar — hard NO-TRADE override ───────────────────────────────────
@@ -221,8 +221,8 @@ def score_row(row):
 def generate_signals(df):
     """
     Filter to selected weekdays, score, apply event filter, return DataFrame.
-    Wednesday (expiry day) is always excluded — 0 DTE gamma risk is a different strategy.
-    Active days controlled by TRADE_WEEKDAYS (CLI arg or default Mon/Tue/Thu/Fri).
+    Phase 4 (Sep 2025+): monthly last-Tuesday expiry — all 5 weekdays are valid trading days.
+    Active days controlled by TRADE_WEEKDAYS (CLI arg or default Mon–Fri).
     """
     trade_days = df[df["date"].dt.weekday.isin(TRADE_WEEKDAYS)].copy()
     trade_days["weekday"] = trade_days["date"].dt.day_name()
@@ -313,7 +313,7 @@ def main():
     event_days = signals["event_day"].sum() if "event_day" in signals else 0
 
     print(f"\n{'='*52}")
-    print(f"  Trade days scanned : {total}  ({_days_label}, skip Wed expiry)")
+    print(f"  Trade days scanned : {total}  ({_days_label})")
     print(f"  CALL signals       : {calls}  ({calls/total*100:.1f}%)")
     print(f"  PUT  signals       : {puts}   ({puts/total*100:.1f}%)")
     print(f"  NO TRADE (score)   : {nones - event_days}  ({(nones-event_days)/total*100:.1f}%)")

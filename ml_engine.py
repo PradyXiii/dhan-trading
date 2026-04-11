@@ -400,7 +400,7 @@ def generate_ml_signals(mode="direction", ml_threshold=0.55):
 
     print("Computing indicators and features...")
     df      = compute_features(raw)
-    trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
+    trading = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
     print(f"  Trading days (Mon/Tue/Thu/Fri): {len(trading)}")
 
     print("Computing directional labels...")
@@ -513,7 +513,7 @@ def run_analysis():
     print("Step 1/3: Loading data and computing labels...")
     raw     = load_all_data()
     df      = compute_features(raw)
-    trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
+    trading = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
 
     labels_df    = compute_labels(trading)
     X            = trading[FEATURE_COLS].values.astype(float)
@@ -622,7 +622,7 @@ def predict_today():
     # Load and compute features
     raw     = load_all_data()
     df      = compute_features(raw)
-    trading = df[df["date"].dt.weekday.isin([0, 1, 3, 4])].copy().reset_index(drop=True)
+    trading = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
 
     # Check today is a scheduled trading day (Mon/Tue/Thu/Fri)
     today_rows = trading[trading["date"] == today_ts]
