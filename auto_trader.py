@@ -270,6 +270,36 @@ def _parse_security_id(data, inner, atm_strike, opt_type) -> tuple:
     return None, None
 
 
+def _get_bn_ltp() -> float:
+    """
+    Fetch BankNifty last traded price from Dhan market-feed LTP endpoint.
+    Works even when the option chain API is down (e.g. off-hours / weekends).
+    Returns float spot price, or None if unavailable.
+    """
+    try:
+        resp = requests.post(
+            "https://api.dhan.co/v2/marketfeed/ltp",
+            headers=HEADERS,
+            json={"IDX_I": ["25"]},   # 25 = BankNifty
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            # Handle both known Dhan response shapes
+            ltp = (
+                (d.get("data") or {}).get("IDX_I", {}).get("25", {}).get("last_price") or
+                (d.get("data") or {}).get("IDX_I", {}).get("25", {}).get("lastTradedPrice") or
+                d.get("IDX_I", {}).get("25", {}).get("last_price") or
+                d.get("last_price") or 0
+            )
+            if ltp and float(ltp) > 10000:   # sanity: BN is always > 10k
+                return float(ltp)
+            notify.log(f"BN LTP endpoint returned unexpected payload: {str(d)[:100]}")
+    except Exception as e:
+        notify.log(f"BN LTP fetch failed: {e}")
+    return None
+
+
 def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
     """
     Returns (security_id, atm_strike, spot).
@@ -315,14 +345,28 @@ def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
 
         notify.log(f"All 3 attempts failed for expiry {exp} — trying next expiry")
 
-    # All expiries exhausted — fallback to CSV spot for DRY RUN
+    # ── Option chain exhausted: try live LTP before falling back to CSV ────────
+    spot = _get_bn_ltp()
+    if spot:
+        atm_strike = round(spot / 100) * 100
+        notify.log(f"Option chain unavailable — using live BN LTP ₹{spot:,.0f} (ATM {int(atm_strike)})")
+        if DRY_RUN:
+            return "DRY_RUN_LIVE_LTP", atm_strike, spot
+        return None, None, None  # live mode: can't place without real security_id
+
+    # ── Final fallback: CSV close (stale — warn loudly) ───────────────────────
     try:
         bn_df      = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
-        spot       = spot_fallback or float(bn_df.iloc[-1]["close"])
-        atm_strike = round(spot / 100) * 100
-        notify.log(f"Option chain unavailable — using BN close ₹{spot:,.0f} (ATM {int(atm_strike)})")
+        csv_close  = spot_fallback or float(bn_df.iloc[-1]["close"])
+        csv_date   = bn_df.iloc[-1]["date"]
+        atm_strike = round(csv_close / 100) * 100
+        notify.log(
+            f"⚠️  Option chain AND LTP unavailable — using stale CSV close "
+            f"₹{csv_close:,.0f} ({csv_date.date() if hasattr(csv_date,'date') else csv_date}). "
+            f"Strike/premium estimates will be wrong if spot has moved significantly."
+        )
         if DRY_RUN:
-            return "DRY_RUN_PLACEHOLDER", atm_strike, spot
+            return "DRY_RUN_STALE", atm_strike, csv_close
     except Exception:
         pass
 
@@ -492,6 +536,14 @@ def main():
 
     sig_line = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
 
+    # Stale-data warning (DRY RUN only — API unavailable + LTP also failed)
+    stale_line = ""
+    if security_id == "DRY_RUN_STALE":
+        stale_line = (
+            "\n⚠️  <i>Option chain + LTP offline — spot/strike/premium are estimates "
+            "from last CSV close. Actual Monday trade will use live prices.</i>"
+        )
+
     # 6. Send ONE trade-details message to Telegram
     notify.send(
         f"{opt_emoji}  <b>BUY {signal}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
@@ -508,6 +560,7 @@ def main():
         f"Target     ₹{tp_price:.0f}  (+{SL_PCT*rr*100:.0f}%)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Risk  ₹{risk_amt:,.0f}   Reward  ₹{target_amt:,.0f}"
+        f"{stale_line}"
     )
 
     # 7. Place order
@@ -516,13 +569,20 @@ def main():
 
     # 8. Send ONE result message
     if DRY_RUN:
+        if security_id == "DRY_RUN_STALE":
+            footer = (
+                "⚠️  <i>Strike/premium estimated from stale CSV close.\n"
+                "Real Monday trade will use live ATM from option chain.</i>"
+            )
+        else:
+            footer = "<i>Add funds to your Dhan account to go live.</i>"
         notify.send(
             f"✅  <b>Dry Run Complete</b>\n\n"
             f"Would have bought:\n"
             f"<code>{opt_sym}</code>\n"
             f"{lots} lot{'s' if lots > 1 else ''}  ·  "
             f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n\n"
-            f"<i>Add funds to your Dhan account to go live.</i>"
+            f"{footer}"
         )
         return
 
