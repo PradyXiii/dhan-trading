@@ -159,6 +159,7 @@ result = place(
         "disclosedQuantity": 0,
         "triggerPrice":    0,
         "afterMarketOrder": True,
+        "amoTime":         "OPEN",       # equity CNC AMO may require this alongside afterMarketOrder
     },
 )
 
