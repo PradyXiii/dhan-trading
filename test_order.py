@@ -2,8 +2,8 @@
 """
 test_order.py — Fire one test equity order to prove API + IP auth
 =================================================================
-Places a CNC LIMIT order for 1 share of SBIN at ₹1 (will stay PENDING
-since ₹1 is far below market price). Run this after market hours to
+Places a CNC LIMIT order for 1 share of SBIN at ₹700 (will stay PENDING
+since ₹700 is ~12-15% below SBIN's market price). Run this after market hours to
 confirm that Dhan API accepts equity AMO orders from the GCP IP.
 
 Run on GCP VM:
@@ -54,8 +54,9 @@ print(f"    Available balance: ₹{bal}")
 
 # ── Step 2: Place equity CNC AMO order ───────────────────────────────────────
 # SBIN (State Bank of India) — security ID 3045 on NSE
-# LIMIT at ₹1 → will not execute, just sits as PENDING AMO
-print("\n[2] Placing CNC LIMIT AMO order — SBIN, qty=1, price=₹1 ...")
+# LIMIT at ₹700 → ~12-15% below market, within 20% circuit band, won't execute
+# (SBIN would need to gap down 12%+ on open for this to fill — virtually impossible)
+print("\n[2] Placing CNC LIMIT AMO order — SBIN, qty=1, price=₹700 ...")
 
 payload = {
     "dhanClientId":       CLIENT_ID,
@@ -67,7 +68,7 @@ payload = {
     "validity":           "DAY",
     "securityId":         "3045",       # SBIN
     "quantity":           1,
-    "price":              1.00,         # ₹1 — will not execute at market price
+    "price":              700.00,       # well below ~₹800 market, within circuit limits
     "afterMarketOrder":   True,         # AMO flag — required by Dhan v2
     "triggerPrice":       0,
     "disclosedQuantity":  0,
