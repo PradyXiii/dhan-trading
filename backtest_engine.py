@@ -99,13 +99,15 @@ def load_bn_ohlcv():
 
 # ── Trade simulator ───────────────────────────────────────────────────────────
 
-def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None, flat_rr=None):
+def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
+                   flat_rr=None, day_rr_override=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
-    trail_jump_opt : trailing stop in option-price rupees (Dhan trailingJump). 0 = off.
-    sl_pct         : override SL_PCT global (e.g. 0.20 for 20% SL). None = use global.
-    flat_rr        : use this RR for every day instead of DAY_RR dict. None = use per-day.
+    trail_jump_opt  : trailing stop in option-price rupees (Dhan trailingJump). 0 = off.
+    sl_pct          : override SL_PCT global (e.g. 0.20 for 20% SL). None = use global.
+    flat_rr         : use this RR for every day instead of DAY_RR dict. None = use per-day.
+    day_rr_override : dict like DAY_RR to use instead of the module-level DAY_RR.
 
     Returns (pnl, result, lots, premium, charges_total, charges_breakdown).
     """
@@ -127,7 +129,12 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None, flat_r
     bn_close = bar["close"]
 
     dte  = DAY_DTE.get(weekday, 1)
-    rr   = flat_rr if flat_rr is not None else DAY_RR.get(weekday, 1.4)
+    if flat_rr is not None:
+        rr = flat_rr
+    elif day_rr_override is not None:
+        rr = day_rr_override.get(weekday, 1.4)
+    else:
+        rr = DAY_RR.get(weekday, 1.4)
     sl   = sl_pct  if sl_pct  is not None else SL_PCT
     premium = bn_open * PREMIUM_K * (dte ** 0.5)
 
@@ -219,7 +226,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None, flat_r
 
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
-def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None):
+def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None):
     signals  = load_signals()
     bn_ohlcv = load_bn_ohlcv()
 
@@ -242,7 +249,8 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None):
             row, bn_ohlcv, capital,
             trail_jump_opt=trail_jump_opt,
             sl_pct=sl_pct,
-            flat_rr=flat_rr)
+            flat_rr=flat_rr,
+            day_rr_override=day_rr_override)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -341,6 +349,68 @@ def run_sl_tp_grid(trail_jump_opt=5):
     print(f"{'='*90}")
     print(f"\n  trail_sl = losses converted to smaller exits by trailing SL")
     print(f"  WR% = wins / (wins + full losses) — excludes trail_sl and partials\n")
+
+
+def run_rr_comparison(sl_pct=0.20, trail_jump_opt=5):
+    """
+    Compare per-day RR configs vs flat RR, all at a fixed SL% and trail.
+    Tests: original per-day mix, flat 1.0x, 1.5x, 2.0x, 2.5x, 3.0x
+    """
+    ORIGINAL_PER_DAY = {
+        "Monday":    1.6,
+        "Tuesday":   1.4,
+        "Wednesday": 1.0,
+        "Thursday":  2.0,
+        "Friday":    2.0,
+    }
+
+    configs = [
+        ("per-day  Mon1.6 Tue1.4 Wed1.0 Thu2.0 Fri2.0", None,  ORIGINAL_PER_DAY),
+        ("flat 1.0×  (TP=+20%)",                          1.0,  None),
+        ("flat 1.5×  (TP=+30%)",                          1.5,  None),
+        ("flat 2.0×  (TP=+40%)",                          2.0,  None),
+        ("flat 2.5×  (TP=+50%)",                          2.5,  None),
+        ("flat 3.0×  (TP=+60%)",                          3.0,  None),
+    ]
+
+    rows = []
+    for label, flat_rr, day_override in configs:
+        trade_df, _ = run_backtest(
+            trail_jump_opt=trail_jump_opt,
+            sl_pct=sl_pct,
+            flat_rr=flat_rr,
+            day_rr_override=day_override,
+        )
+        active   = trade_df[trade_df["result"].isin(["WIN","LOSS","PARTIAL","TRAIL_SL"])]
+        wins     = (active["result"] == "WIN").sum()
+        losses   = (active["result"] == "LOSS").sum()
+        trail_sl = (active["result"] == "TRAIL_SL").sum()
+        net_pnl  = active["pnl"].sum()
+        end_cap  = trade_df["capital_after"].iloc[-1]
+        wr       = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+
+        cap_series = trade_df["capital_after"]
+        max_dd     = ((cap_series - cap_series.cummax()) / cap_series.cummax() * 100).min()
+
+        rows.append({
+            "RR config":  label,
+            "wins":       wins,
+            "losses":     losses,
+            "trail_sl":   trail_sl,
+            "WR%":        f"{wr:.0f}%",
+            "net_pnl":    net_pnl,
+            "net_pnl_fmt":f"₹{net_pnl:,.0f}",
+            "end_cap":    f"₹{end_cap:,.0f}",
+            "max_dd":     f"{max_dd:.1f}%",
+        })
+
+    df = pd.DataFrame(rows).sort_values("net_pnl", ascending=False).reset_index(drop=True)
+
+    print(f"\n{'='*95}")
+    print(f"  RR COMPARISON  —  SL={int(sl_pct*100)}%, trail=₹{trail_jump_opt}, ranked by net P&L")
+    print(f"{'='*95}")
+    print(df.drop(columns=["net_pnl"]).to_string(index=True))
+    print(f"{'='*95}\n")
 
 
 def run_trail_comparison():
@@ -583,6 +653,11 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--compare":
         print("Running full threshold comparison (±1 through ±4)...")
         run_comparison()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--rr":
+        print("Running RR comparison (per-day original vs flat 1.0–3.0×, SL=20%, trail=₹5)...")
+        run_rr_comparison()
         return
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--trail":
