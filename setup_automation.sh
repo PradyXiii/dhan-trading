@@ -82,13 +82,19 @@ echo "[5] Installing cron job (9:15 AM IST = 3:45 AM UTC, Mon–Fri)..."
 CRON_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
 CRON_COMMENT="# BankNifty Auto Trader — runs at 9:15 AM IST"
 
-# Remove old auto_trader cron entries if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "BankNifty Auto Trader")
+# Monthly lot/expiry scanner — 1st of month at 10 AM IST = 4:30 AM UTC
+SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
+SCANNER_COMMENT="# BankNifty lot/expiry scanner — runs 1st of month 10 AM IST"
 
-# Add fresh entry
+# Remove old entries (auto_trader + scanner) if any
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry")
+
+# Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
 $CRON_COMMENT
-$CRON_CMD"
+$CRON_CMD
+$SCANNER_COMMENT
+$SCANNER_CMD"
 
 echo "$NEW_CRON" | crontab -
 

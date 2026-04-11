@@ -39,10 +39,8 @@ _LOT_15_UNTIL = _date(2024, 11, 20)   # SEBI mandate: 15 → 30
 _LOT_35_FROM  = _date(2025,  6, 26)   # day after Jun 2025 expiry: 30 → 35
 _LOT_30B_FROM = _date(2026,  1, 27)   # first Jan 2026 monthly expiry: 35 → 30
 
-def get_lot_size(d):
-    """Return the correct BankNifty lot size for a historical trade date."""
-    if isinstance(d, pd.Timestamp):
-        d = d.date()
+def _baseline_lot_size(d):
+    """Hardcoded baseline timeline — canonical source of truth."""
     if d < _LOT_15_UNTIL:
         return 15   # Sep 2021 – Nov 2024
     elif d < _LOT_35_FROM:
@@ -51,6 +49,46 @@ def get_lot_size(d):
         return 35   # Jul 2025 – Jan 2026
     else:
         return 30   # Jan 2026 onwards
+
+
+def get_lot_size(d):
+    """
+    Return the correct BankNifty lot size for a historical trade date.
+
+    Priority:
+      1. Active overrides from data/lot_size_overrides.json (written by
+         lot_expiry_scanner.py on mismatch detection)
+      2. Hardcoded baseline (_baseline_lot_size)
+
+    The scanner runs monthly and updates the override file automatically
+    when NSE publishes lot size changes.
+    """
+    if isinstance(d, pd.Timestamp):
+        d = d.date()
+
+    # Check override file (only if it exists and is readable)
+    try:
+        import json as _json
+        import os as _os
+        ov_path = _os.path.join(DATA_DIR, "lot_size_overrides.json")
+        if _os.path.exists(ov_path):
+            with open(ov_path) as _f:
+                ov = _json.load(_f)
+            best = _baseline_lot_size(d)
+            best_eff = _date(1900, 1, 1)
+            for entry in ov.get("active", []):
+                try:
+                    eff = _date.fromisoformat(entry["effective_date"])
+                except Exception:
+                    continue
+                if eff <= d and eff >= best_eff:
+                    best = int(entry["lot_size"])
+                    best_eff = eff
+            return best
+    except Exception:
+        pass
+
+    return _baseline_lot_size(d)
 
 
 def last_wednesday(year, month):
