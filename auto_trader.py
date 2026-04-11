@@ -119,7 +119,7 @@ def handle_kill_switch_arg():
         resp = requests.post(
             "https://api.dhan.co/v2/killswitch",
             headers=HEADERS,
-            json={"killSwitchStatus": api_status},
+            json={"dhanClientId": CLIENT_ID, "killSwitchStatus": api_status},
             timeout=10,
         )
         if resp.status_code == 200:
@@ -419,7 +419,6 @@ def place_super_order(security_id: str, signal: str, lots: int,
     buy_payload = {**payload, "orderType": "MARKET", "targetPrice": 0,
                    "stopLossPrice": 0, "trailingJump": 0,
                    "triggerPrice": 0, "disclosedQuantity": 0,
-                   "afterMarketOrder": False,
                    "correlationId": f"at_buy_{date.today().strftime('%Y%m%d')}"}
     buy_resp   = requests.post("https://api.dhan.co/v2/orders",
                                headers=HEADERS, json=buy_payload, timeout=15)
