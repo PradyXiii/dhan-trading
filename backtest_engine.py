@@ -185,16 +185,18 @@ def calculate_charges(premium, lots, lot_size=None, breakdown=False):
 
 # ── Loaders ──────────────────────────────────────────────────────────────────
 
-def load_signals():
-    df = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+def load_signals(ml=False):
+    fname = f"{DATA_DIR}/signals_ml.csv" if ml else f"{DATA_DIR}/signals.csv"
+    df = pd.read_csv(fname, parse_dates=["date"])
     if "threshold" in df.columns:
         df = df.drop(columns=["threshold"])
     return df[df["signal"].isin(["CALL", "PUT"])].reset_index(drop=True)
 
 
-def load_all_signals():
+def load_all_signals(ml=False):
     """Load full signals including NONE rows — used for summary stats."""
-    return pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+    fname = f"{DATA_DIR}/signals_ml.csv" if ml else f"{DATA_DIR}/signals.csv"
+    return pd.read_csv(fname, parse_dates=["date"])
 
 
 def load_bn_ohlcv():
@@ -356,8 +358,8 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
 def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None,
-                 bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True):
-    signals  = load_signals()
+                 bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True, ml=False):
+    signals  = load_signals(ml=ml)
     bn_ohlcv = load_bn_ohlcv()
 
     capital       = STARTING_CAPITAL
@@ -820,7 +822,7 @@ def run_tp_fixed_grid(tp_pct=0.30, trail_jump_opt=5):
     print()
 
 
-def print_summary(trade_df, monthly, threshold=None):
+def print_summary(trade_df, monthly, threshold=None, ml=False):
     active   = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL", "TRAIL_SL"])]
     wins     = (active["result"] == "WIN").sum()
     losses   = (active["result"] == "LOSS").sum()
@@ -829,10 +831,10 @@ def print_summary(trade_df, monthly, threshold=None):
     total    = len(active)
     skipped = (trade_df["result"].str.startswith("SKIPPED")).sum()
 
-    # Event-skipped days — read from signals.csv if available
+    # Event-skipped days — read from signals csv if available
     event_skipped = 0
     try:
-        all_sig = load_all_signals()
+        all_sig = load_all_signals(ml=ml)
         if "event_day" in all_sig.columns:
             event_skipped = int(all_sig["event_day"].sum())
     except Exception:
@@ -1144,6 +1146,39 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--phases":
         print("Month-on-month breakdown by expiry regime phase...")
         run_phase_analysis()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--ml":
+        # ── ML-enhanced backtest ──────────────────────────────────────────────
+        sig_file = f"{DATA_DIR}/signals_ml.csv"
+        if not os.path.exists(sig_file):
+            print("signals_ml.csv not found.")
+            print("Run:  python3 ml_engine.py   to generate ML signals first.")
+            return
+        try:
+            sig_df    = pd.read_csv(sig_file, nrows=1)
+            threshold = int(sig_df["threshold"].iloc[0]) if "threshold" in sig_df.columns else None
+            ml_mode   = "ML"
+            if "rule_signal" in sig_df.columns and "signal" in sig_df.columns:
+                # Detect combined mode: if signal column differs from ml_signal column
+                if "ml_signal" in sig_df.columns:
+                    full  = pd.read_csv(sig_file)
+                    agree = (full["signal"] == full["ml_signal"]).all()
+                    ml_mode = "ML-only" if agree else "COMBINED (rule+ML)"
+        except Exception:
+            threshold = None
+            ml_mode   = "ML"
+
+        print(f"Running ML backtest...  [{ml_mode} | SL=15%, TP=30%, RR=2.0x, trail=₹5, actual DTE]")
+        trade_df, monthly = run_backtest(trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0,
+                                         use_actual_dte=True, ml=True)
+
+        trade_df.to_csv(f"{DATA_DIR}/trade_log_ml.csv",    index=False)
+        monthly.to_csv( f"{DATA_DIR}/equity_curve_ml.csv", index=False)
+
+        print_summary(trade_df, monthly, threshold=threshold, ml=True)
+        print(f"\nSaved → {DATA_DIR}/trade_log_ml.csv")
+        print(f"Saved → {DATA_DIR}/equity_curve_ml.csv")
         return
 
     # Read threshold embedded in signals.csv
