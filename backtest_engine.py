@@ -13,11 +13,14 @@ MONTHLY_TOPUP    = 10_000
 PREMIUM_K        = 0.004
 MAX_LOTS         = 20
 
-# Phase 1: before Sep 2024       → weekly, every Wednesday
-# Phase 2: Sep 2024 – Aug 2025   → monthly, last Wednesday of month
-# Phase 3: Sep 2025 onwards      → monthly, last Tuesday of month  ← NSE revised
-MONTHLY_EXPIRY_FROM = _date(2024, 9, 11)   # BN weekly options removed; monthly starts
-TUESDAY_EXPIRY_FROM = _date(2025, 9,  1)   # NSE revised monthly expiry to last Tuesday
+# BankNifty expiry timeline (4 phases):
+# Phase 1: Sep 2021 – Feb 2024    → weekly, every Thursday
+# Phase 2: Mar 2024 – Nov 19 2024 → weekly, every Wednesday
+# Phase 3: Nov 20 2024 – Aug 2025 → monthly, last Wednesday (weekly discontinued)
+# Phase 4: Sep 2025 onwards       → monthly, last Tuesday  (NSE revised)
+WEDNESDAY_WEEKLY_START = _date(2024,  3,  1)   # weekly shifted Thu → Wed
+WEEKLY_DISCONTINUED    = _date(2024, 11, 20)   # SEBI: weekly BN options removed
+TUESDAY_EXPIRY_FROM    = _date(2025,  9,  1)   # NSE: monthly shifted Wed → Tue
 
 
 def last_wednesday(year, month):
@@ -40,22 +43,29 @@ def get_expiry(d):
     """
     Returns the relevant BN expiry date for a given trading date.
 
-    Phase 1 — before Sep 2024  : weekly, next Wednesday
-    Phase 2 — Sep 2024–Aug 2025: monthly, last Wednesday of month
-    Phase 3 — Sep 2025 onwards : monthly, last Tuesday of month
+    Phase 1 — before Mar 2024    : weekly Thursday (days_ahead=0 → expiry today)
+    Phase 2 — Mar–Nov 2024       : weekly Wednesday (days_ahead=0 → expiry today)
+    Phase 3 — Nov 2024–Aug 2025  : monthly, last Wednesday of month
+    Phase 4 — Sep 2025 onwards   : monthly, last Tuesday of month
+
+    NOTE: for weekly phases, days_ahead % 7 = 0 means TODAY is expiry —
+    we return today (not next week) so get_dte gives DTE≈1, not DTE≈8.
     """
     if isinstance(d, pd.Timestamp):
         d = d.date()
 
-    if d < MONTHLY_EXPIRY_FROM:
-        # Phase 1: weekly, next Wednesday
-        days_ahead = (2 - d.weekday()) % 7
-        if days_ahead == 0:
-            days_ahead = 7
+    if d < WEDNESDAY_WEEKLY_START:
+        # Phase 1: weekly Thursday (weekday 3)
+        days_ahead = (3 - d.weekday()) % 7   # 0 if today is Thursday → returns today
+        return d + timedelta(days=days_ahead)
+
+    elif d < WEEKLY_DISCONTINUED:
+        # Phase 2: weekly Wednesday (weekday 2)
+        days_ahead = (2 - d.weekday()) % 7   # 0 if today is Wednesday → returns today
         return d + timedelta(days=days_ahead)
 
     elif d < TUESDAY_EXPIRY_FROM:
-        # Phase 2: monthly, last Wednesday
+        # Phase 3: monthly, last Wednesday
         exp = last_wednesday(d.year, d.month)
         if d > exp:
             nxt = d.replace(day=1) + timedelta(days=32)
@@ -63,7 +73,7 @@ def get_expiry(d):
         return exp
 
     else:
-        # Phase 3: monthly, last Tuesday
+        # Phase 4: monthly, last Tuesday
         exp = last_tuesday(d.year, d.month)
         if d > exp:
             nxt = d.replace(day=1) + timedelta(days=32)
