@@ -592,15 +592,47 @@ def place_super_order(security_id: str, signal: str, lots: int,
         # Dhan T&C: trailingJump max = max(1, entry_price - stop_loss_price)
         "trailingJump":    min(5, max(1, round(premium * SL_PCT, 1))),
     }
+    market_closed = False
     try:
         resp   = requests.post("https://api.dhan.co/v2/super/orders",
                                headers=HEADERS, json=payload, timeout=15)
         result = resp.json()
         if resp.status_code == 200 and result.get("status") not in ("failure", "error"):
             return result
+        # DH-906 = Market is Closed → fall through to AMO path below
+        err_code = result.get("errorCode", "")
+        market_closed = (err_code == "DH-906")
         notify.log(f"Super Order failed ({resp.status_code}): {resp.text[:150]}")
     except Exception as e:
         notify.log(f"Super Order exception: {e}")
+
+    # ── AMO fallback: market is closed, place After-Market-Order ─────────────
+    # AMO uses LIMIT order at last-traded-price so it queues for next open.
+    # User can cancel from Dhan app before market opens if needed.
+    if market_closed:
+        notify.log("Market closed — retrying as AMO LIMIT order (cancel from Dhan app if needed)")
+        amo_payload = {
+            "dhanClientId":      CLIENT_ID,
+            "correlationId":     f"amo_{date.today().strftime('%Y%m%d')}",
+            "transactionType":   "BUY",
+            "exchangeSegment":   "NSE_FNO",
+            "productType":       "MARGIN",
+            "orderType":         "LIMIT",
+            "validity":          "DAY",
+            "securityId":        security_id,
+            "quantity":          qty,
+            "price":             premium,   # LTP — fair price, queues for open
+            "triggerPrice":      0,
+            "disclosedQuantity": 0,
+            "afterMarketOrder":  True,
+        }
+        try:
+            amo_resp = requests.post("https://api.dhan.co/v2/orders",
+                                     headers=HEADERS, json=amo_payload, timeout=15)
+            return {"buy_order": amo_resp.json(), "mode": "AMO",
+                    "sl": sl_price, "tp": tp_price}
+        except Exception as e:
+            notify.log(f"AMO order exception: {e}")
 
     # Fallback: market buy + SL-M sell
     # Build a clean OrderRequest payload — no super-order-specific fields
@@ -806,18 +838,31 @@ def main():
 
     corr_id = f"at_{date.today().strftime('%Y%m%d')}"
     if oid:
-        notify.send(
-            f"✅  <b>Order Placed!</b>  [{mode}]\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Order ID   <code>{oid}</code>\n"
-            f"Ref ID     <code>{corr_id}</code>\n"
-            f"Option     <code>{opt_sym}</code>\n"
-            f"Qty        {lots*LOT_SIZE}  ·  "
-            f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
-            f"Risk  ₹{risk_amt:,.0f}   Reward  ₹{target_amt:,.0f}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>NRML order — carries forward if SL/TP not hit by close.</i>"
-        )
+        if mode == "AMO":
+            notify.send(
+                f"🕐  <b>AMO Order Queued!</b>  [After-Market]\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Order ID   <code>{oid}</code>\n"
+                f"Option     <code>{opt_sym}</code>\n"
+                f"Qty        {lots*LOT_SIZE}  ·  Limit ₹{premium:.0f}\n"
+                f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>⚠️  Will execute at next market open.\n"
+                f"Cancel from Dhan app if you don't want this to fill.</i>"
+            )
+        else:
+            notify.send(
+                f"✅  <b>Order Placed!</b>  [{mode}]\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Order ID   <code>{oid}</code>\n"
+                f"Ref ID     <code>{corr_id}</code>\n"
+                f"Option     <code>{opt_sym}</code>\n"
+                f"Qty        {lots*LOT_SIZE}  ·  "
+                f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
+                f"Risk  ₹{risk_amt:,.0f}   Reward  ₹{target_amt:,.0f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>NRML order — carries forward if SL/TP not hit by close.</i>"
+            )
     else:
         notify.send(
             f"⚠️  <b>Order response — no order ID found</b>\n\n"
