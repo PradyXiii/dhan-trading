@@ -48,12 +48,12 @@ HEADERS = {
 
 DATA_DIR  = "data"
 LOT_SIZE  = 30
-SL_PCT    = 0.10
+SL_PCT    = 0.15   # 15% stop-loss on premium
 RISK_PCT  = 0.05
 MAX_LOTS  = 20
 PREMIUM_K = 0.004
 
-RR = 3.0   # reward:risk ratio — SL=10%, TP=+30% of premium (RR=3.0x)
+RR = 2.0   # reward:risk ratio — SL=15%, TP=+30% of premium (RR=2.0x)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -180,11 +180,22 @@ def get_expiry() -> date:
     except Exception as e:
         notify.log(f"Expiry list API failed ({e}) — falling back to Wednesday calc")
 
-    # Fallback: calculate nearest Wednesday
-    days_ahead = (2 - today.weekday()) % 7 or 7
-    base_wed   = today + timedelta(days=days_ahead)
-    notify.log(f"Using calculated Wednesday expiry: {base_wed}")
-    return base_wed
+    # Fallback: last Wednesday of current month (BN is now monthly expiry).
+    # If that date is in the past, use next month's last Wednesday.
+    import calendar as _cal
+    def _last_wed(year, month):
+        last_day = _cal.monthrange(year, month)[1]
+        d = date(year, month, last_day)
+        while d.weekday() != 2:   # 2 = Wednesday
+            d -= timedelta(days=1)
+        return d
+
+    lw = _last_wed(today.year, today.month)
+    if lw < today:
+        nxt = (today.replace(day=1) + timedelta(days=32))
+        lw  = _last_wed(nxt.year, nxt.month)
+    notify.log(f"Using last-Wednesday-of-month expiry (fallback): {lw}")
+    return lw
 
 
 # ── Step 4: ATM option security_id ───────────────────────────────────────────
