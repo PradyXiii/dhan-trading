@@ -80,7 +80,8 @@ MAX_LOTS      = 20
 PREMIUM_K     = 0.004
 ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
 
-RR = 2.0   # reward:risk ratio — SL=15%, TP=+30% of premium (RR=2.0x)
+RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
+           # Grid result: 2.5x beats 2.0x on all metrics (+₹24L P&L, DD -8.8% vs -12.9%)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -98,7 +99,7 @@ def _renew_token():
     Called automatically after every successful credential check at 9:15 AM.
     """
     try:
-        resp = requests.put(
+        resp = requests.get(
             "https://api.dhan.co/v2/RenewToken",
             headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
             timeout=10,

@@ -63,7 +63,7 @@ def _renew_token():
         print("  Token renewal: credentials not set — skipping")
         return
     try:
-        resp = _req.put(
+        resp = _req.get(
             "https://api.dhan.co/v2/RenewToken",
             headers={"access-token": token, "dhanClientId": client_id},
             timeout=10,

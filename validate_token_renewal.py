@@ -66,7 +66,7 @@ else:
 
 # ── Step 2: call RenewToken ───────────────────────────────────
 print("\n[2/3] Calling PUT /v2/RenewToken...")
-r2 = requests.put(
+r2 = requests.get(
     "https://api.dhan.co/v2/RenewToken",
     headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
     timeout=10,

@@ -39,7 +39,7 @@ RISK_PCT     = 0.05      # 5% of capital at risk per trade
 MAX_LOTS     = 20        # hard cap on position size
 PREMIUM_K    = 0.004     # approx premium factor: BN_open × PREMIUM_K × sqrt(DTE)
 ITM_WALK_MAX = 2         # max 200pt ITM probe when capital is flush
-RR           = 2.0       # reward:risk (SL=15% → TP=30%)
+RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 ```
 
 ---

@@ -1382,10 +1382,10 @@ def main():
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--real-premium":
         # ── Real-premium backtest (rule-based signals + Dhan option prices) ──
-        print("Running backtest with REAL option premiums [SL=15%, TP=30%, trail=₹5]")
+        print("Running backtest with REAL option premiums [SL=15%, TP=37.5% (RR=2.5x), trail=₹5]")
         print("Premium source: Dhan /charts/rollingoption  (falls back to formula if missing)")
         trade_df, monthly = run_backtest(
-            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0,
+            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.5,
             use_actual_dte=True, ml=False, use_real_premiums=True,
         )
         trade_df.to_csv(f"{DATA_DIR}/trade_log_real.csv",    index=False)
@@ -1406,9 +1406,9 @@ def main():
         if not os.path.exists(sig_file):
             print("signals_ml.csv not found. Run: python3 ml_engine.py first.")
             return
-        print("Running ML backtest with REAL option premiums [SL=15%, TP=30%, trail=₹5]")
+        print("Running ML backtest with REAL option premiums [SL=15%, TP=37.5% (RR=2.5x), trail=₹5]")
         trade_df, monthly = run_backtest(
-            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0,
+            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.5,
             use_actual_dte=True, ml=True, use_real_premiums=True,
         )
         trade_df.to_csv(f"{DATA_DIR}/trade_log_ml_real.csv",    index=False)
