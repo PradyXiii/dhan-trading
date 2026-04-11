@@ -58,8 +58,6 @@ dhan-trading/
 ├── signal_engine.py         Computes indicators, generates CALL/PUT/NONE signals
 ├── backtest_engine.py       Simulates trades on historical data with full cost model
 ├── data_fetcher.py          Fetches all market data → data/
-├── fetch_intraday.py        Fetches 5-min BankNifty candles from Dhan API
-├── timing_backtest.py       Entry timing analysis (9:15–9:30) + slippage sensitivity
 ├── notify.py                Telegram notification helper
 ├── dhan_mcp.py              MCP server: query live positions/P&L from Claude Code
 ├── setup_automation.sh      One-shot VM setup: deps, cron, dry-run
