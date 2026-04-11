@@ -95,10 +95,11 @@ RR           = 2.0       # reward:risk (SL=15% → TP=30%)
 
 ```python
 chain = POST /v2/optionchain {UnderlyingScrip: 25, UnderlyingSeg: "IDX_I", Expiry: "YYYY-MM-DD"}
-inner = chain["data"]["811"]          # "811" = BankNifty index security ID
-spot  = inner["last_price"]
+inner = chain["data"]                 # dict with last_price + oc (no intermediate key)
+spot  = inner["last_price"]           # spot index price
 oc    = inner["oc"]                   # strike → {ce: {...}, pe: {...}}
-sid   = oc["55900.000000"]["ce"]["security_id"]  # float-string keys
+sid   = oc["55900.000000"]["ce"]["security_id"]   # float-string keys
+iv    = oc["55900.000000"]["ce"]["implied_volatility"]  # ATM IV (%)
 
 # Always fetch expirylist first:
 expiries = POST /v2/optionchain/expirylist {UnderlyingScrip: 25, UnderlyingSeg: "IDX_I"}

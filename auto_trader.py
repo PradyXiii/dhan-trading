@@ -354,16 +354,16 @@ def _get_bn_ltp() -> float:
         resp = requests.post(
             "https://api.dhan.co/v2/marketfeed/ltp",
             headers=HEADERS,
-            json={"IDX_I": ["25"]},   # 25 = BankNifty
+            json={"IDX_I": [25]},   # 25 = BankNifty (integer per Dhan v2 docs)
             timeout=10,
         )
         if resp.status_code == 200:
             d = resp.json()
-            # Handle both known Dhan response shapes
+            # Response key may be integer 25 or string "25" — handle both
+            idx_data = (d.get("data") or {}).get("IDX_I") or d.get("IDX_I") or {}
             ltp = (
-                (d.get("data") or {}).get("IDX_I", {}).get("25", {}).get("last_price") or
-                (d.get("data") or {}).get("IDX_I", {}).get("25", {}).get("lastTradedPrice") or
-                d.get("IDX_I", {}).get("25", {}).get("last_price") or
+                (idx_data.get(25) or idx_data.get("25") or {}).get("last_price") or
+                (idx_data.get(25) or idx_data.get("25") or {}).get("lastTradedPrice") or
                 d.get("last_price") or 0
             )
             if ltp and float(ltp) > 10000:   # sanity: BN is always > 10k
@@ -659,6 +659,8 @@ def place_super_order(security_id: str, signal: str, lots: int,
             return result
         # DH-906 = Market is Closed → fall through to AMO path below
         err_code = result.get("errorCode", "")
+        # DH-906 = "Incorrect order request" — covers market-closed scenarios
+        # (exchange rejects orders before open; empirically confirmed via live logs)
         market_closed = (err_code == "DH-906")
         notify.log(f"Super Order failed ({resp.status_code}): {resp.text[:150]}")
     except Exception as e:

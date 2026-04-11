@@ -139,7 +139,7 @@ def get_daily_pnl() -> str:
     Get today's total realized P&L from the trade book.
     Shows per-trade breakdown and total net P&L for the day.
     """
-    data = _get("tradeBook")
+    data = _get("trades")
     if "error" in data:
         return data["error"]
 
