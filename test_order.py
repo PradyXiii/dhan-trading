@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
-test_order.py — Diagnostic + AMO order test
-============================================
-Step 2a: sends a MARKET order (no AMO flag) → should get:
-  DH-906  if the security ID / price / params are all valid (market just closed)
-  DH-905  if the security ID or another param is wrong
+test_order.py — Multi-strategy AMO test
+========================================
+Tries three routes in order until one succeeds:
+  A) NSE_EQ CNC LIMIT AMO (equity, with amoTime)
+  B) NSE_EQ CNC LIMIT AMO (equity, without amoTime)
+  C) NSE_FNO MARGIN LIMIT AMO (BankNifty CE, fetches live option chain)
 
-Step 2b: if 2a confirms params are valid, sends LIMIT AMO → should appear in
-  Dhan app → Orders as PENDING AMO for Monday open.
+Strategy C is the real production path used by auto_trader.py.
 
 Run on GCP VM:
   cd ~/dhan-trading && python3 test_order.py
 
-Cancel from Dhan app → Orders once confirmed.
+Cancel from Dhan app → Orders → Cancel once confirmed.
 """
 
-import os
-import sys
-import json
-import requests
+import os, sys, json, requests
 from datetime import date
 from dotenv import load_dotenv
 from pathlib import Path
@@ -41,21 +38,18 @@ HEADERS = {
 print(f"Client ID : {CLIENT_ID}")
 print(f"Token tail: ...{TOKEN[-12:]}")
 
-
 # ── Step 1: Token check ───────────────────────────────────────────────────────
-print("\n[1] Checking token via /v2/fundlimit ...")
+print("\n[1] Token check via /v2/fundlimit ...")
 r = requests.get("https://api.dhan.co/v2/fundlimit", headers=HEADERS, timeout=10)
-print(f"    Status: {r.status_code}")
 if r.status_code != 200:
-    print(f"    Response: {r.text[:200]}")
+    print(f"    FAIL {r.status_code}: {r.text[:200]}")
     sys.exit(1)
 bal = (r.json().get("availabelBalance") or r.json().get("availableBalance")
        or r.json().get("net") or "?")
-print(f"    Balance: ₹{bal}")
+print(f"    OK — Balance: ₹{bal}")
 
 
-def place(label, payload):
-    """POST /v2/orders and print result. Returns parsed JSON."""
+def post_order(label, payload):
     print(f"\n{label}")
     print(f"  Payload: {json.dumps(payload)}")
     resp = requests.post("https://api.dhan.co/v2/orders",
@@ -66,15 +60,24 @@ def place(label, payload):
         print(f"  Response: {json.dumps(result, indent=4)}")
         return result
     except Exception as e:
-        print(f"  Could not parse JSON: {e}  raw={resp.text[:300]}")
+        print(f"  JSON parse error: {e}  raw={resp.text[:200]}")
         return {}
 
 
-# ── Step 2a: Diagnostic — plain MARKET order, no AMO flag ────────────────────
-# If security ID + params are valid → expect DH-906 (market closed)
-# If DH-905 → something in base params is wrong (security ID / price / field)
-diag = place(
-    "[2a] DIAGNOSTIC — MARKET order, no AMO (expect DH-906 if params are OK)",
+def success(result, label):
+    oid = result.get("orderId") or result.get("order_id")
+    if oid:
+        print(f"\n✅  ORDER PLACED via {label}! orderId={oid}")
+        print("   → Dhan app → Orders → should show PENDING AMO")
+        print("   → Cancel before next market open (Mon 9:15 AM) if you don't want it filled")
+        return True
+    return False
+
+
+# ── Step 2a: Confirm base equity params are OK (MARKET, no AMO) ──────────────
+print("\n[2a] Diagnostic — NSE_EQ MARKET, no AMO (expect DH-906) ...")
+diag = post_order(
+    "[2a] NSE_EQ CNC MARKET (diagnostic)",
     {
         "dhanClientId":    CLIENT_ID,
         "transactionType": "BUY",
@@ -82,7 +85,7 @@ diag = place(
         "productType":     "CNC",
         "orderType":       "MARKET",
         "validity":        "DAY",
-        "securityId":      "3045",   # SBIN NSE
+        "securityId":      "3045",
         "quantity":        1,
         "price":           0,
         "disclosedQuantity": 0,
@@ -90,85 +93,129 @@ diag = place(
         "afterMarketOrder": False,
     },
 )
+if diag.get("errorCode") != "DH-906":
+    print(f"\n⛔  Unexpected error in base params: {diag}")
+    sys.exit(1)
+print("  → DH-906 confirmed — base params valid.\n")
 
-diag_code = diag.get("errorCode", "")
-order_id  = diag.get("orderId") or diag.get("order_id")
 
-if order_id:
-    print(f"\n✅  Market order accepted! orderId={order_id}")
-    print("   (Unexpected — market was open? Cancel from Dhan app immediately.)")
-    sys.exit(0)
-
-if diag_code == "DH-906":
-    print("\n  → DH-906 confirmed: params are valid, market just closed.")
-    print("    Proceeding to AMO LIMIT order ...\n")
-elif diag_code == "DH-905":
-    print("\n  → DH-905 on MARKET order: base params are bad (security ID or field name).")
-    print("    Trying BSE_EQ with SBIN security ID 3045 as secondary check ...\n")
-
-    # Try BSE_EQ variant — BSE SBIN security ID
-    diag2 = place(
-        "[2a-bse] DIAGNOSTIC — MARKET order on BSE_EQ",
-        {
-            "dhanClientId":    CLIENT_ID,
-            "transactionType": "BUY",
-            "exchangeSegment": "BSE_EQ",
-            "productType":     "CNC",
-            "orderType":       "MARKET",
-            "validity":        "DAY",
-            "securityId":      "3045",
-            "quantity":        1,
-            "price":           0,
-            "disclosedQuantity": 0,
-            "triggerPrice":    0,
-            "afterMarketOrder": False,
-        },
-    )
-    diag2_code = diag2.get("errorCode", "")
-    if diag2_code == "DH-906":
-        print("  → BSE DH-906: SBIN on BSE works. Proceeding with BSE_EQ AMO ...")
-        use_segment = "BSE_EQ"
-    else:
-        print(f"\n⛔  Both NSE and BSE returned DH-905. Security ID 3045 may be wrong.")
-        print("   Check Dhan scrip master for correct SBIN security ID:")
-        print("   https://images.dhan.co/api-data/api-scrip-master.csv")
-        sys.exit(1)
-else:
-    # Some other error code
-    print(f"\n⚠️  Unexpected error code: {diag_code!r}. Full response above.")
-    use_segment = "NSE_EQ"
-
-use_segment = "NSE_EQ"  # use whichever passed
-
-# ── Step 2b: AMO LIMIT order ──────────────────────────────────────────────────
-# LIMIT at ₹700 — well below SBIN market (~₹800), won't execute.
-# Shows in Dhan app → Orders as PENDING AMO until Monday open.
-result = place(
-    f"[2b] AMO LIMIT order — SBIN {use_segment} qty=1 price=₹1000",
+# ── Step 2b: Equity CNC AMO with amoTime ──────────────────────────────────────
+r_a = post_order(
+    "[2b] NSE_EQ CNC LIMIT AMO — price ₹1000, amoTime=OPEN",
     {
         "dhanClientId":    CLIENT_ID,
-        "correlationId":   f"testamo{date.today().strftime('%Y%m%d')}",
+        "correlationId":   f"tamo{date.today().strftime('%Y%m%d')}a",
         "transactionType": "BUY",
-        "exchangeSegment": use_segment,
+        "exchangeSegment": "NSE_EQ",
         "productType":     "CNC",
         "orderType":       "LIMIT",
         "validity":        "DAY",
         "securityId":      "3045",
         "quantity":        1,
-        "price":           1000.00,      # ₹1000 — within circuit (960–1173), ~10% below market
+        "price":           1000.00,
         "disclosedQuantity": 0,
         "triggerPrice":    0,
         "afterMarketOrder": True,
-        "amoTime":         "OPEN",       # equity CNC AMO may require this alongside afterMarketOrder
+        "amoTime":         "OPEN",
     },
 )
+if success(r_a, "NSE_EQ CNC AMO (with amoTime)"):
+    sys.exit(0)
 
-oid = result.get("orderId") or result.get("order_id")
-if oid:
-    print(f"\n✅  AMO order placed! orderId={oid}")
-    print("   → Check Dhan app → Orders → PENDING AMO")
-    print("   → Cancel before Monday 9:15 AM if you don't want it to execute")
-else:
-    code = result.get("errorCode", "")
-    msg  = result.get("errorMessage", "")
-    print(f"\n⚠️  AMO failed. code={code!r}  msg={msg!r}")
+
+# ── Step 2c: Equity CNC AMO without amoTime ───────────────────────────────────
+r_b = post_order(
+    "[2c] NSE_EQ CNC LIMIT AMO — price ₹1000, no amoTime",
+    {
+        "dhanClientId":    CLIENT_ID,
+        "correlationId":   f"tamo{date.today().strftime('%Y%m%d')}b",
+        "transactionType": "BUY",
+        "exchangeSegment": "NSE_EQ",
+        "productType":     "CNC",
+        "orderType":       "LIMIT",
+        "validity":        "DAY",
+        "securityId":      "3045",
+        "quantity":        1,
+        "price":           1000.00,
+        "disclosedQuantity": 0,
+        "triggerPrice":    0,
+        "afterMarketOrder": True,
+    },
+)
+if success(r_b, "NSE_EQ CNC AMO (without amoTime)"):
+    sys.exit(0)
+
+
+# ── Step 2d: F&O — fetch live BankNifty option chain, place real NSE_FNO AMO ─
+# This is the ACTUAL production path auto_trader.py uses.
+print("\n[2d] Fetching BankNifty option chain for real NSE_FNO CE security_id ...")
+try:
+    chain_resp = requests.post(
+        "https://api.dhan.co/v2/optionchain",
+        headers=HEADERS,
+        json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": ""},
+        timeout=15,
+    )
+    chain = chain_resp.json()
+    print(f"  Option chain HTTP {chain_resp.status_code}")
+
+    # Parse: chain['data']['811']['oc'] = {strike: {ce: {...}, pe: {...}}}
+    inner = (chain.get("data") or {}).get("811") or {}
+    oc    = inner.get("oc") or {}
+    spot  = float(inner.get("last_price") or inner.get("lastPrice") or 0)
+    print(f"  BankNifty spot: ₹{spot}")
+    print(f"  Strikes in chain: {len(oc)}")
+
+    # Find an ATM or near-ATM CE with a valid price
+    sid, ce_strike, ce_price = None, None, None
+    for key in sorted(oc.keys()):
+        strike = float(key)
+        if spot and abs(strike - spot) > 2000:
+            continue                          # skip deeply OTM
+        sub = oc[key].get("ce") or oc[key].get("CE") or {}
+        price = float(sub.get("last_price") or sub.get("ltp") or
+                      sub.get("lastPrice")  or sub.get("close_price") or
+                      sub.get("closePrice") or 0)
+        raw_sid = sub.get("security_id") or sub.get("securityId")
+        if raw_sid and price > 0:
+            sid       = str(raw_sid)
+            ce_strike = strike
+            ce_price  = price
+            break
+
+    if not sid:
+        print("  Could not find any CE with a valid security_id + price. Skip 2d.")
+    else:
+        # Place AMO at 40% of close_price — below market, above likely circuit floor
+        amo_price = round(max(1.0, ce_price * 0.40), 1)
+        lot_size  = 30    # current BankNifty lot size
+        r_c = post_order(
+            f"[2d] NSE_FNO MARGIN LIMIT AMO — BN CE {ce_strike:.0f} "
+            f"qty={lot_size} price=₹{amo_price} (40% of close ₹{ce_price})",
+            {
+                "dhanClientId":    CLIENT_ID,
+                "correlationId":   f"tamo{date.today().strftime('%Y%m%d')}c",
+                "transactionType": "BUY",
+                "exchangeSegment": "NSE_FNO",
+                "productType":     "MARGIN",
+                "orderType":       "LIMIT",
+                "validity":        "DAY",
+                "securityId":      sid,
+                "quantity":        lot_size,
+                "price":           amo_price,
+                "disclosedQuantity": 0,
+                "triggerPrice":    0,
+                "afterMarketOrder": True,
+            },
+        )
+        if success(r_c, f"NSE_FNO MARGIN AMO (BN CE {ce_strike:.0f})"):
+            sys.exit(0)
+
+except Exception as e:
+    print(f"  Option chain fetch error: {e}")
+
+
+print("\n⛔  All AMO attempts failed.")
+print("   Equity CNC AMO may not be available on weekends via Dhan v2 API.")
+print("   Run this script on a WEEKDAY EVENING (Mon-Fri after 3:30 PM IST)")
+print("   and the NSE_EQ AMO should work within the 3:45 PM–8:59 AM window.")
