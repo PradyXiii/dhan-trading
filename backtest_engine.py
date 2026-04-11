@@ -156,9 +156,10 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         return int(favorable_bn_move / trail_jump_bn) if trail_jump_bn > 0 else 0
 
     def trail_exit_pnl(favorable_bn_move, n_steps):
-        """P&L when trailing SL fires. Returns (gross_pnl, label)."""
+        """P&L when trailing SL fires. Returns (gross_pnl, label).
+        No breakeven cap — trail SL can exit profitably when price moves far enough.
+        """
         opt_exit = premium * (1 - sl) + n_steps * trail_jump_opt
-        opt_exit = min(opt_exit, premium)           # cap at breakeven
         gross    = (opt_exit - premium) * lots * LOT_SIZE
         label    = "TRAIL_SL" if opt_exit > premium * (1 - sl) else "LOSS"
         return gross, label
@@ -169,7 +170,8 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         tp_level = bn_open + tp_pts
         fav      = max(0.0, bn_high - bn_open)
         steps    = trail_steps(fav)
-        sl_level = min(orig_sl + steps * trail_jump_bn, bn_open) if trail_jump_bn > 0 else orig_sl
+        # Trail SL ratchets up in BN pts — no cap at bn_open (trail can go profitable)
+        sl_level = (orig_sl + steps * trail_jump_bn) if trail_jump_bn > 0 else orig_sl
 
         sl_hit = bn_low  <= sl_level
         tp_hit = bn_high >= tp_level
@@ -195,7 +197,8 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         tp_level = bn_open - tp_pts
         fav      = max(0.0, bn_open - bn_low)
         steps    = trail_steps(fav)
-        sl_level = max(orig_sl - steps * trail_jump_bn, bn_open) if trail_jump_bn > 0 else orig_sl
+        # Trail SL ratchets down in BN pts — no floor at bn_open (trail can go profitable)
+        sl_level = (orig_sl - steps * trail_jump_bn) if trail_jump_bn > 0 else orig_sl
 
         sl_hit = bn_high >= sl_level
         tp_hit = bn_low  <= tp_level
