@@ -315,6 +315,149 @@ def _get_bn_ltp() -> float:
     return None
 
 
+def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
+                                     max_otm_strikes=10):
+    """
+    Walk ATM → OTM in 100pt increments. Return the first strike whose REAL
+    market premium fits the user's capital under both the 5% risk rule and
+    the 85% margin cap.
+
+    Returns (security_id, strike, ltp, lots, distance_in_strikes) or None.
+      distance_in_strikes: 0 = ATM, 1 = 100pt OTM, 2 = 200pt OTM, ...
+    """
+    opt_type_lc = "ce" if signal == "CALL" else "pe"
+    opt_type_uc = opt_type_lc.upper()
+    step = 100 if signal == "CALL" else -100   # OTM direction
+
+    oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+    if not oc or not atm_strike:
+        return None
+
+    for dist in range(0, max_otm_strikes + 1):
+        strike = atm_strike + (dist * step)
+
+        # Dhan uses multiple key formats: "55900.000000", "55900", "55900.0"
+        key = None
+        for k_try in [f"{float(strike):.6f}",
+                      str(int(strike)),
+                      f"{float(strike):.1f}"]:
+            if k_try in oc:
+                key = k_try
+                break
+        if key is None:
+            continue
+
+        sub = oc[key].get(opt_type_lc) or oc[key].get(opt_type_uc) or {}
+        sid = sub.get("security_id") or sub.get("securityId")
+        ltp = float(sub.get("last_price") or sub.get("ltp") or
+                    sub.get("lastPrice") or 0)
+
+        if not sid or ltp <= 0:
+            continue
+
+        loss_per_lot   = LOT_SIZE * ltp * SL_PCT
+        margin_per_lot = LOT_SIZE * ltp
+        if loss_per_lot <= 0 or margin_per_lot <= 0:
+            continue
+
+        lots_by_risk   = floor(capital * RISK_PCT / loss_per_lot)
+        lots_by_margin = floor(capital * 0.85    / margin_per_lot)
+        lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+
+        if lots >= 1:
+            return (str(sid), float(strike), ltp, int(lots), dist)
+
+    return None
+
+
+def get_affordable_option(signal: str, expiry: date, capital: float):
+    """
+    Find the closest-to-ATM option strike that fits within the user's capital.
+
+    Walks from ATM outward (up to 1000 points OTM) and returns the FIRST strike
+    whose real live premium allows at least 1 lot under the 5% risk rule and
+    85% margin cap. Closest-to-ATM wins so delta stays as high as possible.
+
+    Returns (security_id, strike, premium, lots, spot, otm_distance)
+      otm_distance: 0 = ATM, 1 = 100pt OTM, 2 = 200pt OTM, ...
+      Returns (None, None, None, 0, spot, -1) if option chain unavailable.
+      Returns (None, None, None, 0, spot, -2) if even deepest OTM exceeds budget.
+    """
+    opt_type = "CE" if signal == "CALL" else "PE"
+
+    expiry_candidates = [expiry, expiry + timedelta(days=7)]
+    last_spot = None
+
+    for exp in expiry_candidates:
+        for attempt in range(3):
+            try:
+                data, atm_strike, spot, inner = _fetch_option_chain(exp)
+
+                if data is None:
+                    if attempt < 2:
+                        notify.log(f"Retry {attempt+1}/3 for expiry {exp} in 3s...")
+                        time.sleep(3)
+                    continue
+
+                last_spot = spot
+
+                # Walk ATM → OTM in the live option chain
+                affordable = _find_affordable_strike_in_chain(
+                    inner, atm_strike, signal, capital, max_otm_strikes=10
+                )
+
+                if affordable:
+                    sid, strike, ltp, lots, dist = affordable
+                    if exp != expiry:
+                        notify.log(f"Using fallback expiry {exp} (primary {expiry} failed)")
+                    if dist == 0:
+                        notify.log(f"ATM {opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s)")
+                    else:
+                        notify.log(f"ATM too expensive — selected {dist*100}pt OTM "
+                                   f"{opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s)")
+                    return sid, strike, ltp, lots, spot, dist
+
+                # Option chain OK but no strike within OTM window fits capital
+                notify.log(f"No affordable strike within 1000pt OTM for {exp}")
+                return None, None, None, 0, spot, -2
+
+            except Exception as e:
+                notify.log(f"Option chain exception (expiry {exp}, attempt {attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(3)
+
+        notify.log(f"All 3 attempts failed for expiry {exp} — trying next expiry")
+
+    # ── Option chain entirely unavailable ────────────────────────────────────
+    # For DRY RUN: degrade to approximated ATM so user can still see what a
+    # live day would look like. For LIVE: refuse to trade blind.
+    spot = last_spot or _get_bn_ltp()
+    if not spot:
+        try:
+            bn_df = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+            spot = float(bn_df.iloc[-1]["close"])
+            notify.log(f"Using stale CSV spot ₹{spot:,.0f}")
+        except Exception:
+            return None, None, None, 0, None, -1
+
+    if DRY_RUN:
+        dte = max(0.25, (expiry - date.today()).days + 1)
+        approx_premium = spot * PREMIUM_K * sqrt(dte)
+        atm_strike = round(spot / 100) * 100
+
+        loss_per_lot   = LOT_SIZE * approx_premium * SL_PCT
+        margin_per_lot = LOT_SIZE * approx_premium
+        lots_by_risk   = floor(capital * RISK_PCT / loss_per_lot) if loss_per_lot > 0 else 0
+        lots_by_margin = floor(capital * 0.85    / margin_per_lot) if margin_per_lot > 0 else 0
+        lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+
+        notify.log(f"DRY_RUN fallback: ATM {atm_strike} {opt_type} ≈ ₹{approx_premium:.0f} "
+                   f"→ {lots} lots (approx)")
+        return ("DRY_RUN_FALLBACK", float(atm_strike), approx_premium, lots, spot, 0)
+
+    return None, None, None, 0, spot, -1
+
+
 def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
     """
     Returns (security_id, atm_strike, spot).
@@ -508,66 +651,56 @@ def main():
         notify.log("DRY RUN: capital ₹0 → using ₹1,00,000 for simulation")
         capital = 100_000.0
 
-    # 4. Expiry + ATM option
+    score_max = 4  # active indicators (used in skip-trade messages too)
+
+    # 4. Expiry + find affordable strike (walks ATM → OTM if needed)
     expiry = get_expiry()
-    security_id, atm_strike, spot = get_atm_security_id(signal, expiry)
+    security_id, atm_strike, premium, lots, spot, otm_distance = \
+        get_affordable_option(signal, expiry, capital)
 
-    if not security_id:
-        die(
-            f"Could not find ATM option for BANKNIFTY {expiry} "
-            f"{'CE' if signal == 'CALL' else 'PE'}.\n"
-            f"Option chain API may be down. Check Dhan app."
-        )
-
-    # 5. Sizing — calculate actual DTE from today to expiry (monthly expiry now)
-    # Phase 4 (Sep 2025+): monthly expiry, last Tuesday of month. DTE varies 1–28.
-    # MIN 0.25 so expiry-day premium is nonzero; +1 because options trade on expiry morning.
-    dte     = max(0.25, (expiry - date.today()).days + 1)
-    rr      = RR
-    premium = spot * PREMIUM_K * sqrt(dte)
-
-    # ── Capital safety checks ────────────────────────────────────────────────
-    # Max loss if SL is hit on 1 lot
-    max_loss_1lot = LOT_SIZE * premium * SL_PCT
-    # Margin blocked when buying 1 lot of options (full premium paid upfront)
-    margin_1lot   = LOT_SIZE * premium
-
-    # Lots by 5% risk rule
-    lots_by_risk   = floor(capital * RISK_PCT / max_loss_1lot)
-    # Lots by margin cap (never block more than 85% of capital)
-    lots_by_margin = floor(capital * 0.85 / margin_1lot)
-
-    # Take the stricter limit — no minimum-1-lot override
-    lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
-
-    if lots < 1:
-        min_capital_risk   = max_loss_1lot / RISK_PCT          # for 5% rule
-        min_capital_margin = margin_1lot / 0.85                # for margin rule
-        min_capital_needed = max(min_capital_risk, min_capital_margin)
+    if security_id is None and otm_distance == -2:
+        # Option chain was available but even deepest OTM doesn't fit capital
         notify.send(
-            f"⏸  <b>No Trade — Insufficient Capital</b>\n"
+            f"⏸  <b>No Trade — Even Deep OTM Too Expensive</b>\n"
             f"─────────────────────\n"
             f"{today_wd}  ·  {today_label}\n\n"
             f"Signal:  <b>{signal}</b>  (score {score:+d}/{score_max})\n"
-            f"Premium: ₹{premium:.0f}/lot  →  margin ₹{margin_1lot:,.0f}/lot\n"
-            f"5% risk allows: ₹{capital*RISK_PCT:,.0f}  "
-            f"but 1 lot risks ₹{max_loss_1lot:,.0f}\n\n"
-            f"Minimum capital needed: ₹{min_capital_needed:,.0f}\n"
-            f"Current balance: ₹{capital:,.0f}\n\n"
-            f"<i>Skipping today. Top-up or wait for lower-premium setup.</i>"
+            f"Walked ATM → 1000pt OTM in the live option chain.\n"
+            f"No strike within that window fits your ₹{capital:,.0f} budget\n"
+            f"under the 5% risk rule + 85% margin cap.\n\n"
+            f"<i>This is extreme — premium must be very high today.\n"
+            f"Skipping to preserve capital.</i>"
         )
         return
 
-    risk_amt      = lots * max_loss_1lot
-    target_amt    = lots * LOT_SIZE * premium * SL_PCT * rr - 40  # rough charge estimate
-    sl_price      = premium * (1 - SL_PCT)
-    tp_price      = premium * (1 + SL_PCT * rr)
+    if not security_id:
+        die(
+            f"Option chain unavailable — cannot find tradable option for "
+            f"BANKNIFTY {expiry} {'CE' if signal == 'CALL' else 'PE'}.\n"
+            f"Check Dhan API status."
+        )
+
+    # 5. Sizing — DTE + risk/reward numbers come from the real premium returned above
+    dte = max(0.25, (expiry - date.today()).days + 1)
+    rr  = RR
+
+    max_loss_1lot = LOT_SIZE * premium * SL_PCT
+    margin_1lot   = LOT_SIZE * premium
+
+    risk_amt   = lots * max_loss_1lot
+    target_amt = lots * LOT_SIZE * premium * SL_PCT * rr - 40   # rough charge estimate
+    sl_price   = premium * (1 - SL_PCT)
+    tp_price   = premium * (1 + SL_PCT * rr)
 
     opt_type  = "CE" if signal == "CALL" else "PE"
     opt_emoji = "📈" if signal == "CALL" else "📉"
     opt_sym   = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(atm_strike)} {opt_type}"
+    # OTM label — otm_distance 0 = ATM, N = N*100pt OTM (ATM was too expensive)
+    if otm_distance and otm_distance >= 1:
+        otm_label = f"  ({otm_distance*100}pt OTM — ATM too pricey for budget)"
+    else:
+        otm_label = "  (ATM)"
     cap_label = f"₹{capital:,.0f}" + ("  [DRY RUN]" if DRY_RUN else "")
-    score_max = 4  # active indicators
 
     # Determine score description
     if abs(score) == score_max:
@@ -581,12 +714,12 @@ def main():
 
     sig_line = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
 
-    # Stale-data warning (DRY RUN only — API unavailable + LTP also failed)
+    # Stale-data warning (DRY RUN only — API unavailable, approximated fallback)
     stale_line = ""
-    if security_id == "DRY_RUN_STALE":
+    if security_id == "DRY_RUN_FALLBACK":
         stale_line = (
-            "\n⚠️  <i>Option chain + LTP offline — spot/strike/premium are estimates "
-            "from last CSV close. Actual Monday trade will use live prices.</i>"
+            "\n⚠️  <i>Option chain offline — spot/strike/premium are approximated. "
+            "Actual Monday trade will use live option-chain prices.</i>"
         )
 
     # 6. Send ONE trade-details message to Telegram
@@ -596,7 +729,7 @@ def main():
         f"Score      {score:+d} / {score_max}{score_desc}\n"
         f"Capital    {cap_label}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Option     <code>{opt_sym}</code>\n"
+        f"Option     <code>{opt_sym}</code>{otm_label}\n"
         f"Qty        {lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares\n"
         f"Spot       ₹{spot:,.0f}   Premium  ~₹{premium:.0f}\n"
         f"DTE        {dte:.1f} days  ·  Expiry {expiry.strftime('%d %b')}   RR  {rr}×\n"
@@ -614,10 +747,10 @@ def main():
 
     # 8. Send ONE result message
     if DRY_RUN:
-        if security_id == "DRY_RUN_STALE":
+        if security_id == "DRY_RUN_FALLBACK":
             footer = (
-                "⚠️  <i>Strike/premium estimated from stale CSV close.\n"
-                "Real Monday trade will use live ATM from option chain.</i>"
+                "⚠️  <i>Option chain offline — strike/premium approximated.\n"
+                "Real Monday trade will use live option-chain prices.</i>"
             )
         else:
             footer = "<i>Add funds to your Dhan account to go live.</i>"
