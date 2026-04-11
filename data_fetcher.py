@@ -196,16 +196,40 @@ def fetch_pcr_dhan_today():
 
     Dhan option chain endpoint: POST /v2/optionchain
     PCR = sum(PUT OI) / sum(CALL OI) across all strikes for near expiry.
+
+    Response structure: data["data"]["oc"]["55900.000000"]["pe"]["oi"]
+    Must call expirylist first — Expiry field cannot be empty.
     """
     from datetime import date as _date
 
     out_path = f"{DATA_DIR}/pcr_live.csv"
     today = _date.today()
 
+    # Step 1: get nearest expiry (cannot send empty Expiry string)
+    expiry_str = ""
+    try:
+        el_resp = requests.post(
+            "https://api.dhan.co/v2/optionchain/expirylist",
+            headers=HEADERS,
+            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+            timeout=10,
+        )
+        if el_resp.status_code == 200:
+            expiries = el_resp.json().get("data", [])
+            if expiries:
+                expiry_str = str(expiries[0])
+    except Exception as e:
+        print(f"  PCR (Dhan): expirylist error — {e}")
+
+    if not expiry_str:
+        print("  PCR (Dhan): could not get expiry date — skipping")
+        return pd.DataFrame()
+
+    # Step 2: fetch option chain with valid expiry
     payload = {
         "UnderlyingScrip": 25,
         "UnderlyingSeg":   "IDX_I",
-        "Expiry":          "",  # nearest expiry
+        "Expiry":          expiry_str,
     }
     try:
         resp = requests.post(
@@ -219,13 +243,32 @@ def fetch_pcr_dhan_today():
             return pd.DataFrame()
 
         data = resp.json()
-        chain = data.get("data", [])
-        if not chain:
-            print("  PCR (Dhan): empty option chain — skipping")
+
+        # Response: data["data"] may be {oc: {...}} directly, or {"811": {oc: {...}}}
+        inner = data.get("data") or {}
+        oc = inner.get("oc") if isinstance(inner, dict) else None
+        if not oc:
+            # Try nested key (some response shapes nest under security ID like "811")
+            for v in (inner.values() if isinstance(inner, dict) else []):
+                if isinstance(v, dict) and "oc" in v:
+                    oc = v["oc"]
+                    break
+
+        if not oc:
+            print("  PCR (Dhan): could not find oc in option chain response — skipping")
             return pd.DataFrame()
 
-        put_oi  = sum(float(s.get("putOI", 0) or 0) for s in chain)
-        call_oi = sum(float(s.get("callOI", 0) or 0) for s in chain)
+        # Sum OI across all strikes
+        put_oi  = 0.0
+        call_oi = 0.0
+        for strike_data in oc.values():
+            if not isinstance(strike_data, dict):
+                continue
+            pe = strike_data.get("pe") or strike_data.get("PE") or {}
+            ce = strike_data.get("ce") or strike_data.get("CE") or {}
+            put_oi  += float(pe.get("oi") or pe.get("openInterest") or pe.get("open_int") or 0)
+            call_oi += float(ce.get("oi") or ce.get("openInterest") or ce.get("open_int") or 0)
+
         pcr_val = round(put_oi / call_oi, 4) if call_oi > 0 else np.nan
 
         new_row = pd.DataFrame([{"date": pd.Timestamp(today), "pcr": pcr_val}])
