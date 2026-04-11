@@ -144,7 +144,7 @@ use_segment = "NSE_EQ"  # use whichever passed
 # LIMIT at ₹700 — well below SBIN market (~₹800), won't execute.
 # Shows in Dhan app → Orders as PENDING AMO until Monday open.
 result = place(
-    f"[2b] AMO LIMIT order — SBIN {use_segment} qty=1 price=₹700",
+    f"[2b] AMO LIMIT order — SBIN {use_segment} qty=1 price=₹1000",
     {
         "dhanClientId":    CLIENT_ID,
         "correlationId":   f"testamo{date.today().strftime('%Y%m%d')}",
@@ -155,7 +155,7 @@ result = place(
         "validity":        "DAY",
         "securityId":      "3045",
         "quantity":        1,
-        "price":           700.00,
+        "price":           1000.00,      # ₹1000 — within circuit (960–1173), ~10% below market
         "disclosedQuantity": 0,
         "triggerPrice":    0,
         "afterMarketOrder": True,
@@ -171,6 +171,3 @@ else:
     code = result.get("errorCode", "")
     msg  = result.get("errorMessage", "")
     print(f"\n⚠️  AMO failed. code={code!r}  msg={msg!r}")
-    if code == "DH-905":
-        print("   Possible: afterMarketOrder field not allowed on weekends / NSE_EQ.")
-        print("   Try running on a weekday evening (after 3:30 PM, before 9:00 AM next day).")
