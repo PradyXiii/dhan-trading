@@ -26,6 +26,10 @@ python3 -c "import requests"  2>/dev/null && echo "    requests      ✓" || { e
 python3 -c "import dotenv"    2>/dev/null && echo "    python-dotenv ✓" || { echo "    python-dotenv ✗  (run: pip3 install python-dotenv --break-system-packages)"; }
 python3 -c "import yfinance"  2>/dev/null && echo "    yfinance      ✓" || { echo "    yfinance      ✗  (run: pip3 install yfinance --break-system-packages)"; }
 python3 -c "import sklearn"   2>/dev/null && echo "    scikit-learn  ✓" || { echo "    scikit-learn  ✗  (run: pip3 install scikit-learn --break-system-packages)"; }
+python3 -c "import optuna"    2>/dev/null && echo "    optuna        ✓" || { echo "    optuna        ✗  (run: pip3 install optuna --break-system-packages)"; }
+python3 -c "import xgboost"   2>/dev/null && echo "    xgboost       ✓" || { echo "    xgboost       ✗  (run: pip3 install xgboost --break-system-packages)"; }
+python3 -c "import lightgbm"  2>/dev/null && echo "    lightgbm      ✓" || { echo "    lightgbm      ✗  (run: pip3 install lightgbm --break-system-packages)"; }
+python3 -c "import joblib"    2>/dev/null && echo "    joblib        ✓" || { echo "    joblib        ✗  (run: pip3 install joblib --break-system-packages)"; }
 
 # ── 3. Check .env has required keys ──────────────────────────────────────────
 echo ""
@@ -86,15 +90,21 @@ CRON_COMMENT="# BankNifty Auto Trader — runs at 9:15 AM IST"
 SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
 SCANNER_COMMENT="# BankNifty lot/expiry scanner — runs 1st of month 10 AM IST"
 
-# Remove old entries (auto_trader + scanner) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry")
+# Nightly model evolver — 11 PM IST = 17:30 UTC, Mon–Fri
+EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DIR/evolver.log 2>&1"
+EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
+
+# Remove old entries (auto_trader + scanner + evolver) if any
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
 $CRON_COMMENT
 $CRON_CMD
 $SCANNER_COMMENT
-$SCANNER_CMD"
+$SCANNER_CMD
+$EVOLVER_COMMENT
+$EVOLVER_CMD"
 
 echo "$NEW_CRON" | crontab -
 
@@ -118,7 +128,11 @@ echo ""
 echo "  The cron job will run at 9:15 AM IST every weekday."
 echo "  Logs saved to: $LOG_DIR/auto_trader.log"
 echo ""
+echo "  ML Model Evolver runs at 11 PM IST every weekday."
+echo "  Evolver log: $LOG_DIR/evolver.log"
+echo ""
 echo "  To watch the log live:  tail -f $LOG_DIR/auto_trader.log"
 echo "  To test manually now:   python3 auto_trader.py --dry-run"
 echo "  To force a live trade:  python3 auto_trader.py"
+echo "  To run evolver now:     python3 model_evolver.py --no-data"
 echo "════════════════════════════════════════════════"

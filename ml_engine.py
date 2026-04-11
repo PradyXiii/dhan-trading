@@ -52,7 +52,13 @@ from sklearn.metrics import classification_report, confusion_matrix
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import get_dte, PREMIUM_K
 
-DATA_DIR  = "data"
+DATA_DIR     = "data"
+MODELS_DIR   = "models"
+CHAMPION_PKL = f"{MODELS_DIR}/champion.pkl"
+CHAMPION_META= f"{MODELS_DIR}/champion_meta.json"
+
+# Max age of champion model before falling back to retrain (calendar days)
+CHAMPION_MAX_AGE_DAYS = 2
 
 # Strategy params — keep in sync with backtest_engine.py
 SL_PCT    = 0.15
@@ -600,19 +606,93 @@ def run_analysis():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  CHAMPION MODEL — helpers for fast morning prediction
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_champion():
+    """
+    Load saved champion model from models/champion.pkl.
+    Returns (model, meta_dict) or (None, None) if not found / too old.
+    """
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    if not (os.path.exists(CHAMPION_PKL) and os.path.exists(CHAMPION_META)):
+        return None, None
+
+    try:
+        import joblib
+        with open(CHAMPION_META) as f:
+            meta = _json.load(f)
+
+        # Check freshness
+        trained_at = _dt.fromisoformat(meta["trained_at"])
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=_tz(_td(hours=5, minutes=30)))
+        age_days = (_dt.now(trained_at.tzinfo) - trained_at).days
+        if age_days > CHAMPION_MAX_AGE_DAYS:
+            print(f"  Champion model is {age_days} days old (max {CHAMPION_MAX_AGE_DAYS}) — will retrain.")
+            return None, None
+
+        model = joblib.load(CHAMPION_PKL)
+        return model, meta
+
+    except Exception as e:
+        print(f"  Could not load champion model: {e}")
+        return None, None
+
+
+def get_today_features(feature_cols):
+    """
+    Build a single-row feature array for today using the specified feature_cols.
+    Handles both base (21) and extended feature sets from model_evolver.
+    """
+    # Load base data + compute base features
+    raw = load_all_data()
+    df  = compute_features(raw)
+
+    # Try to extend with new data sources if model was trained with them
+    extended_cols = set(feature_cols) - set(FEATURE_COLS)
+    if extended_cols:
+        try:
+            from model_evolver import load_extended_data, compute_extended_features
+            df = compute_extended_features(load_extended_data())
+        except Exception:
+            # Extended data not available — fill new cols with 0
+            for col in extended_cols:
+                if col not in df.columns:
+                    df[col] = 0.0
+
+    today_ts   = pd.Timestamp(pd.Timestamp.now().date())
+    today_rows = df[df["date"] == today_ts]
+    if today_rows.empty:
+        return None
+
+    # Fill any missing feature columns with 0
+    for col in feature_cols:
+        if col not in today_rows.columns:
+            today_rows = today_rows.copy()
+            today_rows[col] = 0.0
+
+    return today_rows[feature_cols].fillna(0).values.astype(float)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  PREDICT TODAY  (fast — single model, ~10 sec — used by auto_trader.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def predict_today():
     """
-    Train ONE model on all historical data and predict today's ML direction.
+    Predict today's ML direction.
+
+    Fast path (preferred): loads saved champion model from models/champion.pkl
+    in <5 sec — no retraining. Champion is updated nightly by model_evolver.py.
+
+    Slow fallback: trains a fresh RandomForest on all history (~30 sec) when
+    champion is missing or older than CHAMPION_MAX_AGE_DAYS.
+
     Appends/overwrites today's row in signals_ml.csv.
-
-    This is the live-trading path — fast (~10 sec) because it trains one model,
-    not the full walk-forward (127 models). Called by auto_trader.py each morning.
-
-    Requires signals_ml.csv to already exist (from a full ml_engine.py run).
-    If signals_ml.csv is missing, falls back to signals.csv rule-based signal.
+    Called by auto_trader.py each morning.
     """
     from datetime import date as _date
     import os as _os
@@ -623,55 +703,82 @@ def predict_today():
 
     print(f"ML predict-today: {today_dt} ...")
 
-    # Load and compute features
+    # ── Determine rule-based signal for today (always needed for fallback) ────
     raw     = load_all_data()
     df      = compute_features(raw)
     trading = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
 
-    # Check today is a scheduled trading day (Mon/Tue/Thu/Fri)
     today_rows = trading[trading["date"] == today_ts]
     if today_rows.empty:
         print(f"  {today_dt} is not a Mon/Tue/Thu/Fri — no ML prediction needed.")
         return
 
-    today_idx = today_rows.index[0]
-    X_all     = trading[FEATURE_COLS].values.astype(float)
+    today_idx  = today_rows.index[0]
+    rule_row   = trading.iloc[today_idx]
+    rule_sig   = rule_row.get("rule_signal", "NONE")
+    rule_score = rule_row.get("rule_score", 0)
 
-    # Labels for training (need all historical rows to compute properly)
-    labels_df = compute_labels(trading)
-    y_all     = np.array([1 if l == "CALL" else 0 for l in labels_df["label"].values])
+    ml_trained = False
 
-    # Train on everything BEFORE today
-    X_train = X_all[:today_idx]
-    y_train = y_all[:today_idx]
-    X_today = X_all[today_idx : today_idx + 1]
+    # ── Fast path: load champion model ────────────────────────────────────────
+    champion_model, champion_meta = load_champion()
 
-    rule_row  = trading.iloc[today_idx]
-    rule_sig  = rule_row.get("rule_signal", "NONE")
-    rule_score= rule_row.get("rule_score", 0)
+    if champion_model is not None:
+        feature_cols = champion_meta["feature_cols"]
+        X_today = get_today_features(feature_cols)
 
-    # Need at least MIN_TRAIN days and both classes
-    if today_idx < MIN_TRAIN or len(np.unique(y_train)) < 2:
-        print(f"  Not enough history ({today_idx} days) — using rule-based fallback.")
-        ml_signal = rule_sig if rule_sig in ("CALL", "PUT") else "CALL"
-        ml_conf   = 0.5
-        ml_trained = False
-    else:
-        model = RandomForestClassifier(
-            n_estimators=100, max_depth=6, min_samples_leaf=10,
-            max_features="sqrt", class_weight="balanced",
-            random_state=42, n_jobs=-1,
-        )
-        model.fit(X_train, y_train)
-        proba   = model.predict_proba(X_today)[0]
-        classes = list(model.classes_)
-        p_call  = proba[classes.index(1)] if 1 in classes else 0.0
-        p_put   = proba[classes.index(0)] if 0 in classes else 0.0
-        ml_signal  = "CALL" if p_call >= p_put else "PUT"
-        ml_conf    = max(p_call, p_put)
-        ml_trained = True
-        print(f"  Model trained on {today_idx} days.")
-        print(f"  P(CALL)={p_call:.3f}  P(PUT)={p_put:.3f}  → {ml_signal}  (conf {ml_conf:.1%})")
+        if X_today is not None and len(X_today) > 0:
+            proba   = champion_model.predict_proba(X_today)[0]
+            classes = list(champion_model.classes_)
+            p_call  = proba[classes.index(1)] if 1 in classes else 0.5
+            p_put   = proba[classes.index(0)] if 0 in classes else 0.5
+            ml_signal  = "CALL" if p_call >= p_put else "PUT"
+            ml_conf    = max(p_call, p_put)
+            ml_trained = True
+            mtype_name = {"rf": "RandomForest", "xgb": "XGBoost",
+                          "lgb": "LightGBM"}.get(champion_meta["model_type"], "Champion")
+            print(f"  Loaded champion: {mtype_name}  "
+                  f"(trained {champion_meta.get('trained_at','?')[:10]})")
+            print(f"  P(CALL)={p_call:.3f}  P(PUT)={p_put:.3f}  "
+                  f"→ {ml_signal}  (conf {ml_conf:.1%})")
+        else:
+            print("  Champion loaded but today's features unavailable — falling back.")
+            champion_model = None
+
+    # ── Slow fallback: retrain RF from scratch ────────────────────────────────
+    if champion_model is None:
+        print("  No champion model — retraining RandomForest from scratch...")
+        X_all     = trading[FEATURE_COLS].values.astype(float)
+        labels_df = compute_labels(trading)
+        y_all     = np.array([1 if l == "CALL" else 0 for l in labels_df["label"].values])
+
+        X_train = X_all[:today_idx]
+        y_train = y_all[:today_idx]
+        X_today_base = X_all[today_idx : today_idx + 1]
+
+        if today_idx < MIN_TRAIN or len(np.unique(y_train)) < 2:
+            print(f"  Not enough history ({today_idx} days) — using rule-based fallback.")
+            ml_signal  = rule_sig if rule_sig in ("CALL", "PUT") else "CALL"
+            ml_conf    = 0.5
+            ml_trained = False
+            p_call = p_put = 0.5
+        else:
+            model = RandomForestClassifier(
+                n_estimators=100, max_depth=6, min_samples_leaf=10,
+                max_features="sqrt", class_weight="balanced",
+                random_state=42, n_jobs=-1,
+            )
+            model.fit(X_train, y_train)
+            proba   = model.predict_proba(X_today_base)[0]
+            classes = list(model.classes_)
+            p_call  = proba[classes.index(1)] if 1 in classes else 0.0
+            p_put   = proba[classes.index(0)] if 0 in classes else 0.0
+            ml_signal  = "CALL" if p_call >= p_put else "PUT"
+            ml_conf    = max(p_call, p_put)
+            ml_trained = True
+            print(f"  Retrained RF on {today_idx} days.")
+            print(f"  P(CALL)={p_call:.3f}  P(PUT)={p_put:.3f}  "
+                  f"→ {ml_signal}  (conf {ml_conf:.1%})")
 
     # Event day override
     is_event = today_dt in EVENT_DATES

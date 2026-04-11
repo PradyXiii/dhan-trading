@@ -106,6 +106,148 @@ def fetch_yfinance(ticker, name, from_date, to_date):
     return df
 
 
+def fetch_gold(from_date, to_date):
+    """Fetch Gold Futures (GC=F) daily OHLCV from Yahoo Finance."""
+    return fetch_yfinance("GC=F", "Gold Futures", from_date, to_date)
+
+
+def fetch_crude(from_date, to_date):
+    """Fetch Crude Oil Futures (CL=F) daily OHLCV from Yahoo Finance."""
+    return fetch_yfinance("CL=F", "Crude Oil", from_date, to_date)
+
+
+def fetch_usdinr(from_date, to_date):
+    """Fetch USD/INR exchange rate from Yahoo Finance."""
+    return fetch_yfinance("USDINR=X", "USD/INR", from_date, to_date)
+
+
+def fetch_dxy(from_date, to_date):
+    """Fetch US Dollar Index (DXY) from Yahoo Finance."""
+    return fetch_yfinance("DX-Y.NYB", "DXY", from_date, to_date)
+
+
+def fetch_us10y(from_date, to_date):
+    """Fetch US 10-Year Treasury Yield (^TNX) from Yahoo Finance."""
+    return fetch_yfinance("^TNX", "US 10Y Yield", from_date, to_date)
+
+
+def fetch_fii_today():
+    """
+    Fetch today's FII/DII net flows from NSE live API and append to data/fii_dii.csv.
+
+    NSE publishes same-day FII/DII cash market and derivatives data at:
+    https://www.nseindia.com/api/fiidiiTradeReact?type=fiiDii
+
+    Columns saved: date, fii_net_cash (₹ Cr), fii_net_fut (₹ Cr), dii_net_cash (₹ Cr)
+    """
+    url = "https://www.nseindia.com/api/fiidiiTradeReact?type=fiiDii"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json",
+        "Referer": "https://www.nseindia.com/",
+    }
+    out_path = f"{DATA_DIR}/fii_dii.csv"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"  FII/DII: NSE API returned {resp.status_code} — skipping")
+            return pd.DataFrame()
+
+        data = resp.json()
+        rows = []
+        for item in (data if isinstance(data, list) else []):
+            try:
+                date = pd.to_datetime(item.get("date", ""), dayfirst=True).normalize()
+                fii_cash = float(str(item.get("fiiBuySell", 0)).replace(",", "") or 0)
+                fii_fut  = float(str(item.get("fiiFutBuySell", 0)).replace(",", "") or 0)
+                dii_cash = float(str(item.get("diiBuySell", 0)).replace(",", "") or 0)
+                rows.append({"date": date, "fii_net_cash": fii_cash,
+                             "fii_net_fut": fii_fut, "dii_net_cash": dii_cash})
+            except Exception:
+                continue
+
+        if not rows:
+            print("  FII/DII: no rows parsed from NSE response — skipping")
+            return pd.DataFrame()
+
+        new_df = pd.DataFrame(rows).dropna(subset=["date"])
+
+        if os.path.exists(out_path):
+            existing = pd.read_csv(out_path, parse_dates=["date"])
+            combined = (pd.concat([existing, new_df])
+                          .drop_duplicates("date")
+                          .sort_values("date")
+                          .reset_index(drop=True))
+        else:
+            combined = new_df.sort_values("date").reset_index(drop=True)
+
+        combined.to_csv(out_path, index=False)
+        print(f"  FII/DII: fetched {len(new_df)} rows → {out_path} ({len(combined)} total)")
+        return new_df
+
+    except Exception as e:
+        print(f"  FII/DII: error — {e}")
+        return pd.DataFrame()
+
+
+def fetch_pcr_dhan_today():
+    """
+    Fetch BankNifty option chain from Dhan API, compute PCR, append to data/pcr_live.csv.
+
+    Dhan option chain endpoint: POST /v2/optionchain
+    PCR = sum(PUT OI) / sum(CALL OI) across all strikes for near expiry.
+    """
+    from datetime import date as _date
+
+    out_path = f"{DATA_DIR}/pcr_live.csv"
+    today = _date.today()
+
+    payload = {
+        "UnderlyingScrip": 25,
+        "UnderlyingSeg":   "IDX_I",
+        "Expiry":          "",  # nearest expiry
+    }
+    try:
+        resp = requests.post(
+            "https://api.dhan.co/v2/optionchain",
+            headers=HEADERS,
+            json=payload,
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            print(f"  PCR (Dhan): API returned {resp.status_code} — skipping")
+            return pd.DataFrame()
+
+        data = resp.json()
+        chain = data.get("data", [])
+        if not chain:
+            print("  PCR (Dhan): empty option chain — skipping")
+            return pd.DataFrame()
+
+        put_oi  = sum(float(s.get("putOI", 0) or 0) for s in chain)
+        call_oi = sum(float(s.get("callOI", 0) or 0) for s in chain)
+        pcr_val = round(put_oi / call_oi, 4) if call_oi > 0 else np.nan
+
+        new_row = pd.DataFrame([{"date": pd.Timestamp(today), "pcr": pcr_val}])
+
+        if os.path.exists(out_path):
+            existing = pd.read_csv(out_path, parse_dates=["date"])
+            combined = (pd.concat([existing, new_row])
+                          .drop_duplicates("date")
+                          .sort_values("date")
+                          .reset_index(drop=True))
+        else:
+            combined = new_row
+
+        combined.to_csv(out_path, index=False)
+        print(f"  PCR (Dhan): {pcr_val:.3f}  → {out_path}")
+        return new_row
+
+    except Exception as e:
+        print(f"  PCR (Dhan): error — {e}")
+        return pd.DataFrame()
+
+
 def fetch_nse_pcr(from_date, to_date):
     """
     Fetch BankNifty Put-Call Ratio from NSE historical data.
@@ -291,12 +433,51 @@ def main():
         spf.to_csv(f"{DATA_DIR}/sp500_futures.csv", index=False)
         print(f"  → Saved sp500_futures.csv  ({len(spf)} rows total)\n")
 
-    # ── Round 1: PCR and FII/DII (inform user about manual steps) ────
-    print("=== PCR — BankNifty Put-Call Ratio ===")
+    print("=== Gold Futures (Yahoo Finance) ===")
+    gold = fetch_gold(FROM_DATE, TO_DATE)
+    if not gold.empty:
+        gold.to_csv(f"{DATA_DIR}/gold.csv", index=False)
+        print(f"  → Saved gold.csv  ({len(gold)} rows total)\n")
+
+    print("=== Crude Oil Futures (Yahoo Finance) ===")
+    crude = fetch_crude(FROM_DATE, TO_DATE)
+    if not crude.empty:
+        crude.to_csv(f"{DATA_DIR}/crude.csv", index=False)
+        print(f"  → Saved crude.csv  ({len(crude)} rows total)\n")
+
+    print("=== USD/INR (Yahoo Finance) ===")
+    usdinr = fetch_usdinr(FROM_DATE, TO_DATE)
+    if not usdinr.empty:
+        usdinr.to_csv(f"{DATA_DIR}/usdinr.csv", index=False)
+        print(f"  → Saved usdinr.csv  ({len(usdinr)} rows total)\n")
+
+    print("=== US Dollar Index DXY (Yahoo Finance) ===")
+    dxy = fetch_dxy(FROM_DATE, TO_DATE)
+    if not dxy.empty:
+        dxy.to_csv(f"{DATA_DIR}/dxy.csv", index=False)
+        print(f"  → Saved dxy.csv  ({len(dxy)} rows total)\n")
+
+    print("=== US 10Y Treasury Yield (Yahoo Finance) ===")
+    us10y = fetch_us10y(FROM_DATE, TO_DATE)
+    if not us10y.empty:
+        us10y.to_csv(f"{DATA_DIR}/us10y.csv", index=False)
+        print(f"  → Saved us10y.csv  ({len(us10y)} rows total)\n")
+
+    # ── Live snapshots (today only — append to rolling CSVs) ─────────
+    print("=== FII/DII Net Flows (NSE live) ===")
+    fetch_fii_today()
+    print()
+
+    print("=== PCR — BankNifty Put-Call Ratio (Dhan live) ===")
+    fetch_pcr_dhan_today()
+    print()
+
+    # ── Historical PCR/FII (inform user about manual steps) ──────────
+    print("=== Historical PCR (NSE bhavcopy — manual) ===")
     fetch_nse_pcr(FROM_DATE, TO_DATE)
     print()
 
-    print("=== FII/DII Net Flows ===")
+    print("=== Historical FII/DII (NSE manual) ===")
     fetch_nse_fii_dii(FROM_DATE, TO_DATE)
     print()
 
