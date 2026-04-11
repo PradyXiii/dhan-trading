@@ -40,6 +40,11 @@ CLIENT_ID = os.getenv("DHAN_CLIENT_ID",    "")
 
 DRY_RUN   = "--dry-run" in sys.argv
 
+KILL_SWITCH_ARG = None
+if "--kill-switch" in sys.argv:
+    _idx = sys.argv.index("--kill-switch")
+    KILL_SWITCH_ARG = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else None
+
 HEADERS = {
     "access-token": TOKEN,
     "client-id":    CLIENT_ID,
@@ -76,6 +81,55 @@ def check_credentials():
             notify.log(f"Dhan API check returned {resp.status_code}. Proceeding.")
     except requests.exceptions.ConnectionError:
         die("Cannot reach Dhan API. Check VM internet / DNS.")
+
+
+def check_kill_switch():
+    """
+    Abort trading if kill switch is ON.
+    You can activate it any time from the VM:
+      python3 auto_trader.py --kill-switch on
+    """
+    try:
+        resp = requests.get("https://api.dhan.co/v2/killswitch",
+                            headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            status = resp.json().get("killSwitchStatus", "")
+            notify.log(f"Kill switch status: {status}")
+            if status == "ACTIVATE":
+                die(
+                    "🔴 Kill switch is ON — no order placed today.\n\n"
+                    "To resume trading, run on GCP VM:\n"
+                    "<code>python3 auto_trader.py --kill-switch off</code>"
+                )
+    except Exception as e:
+        notify.log(f"Kill switch check failed ({e}) — proceeding anyway")
+
+
+def handle_kill_switch_arg():
+    """
+    Toggle kill switch from the command line:
+      python3 auto_trader.py --kill-switch on    # halt all API trading
+      python3 auto_trader.py --kill-switch off   # resume trading
+    """
+    if KILL_SWITCH_ARG not in ("on", "off"):
+        return
+    api_status = "ACTIVATE" if KILL_SWITCH_ARG == "on" else "DEACTIVATE"
+    label      = "ON — trading HALTED" if api_status == "ACTIVATE" else "OFF — trading RESUMED"
+    try:
+        resp = requests.post(
+            "https://api.dhan.co/v2/killswitch",
+            headers=HEADERS,
+            json={"killSwitchStatus": api_status},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            notify.send(f"🔴 <b>Kill Switch {label}</b>")
+            notify.log(f"Kill switch set: {label}")
+        else:
+            notify.log(f"Kill switch toggle failed: HTTP {resp.status_code} {resp.text[:100]}")
+    except Exception as e:
+        notify.log(f"Kill switch error: {e}")
+    sys.exit(0)
 
 
 # ── Step 1: Fetch data + generate signal ─────────────────────────────────────
@@ -386,8 +440,12 @@ def main():
     mode_label = "DRY RUN" if DRY_RUN else "LIVE"
     notify.log(f"BankNifty Auto Trader starting [{mode_label}]")
 
-    # 0. Credentials
+    # 0. Kill switch CLI (--kill-switch on/off) — exits immediately after toggling
+    handle_kill_switch_arg()
+
+    # 0. Credentials + kill switch state
     check_credentials()
+    check_kill_switch()
 
     # 1. Refresh data + signal
     refresh_data_and_signal()
@@ -512,11 +570,13 @@ def main():
     oid  = (result.get("orderId") or result.get("order_id") or
             (result.get("buy_order") or {}).get("orderId"))
 
+    corr_id = f"at_{date.today().strftime('%Y%m%d')}"
     if oid:
         notify.send(
             f"✅  <b>Order Placed!</b>  [{mode}]\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Order ID   <code>{oid}</code>\n"
+            f"Ref ID     <code>{corr_id}</code>\n"
             f"Option     <code>{opt_sym}</code>\n"
             f"Qty        {lots*LOT_SIZE}  ·  "
             f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
