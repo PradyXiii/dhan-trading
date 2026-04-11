@@ -1012,10 +1012,29 @@ def main():
                 f"Order ID   <code>{oid}</code>\n"
                 f"Option     <code>{opt_sym}</code>\n"
                 f"Qty        {lots*LOT_SIZE}  ·  Limit ₹{premium:.0f}\n"
-                f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"<i>⚠️  Will execute at next market open.\n"
-                f"Cancel from Dhan app if you don't want this to fill.</i>"
+                f"🚨 <b>NO automated SL or TP on AMO orders.</b>\n"
+                f"After fill, set manually on Dhan app:\n"
+                f"  SL ₹{sl_price:.0f}  (−{SL_PCT*100:.0f}%)\n"
+                f"  TP ₹{tp_price:.0f}  (+{SL_PCT*RR*100:.0f}%)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Will execute at next market open.\n"
+                f"Cancel from Dhan app before open if you change your mind.</i>"
+            )
+        elif mode == "FALLBACK":
+            # Manual BUY + SL-M: SL is automated, TP is NOT (no TP order placed)
+            notify.send(
+                f"✅  <b>Order Placed!</b>  [FALLBACK — BUY+SL-M]\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Order ID   <code>{oid}</code>\n"
+                f"Ref ID     <code>{corr_id}</code>\n"
+                f"Option     <code>{opt_sym}</code>\n"
+                f"Qty        {lots*LOT_SIZE}  ·  Market entry\n"
+                f"SL ₹{sl_price:.0f}  (automated SL-M order)\n"
+                f"TP ₹{tp_price:.0f}  ⚠️ manual — no TP order placed\n"
+                f"Risk  ₹{risk_amt:,.0f}   Reward  ₹{target_amt:,.0f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>Exit manually at ₹{tp_price:.0f} or let SL-M protect you.</i>"
             )
         else:
             notify.send(
