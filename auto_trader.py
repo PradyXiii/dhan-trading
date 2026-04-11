@@ -352,7 +352,7 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "trailingJump":    0,
     }
     try:
-        resp   = requests.post("https://api.dhan.co/v2/super-order",
+        resp   = requests.post("https://api.dhan.co/v2/super/orders",
                                headers=HEADERS, json=payload, timeout=15)
         result = resp.json()
         if resp.status_code == 200 and result.get("status") not in ("failure", "error"):
