@@ -46,6 +46,7 @@ warnings.filterwarnings("ignore")
 # Suppress warnings in joblib worker processes (they don't inherit filterwarnings)
 os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 
+import gc
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 
@@ -332,16 +333,17 @@ def run_walkforward(X, y_bin, dates, mode="direction", ml_threshold=0.55,
             X_tr, y_tr = X[start:i], y[start:i]
             if len(np.unique(y_tr)) == 2:
                 model = RandomForestClassifier(
-                    n_estimators=100,       # 100 trees: fast + stable for financial data
+                    n_estimators=60,        # 60 trees: sufficient accuracy, lower RAM/speed
                     max_depth=6,
                     min_samples_leaf=10,
                     max_features="sqrt",
                     class_weight="balanced",
                     random_state=42,
-                    n_jobs=-1,
+                    n_jobs=1,               # single-thread: avoids joblib forking RAM copies
                 )
                 model.fit(X_tr, y_tr)
                 n_retrains += 1
+                gc.collect()               # free old model objects between retrains
             last_retrain = i
             print(f"  {i}/{n} days  [{n_retrains} models trained]", end="\r", flush=True)
 
@@ -566,10 +568,11 @@ def run_analysis():
     print(f"{'='*60}")
     LABEL_MAP = {"CALL": 1, "PUT": 0}
     y_int = np.array([LABEL_MAP[l] for l in y_bin])
-    full_model = RandomForestClassifier(n_estimators=100, max_depth=6,
+    gc.collect()   # free walk-forward model objects before full-data fit
+    full_model = RandomForestClassifier(n_estimators=60, max_depth=6,
                                          min_samples_leaf=10, max_features="sqrt",
                                          class_weight="balanced", random_state=42,
-                                         n_jobs=-1)
+                                         n_jobs=1)
     full_model.fit(X, y_int)
     imps = pd.Series(full_model.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
 
@@ -764,9 +767,9 @@ def predict_today():
             p_call = p_put = 0.5
         else:
             model = RandomForestClassifier(
-                n_estimators=100, max_depth=6, min_samples_leaf=10,
+                n_estimators=60, max_depth=6, min_samples_leaf=10,
                 max_features="sqrt", class_weight="balanced",
-                random_state=42, n_jobs=-1,
+                random_state=42, n_jobs=1,
             )
             model.fit(X_train, y_train)
             proba   = model.predict_proba(X_today_base)[0]
