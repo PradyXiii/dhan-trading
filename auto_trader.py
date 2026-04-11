@@ -25,6 +25,8 @@ Add --dry-run flag for testing without placing real orders.
 import os
 import sys
 import time
+import fcntl
+import atexit
 import subprocess
 import requests
 import pandas as pd
@@ -35,6 +37,30 @@ from dotenv import load_dotenv
 import notify
 
 load_dotenv()
+
+# ── Cron lock — prevent double execution if previous run hasn't finished ──────
+_LOCK_FILE = "/tmp/auto_trader.lock"
+_lock_fh   = None
+
+def _acquire_lock():
+    global _lock_fh
+    _lock_fh = open(_LOCK_FILE, "w")
+    try:
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        notify.log("Another auto_trader instance is already running — exiting to avoid double trade.")
+        sys.exit(0)
+
+def _release_lock():
+    if _lock_fh:
+        try:
+            fcntl.flock(_lock_fh, fcntl.LOCK_UN)
+            _lock_fh.close()
+        except Exception:
+            pass
+
+atexit.register(_release_lock)
+_acquire_lock()
 TOKEN     = os.getenv("DHAN_ACCESS_TOKEN", "")
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID",    "")
 
@@ -82,28 +108,45 @@ def check_credentials():
 
 def refresh_data_and_signal():
     notify.log("Fetching latest market data...")
-    r1 = subprocess.run(
-        [sys.executable, "data_fetcher.py"],
-        capture_output=True, text=True, timeout=120
-    )
-    if r1.returncode != 0:
-        notify.log(f"data_fetcher.py had errors:\n{r1.stderr[-200:]}")
+    try:
+        r1 = subprocess.run(
+            [sys.executable, "data_fetcher.py"],
+            capture_output=True, text=True, timeout=120
+        )
+        if r1.returncode != 0:
+            notify.log(f"data_fetcher.py had errors:\n{r1.stderr[-200:]}")
+    except subprocess.TimeoutExpired:
+        notify.log("data_fetcher.py timed out (120s) — continuing with existing data files")
+    except FileNotFoundError:
+        notify.log("data_fetcher.py not found — continuing with existing data files")
+    except Exception as e:
+        notify.log(f"data_fetcher.py launch failed: {e} — continuing with existing data files")
 
     notify.log("Generating signal...")
-    r2 = subprocess.run(
-        [sys.executable, "signal_engine.py"],
-        capture_output=True, text=True, timeout=60
-    )
-    if r2.returncode != 0:
-        die(f"signal_engine.py failed:\n{r2.stderr[-200:]}")
+    try:
+        r2 = subprocess.run(
+            [sys.executable, "signal_engine.py"],
+            capture_output=True, text=True, timeout=60
+        )
+        if r2.returncode != 0:
+            die(f"signal_engine.py failed:\n{r2.stderr[-200:]}")
+    except subprocess.TimeoutExpired:
+        die("signal_engine.py timed out (60s). Check if banknifty.csv / nifty50.csv are valid.")
+    except FileNotFoundError:
+        die("signal_engine.py not found. Check working directory.")
 
     notify.log("Running ML direction engine...")
-    r3 = subprocess.run(
-        [sys.executable, "ml_engine.py", "--predict-today"],
-        capture_output=True, text=True, timeout=60
-    )
-    if r3.returncode != 0:
-        notify.log(f"ml_engine.py --predict-today failed (falling back to rule signal):\n{r3.stderr[-300:]}")
+    try:
+        r3 = subprocess.run(
+            [sys.executable, "ml_engine.py", "--predict-today"],
+            capture_output=True, text=True, timeout=60
+        )
+        if r3.returncode != 0:
+            notify.log(f"ml_engine.py --predict-today failed (falling back to rule signal):\n{r3.stderr[-300:]}")
+    except subprocess.TimeoutExpired:
+        notify.log("ml_engine.py timed out (60s) — falling back to rule signal")
+    except Exception as e:
+        notify.log(f"ml_engine.py failed: {e} — falling back to rule signal")
 
 
 def get_todays_signal() -> tuple:
@@ -162,9 +205,16 @@ def get_capital() -> float:
             bal = (d.get("availabelBalance") or
                    d.get("availableBalance") or
                    d.get("net") or 0)
-            return float(bal)
-    except Exception:
-        pass
+            try:
+                return float(bal)
+            except (ValueError, TypeError) as e:
+                notify.log(f"Balance field not numeric ({bal!r}): {e} — treating as ₹0")
+                return 0.0
+        notify.log(f"Fund limit API returned {resp.status_code}: {resp.text[:150]}")
+    except requests.exceptions.Timeout:
+        notify.log("Fund limit API timed out (10s)")
+    except Exception as e:
+        notify.log(f"Fund limit API exception: {e}")
     die("Could not fetch available capital from Dhan fund limit API.")
 
 
@@ -187,7 +237,15 @@ def get_expiry() -> date:
         if resp.status_code == 200:
             expiries = resp.json().get("data", [])
             # Find the nearest expiry that is today or in the future
-            upcoming = [date.fromisoformat(e) for e in expiries if date.fromisoformat(e) >= today]
+            # Guard against malformed date strings from API
+            upcoming = []
+            for e in expiries:
+                try:
+                    d = date.fromisoformat(str(e))
+                    if d >= today:
+                        upcoming.append(d)
+                except (ValueError, TypeError):
+                    notify.log(f"Skipping malformed expiry date: {e!r}")
             if upcoming:
                 expiry = min(upcoming)
                 notify.log(f"Expiry from API: {expiry}  (all: {[e for e in expiries[:4]]})")
@@ -635,8 +693,9 @@ def place_super_order(security_id: str, signal: str, lots: int,
         except Exception as e:
             notify.log(f"AMO order exception: {e}")
 
-    # Fallback: market buy + SL-M sell
+    # ── Fallback: manual MARKET BUY + SL-M SELL ──────────────────────────────
     # Build a clean OrderRequest payload — no super-order-specific fields
+    opt_sym_short = f"BN {security_id} x{qty}"   # compact label for emergency msgs
     buy_payload = {
         "dhanClientId":      CLIENT_ID,
         "correlationId":     f"at_buy_{date.today().strftime('%Y%m%d')}",
@@ -651,17 +710,65 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "triggerPrice":      0,
         "disclosedQuantity": 0,
     }
-    buy_resp   = requests.post("https://api.dhan.co/v2/orders",
-                               headers=HEADERS, json=buy_payload, timeout=15)
+
+    # BUY — wrapped so a timeout/exception doesn't leave us in unknown state
+    buy_result = {}
+    buy_oid    = None
+    try:
+        buy_resp   = requests.post("https://api.dhan.co/v2/orders",
+                                   headers=HEADERS, json=buy_payload, timeout=15)
+        buy_result = buy_resp.json()
+        buy_oid    = buy_result.get("orderId") or buy_result.get("order_id")
+        if not buy_oid:
+            notify.log(f"BUY response has no orderId — may have failed: {buy_result}")
+    except Exception as e:
+        notify.send(
+            f"❌ <b>BUY order failed — no position opened</b>\n\n"
+            f"Exception: {e}\n"
+            f"Symbol: {opt_sym_short}\n"
+            f"No action needed — check Dhan app to confirm."
+        )
+        return {"mode": "FAILED", "buy_order": {}, "sl": sl_price, "tp": tp_price}
+
     time.sleep(2)
+
+    # SL — if this fails AFTER a BUY succeeded, position is unhedged — emergency alert
     sl_payload = {**buy_payload,
                   "transactionType": "SELL",
                   "orderType":       "STOP_LOSS_MARKET",
                   "triggerPrice":    sl_price,
                   "correlationId":   f"at_sl_{date.today().strftime('%Y%m%d')}"}
-    sl_resp    = requests.post("https://api.dhan.co/v2/orders",
-                               headers=HEADERS, json=sl_payload, timeout=15)
-    return {"buy_order": buy_resp.json(), "sl_order": sl_resp.json(), "mode": "FALLBACK",
+    sl_result = {}
+    try:
+        sl_resp   = requests.post("https://api.dhan.co/v2/orders",
+                                  headers=HEADERS, json=sl_payload, timeout=15)
+        sl_result = sl_resp.json()
+        sl_oid    = sl_result.get("orderId") or sl_result.get("order_id")
+        if not sl_oid:
+            # SL may have silently failed — send urgent alert with manual action
+            notify.send(
+                f"⚠️ <b>SL order — no confirmation</b>\n\n"
+                f"BUY orderId: {buy_oid or 'unknown'}\n"
+                f"SL response: {str(sl_result)[:200]}\n\n"
+                f"<b>Verify SL manually on Dhan app:</b>\n"
+                f"Symbol: {opt_sym_short}\n"
+                f"SL trigger: ₹{sl_price:.0f}  |  TP target: ₹{tp_price:.0f}"
+            )
+    except Exception as e:
+        # CRITICAL: BUY succeeded but SL failed — position is unhedged
+        notify.send(
+            f"🚨 <b>CRITICAL — SL PLACEMENT FAILED</b>\n\n"
+            f"BUY was placed (orderId: {buy_oid or 'unknown'}) but SL threw an exception.\n"
+            f"Exception: {e}\n\n"
+            f"<b>IMMEDIATE MANUAL ACTION REQUIRED:</b>\n"
+            f"Open Dhan app → Orders → set SL on {opt_sym_short}\n"
+            f"SL trigger: ₹{sl_price:.0f}\n"
+            f"OR exit the position immediately."
+        )
+        return {"mode": "FALLBACK_NO_SL", "buy_order": buy_result,
+                "sl": sl_price, "tp": tp_price}
+
+    return {"buy_order": buy_result, "sl_order": sl_result, "mode": "FALLBACK",
             "sl": sl_price, "tp": tp_price}
 
 
@@ -682,8 +789,12 @@ def main():
     if sig is None:
         return
 
-    signal       = sig["signal"]
-    score        = int(sig["score"])
+    # Guard: signal CSV row may have unexpected/missing fields
+    try:
+        signal = str(sig.get("signal", "")).upper()
+        score  = int(sig.get("score", 0))
+    except (ValueError, TypeError) as e:
+        die(f"Signal CSV row has unexpected format: {e}\nRow: {sig}")
     today_wd     = date.today().strftime("%A")
     today_label  = date.today().strftime("%d %b %Y")
 
@@ -745,6 +856,30 @@ def main():
             f"BANKNIFTY {expiry} {'CE' if signal == 'CALL' else 'PE'}.\n"
             f"Check Dhan API status."
         )
+
+    # Guard: premium must be valid — crashes SL/TP calc if None or zero
+    if not premium or premium <= 0:
+        die(
+            f"Invalid premium ({premium}) from option chain — cannot calculate SL/TP.\n"
+            f"Strike: {atm_strike}  |  Expiry: {expiry}  |  Check option chain API."
+        )
+
+    # Guard: spot must be valid — used in risk calculations and Telegram message
+    if not spot or spot <= 0:
+        if DRY_RUN:
+            notify.log("Spot price unavailable — using ₹50,000 placeholder for DRY RUN display")
+            spot = 50_000.0
+        else:
+            die("Spot price unavailable. Cannot confirm trade safety. Check Dhan LTP endpoint.")
+
+    # Guard: lots must be at least 1 — belt-and-suspenders beyond strike selection
+    if not lots or lots < 1:
+        die(f"Lot sizing returned {lots} — insufficient capital or premium too high for 1 lot.")
+
+    # Guard: RR must be positive and reasonable
+    if rr <= 0:
+        notify.log(f"RR={rr} is invalid — resetting to default {RR}")
+        rr = RR
 
     # 5. Sizing — DTE + risk/reward numbers come from the real premium returned above
     dte = max(0.25, (expiry - date.today()).days + 1)
@@ -834,6 +969,15 @@ def main():
 
     # Live result
     mode = result.get("mode", "SUPER_ORDER")
+
+    # Emergency modes — critical alerts already sent inside place_super_order
+    if mode == "FAILED":
+        notify.log("Order placement failed entirely — no position opened. See earlier error.")
+        return
+    if mode == "FALLBACK_NO_SL":
+        notify.log("FALLBACK_NO_SL — BUY placed but SL failed. Emergency alert sent. Manual action needed.")
+        return
+
     oid  = (result.get("orderId") or result.get("order_id") or
             (result.get("buy_order") or {}).get("orderId"))
 
