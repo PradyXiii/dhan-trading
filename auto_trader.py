@@ -48,12 +48,12 @@ HEADERS = {
 
 DATA_DIR  = "data"
 LOT_SIZE  = 30
-SL_PCT    = 0.20
+SL_PCT    = 0.10
 RISK_PCT  = 0.05
 MAX_LOTS  = 20
 PREMIUM_K = 0.004
 
-RR = 2.0   # reward:risk ratio — flat across all days (SL=20%, TP=+40% of premium)
+RR = 3.0   # reward:risk ratio — SL=10%, TP=+30% of premium (RR=3.0x)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -343,7 +343,8 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "price":           0,
         "targetPrice":     tp_price,
         "stopLossPrice":   sl_price,
-        "trailingJump":    5,
+        # Dhan T&C: trailingJump max = max(1, entry_price - stop_loss_price)
+        "trailingJump":    min(5, max(1, round(premium * SL_PCT, 1))),
     }
     try:
         resp   = requests.post("https://api.dhan.co/v2/super/orders",
