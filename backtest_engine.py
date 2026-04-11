@@ -249,6 +249,34 @@ def load_bn_ohlcv():
     return df.set_index("date")
 
 
+def load_real_premiums():
+    """
+    Load real ATM option premiums from data/options_atm_daily.csv
+    (fetched from Dhan /charts/rollingoption).
+
+    Returns dict keyed by pd.Timestamp → {"call_premium": float, "put_premium": float}
+    or empty dict if file doesn't exist.
+
+    Coverage is shown at backtest start. Days not in the file fall back to
+    the BN × PREMIUM_K × √DTE approximation automatically.
+    """
+    path = f"{DATA_DIR}/options_atm_daily.csv"
+    if not os.path.exists(path):
+        return {}
+    try:
+        df  = pd.read_csv(path, parse_dates=["date"])
+        out = {}
+        for _, row in df.iterrows():
+            out[row["date"]] = {
+                "call_premium": row["call_premium"] if pd.notna(row.get("call_premium")) else None,
+                "put_premium":  row["put_premium"]  if pd.notna(row.get("put_premium"))  else None,
+            }
+        return out
+    except Exception as e:
+        print(f"  Warning: could not load options_atm_daily.csv — {e}")
+        return {}
+
+
 # ── Trade simulator ───────────────────────────────────────────────────────────
 
 def _norm_cdf(x):
@@ -306,7 +334,7 @@ def _otm_params(dist_100pts, bn_open, dte_days):
     return pf, delta
 
 
-def _select_strike(bn_open, capital, dte_days, lot_size):
+def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
     """
     Simulate the live ATM/OTM/ITM strike selection for a given capital level.
 
@@ -318,10 +346,17 @@ def _select_strike(bn_open, capital, dte_days, lot_size):
                            Return first ITM the capital supports.
                            Fall back to ATM if nothing deeper fits.
 
+    real_atm_premium: actual ATM open premium from Dhan rollingoption data.
+                      If provided, used as the ATM anchor instead of the
+                      BN × PREMIUM_K × √DTE formula. OTM/ITM strikes are
+                      scaled relative to this real anchor.
+
     Returns (dist_100pts, adj_premium, lots, delta) or None if nothing fits.
     dist_100pts: negative=ITM, 0=ATM, positive=OTM
     """
-    atm_premium = bn_open * PREMIUM_K * (dte_days ** 0.5)
+    # Real ATM premium as anchor (exact IV-priced); fall back to formula approximation
+    atm_premium = (real_atm_premium if real_atm_premium and real_atm_premium > 0
+                   else bn_open * PREMIUM_K * (dte_days ** 0.5))
     atm_result  = None
 
     for dist in range(0, OTM_WALK_MAX + 1):
@@ -364,17 +399,19 @@ def _select_strike(bn_open, capital, dte_days, lot_size):
 def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                    flat_rr=None, day_rr_override=None,
                    bn_tp_pts=None, bn_sl_pts=None, dte_override=None,
-                   lot_size=None):
+                   lot_size=None, real_atm_premium=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
-    trail_jump_opt  : trailing stop in option-price rupees (Dhan trailingJump). 0 = off.
-    sl_pct          : override SL_PCT global (e.g. 0.20 for 20% SL). None = use global.
-    flat_rr         : use this RR for every day instead of DAY_RR dict. None = use per-day.
-    day_rr_override : dict like DAY_RR to use instead of the module-level DAY_RR.
-    bn_tp_pts       : fixed BN-point target (e.g. 500). Overrides premium% TP if set.
-    bn_sl_pts       : fixed BN-point stop-loss (e.g. 150). Overrides premium% SL if set.
-    dte_override    : actual DTE calculated from real expiry date. Overrides DAY_DTE dict.
+    trail_jump_opt   : trailing stop in option-price rupees (Dhan trailingJump). 0 = off.
+    sl_pct           : override SL_PCT global (e.g. 0.20 for 20% SL). None = use global.
+    flat_rr          : use this RR for every day instead of DAY_RR dict. None = use per-day.
+    day_rr_override  : dict like DAY_RR to use instead of the module-level DAY_RR.
+    bn_tp_pts        : fixed BN-point target (e.g. 500). Overrides premium% TP if set.
+    bn_sl_pts        : fixed BN-point stop-loss (e.g. 150). Overrides premium% SL if set.
+    dte_override     : actual DTE calculated from real expiry date. Overrides DAY_DTE dict.
+    real_atm_premium : actual 9:15 AM ATM open from Dhan rollingoption data.
+                       When provided replaces the BN × PREMIUM_K × √DTE formula.
 
     Returns (pnl, result, lots, premium, charges_total, charges_breakdown, strike_dist).
       strike_dist: negative=ITM, 0=ATM, positive=OTM (0=unknown for skipped)
@@ -413,7 +450,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     #   capital flush → probe ITM for better delta (higher payoff on trend days)
     if bn_tp_pts is not None and bn_sl_pts is not None:
         # BN-point mode: strike selection still determines premium/lots
-        sel = _select_strike(bn_open, capital, dte, ls)
+        sel = _select_strike(bn_open, capital, dte, ls, real_atm_premium)
         if sel is None:
             return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
         _dist, premium, lots, delta = sel
@@ -421,7 +458,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         tp_pts = bn_tp_pts
         max_loss_1lot = ls * bn_sl_pts * delta   # delta scales option loss per BN pt
     else:
-        sel = _select_strike(bn_open, capital, dte, ls)
+        sel = _select_strike(bn_open, capital, dte, ls, real_atm_premium)
         if sel is None:
             return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
         _dist, premium, lots, delta = sel
@@ -518,9 +555,21 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
 def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None,
-                 bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True, ml=False):
-    signals  = load_signals(ml=ml)
-    bn_ohlcv = load_bn_ohlcv()
+                 bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True, ml=False,
+                 use_real_premiums=True):
+    signals      = load_signals(ml=ml)
+    bn_ohlcv     = load_bn_ohlcv()
+    opt_premiums = load_real_premiums() if use_real_premiums else {}
+
+    if opt_premiums:
+        covered = sum(1 for d in signals["date"] if d in opt_premiums and
+                      opt_premiums[d].get("call_premium"))
+        pct     = covered / len(signals) * 100 if len(signals) else 0
+        print(f"  Real option premiums: {covered}/{len(signals)} trade days "
+              f"({pct:.0f}% coverage) — remainder use BN×K×√DTE approx")
+    else:
+        print("  Real option premiums: not found — using BN×PREMIUM_K×√DTE for all days")
+        print("  Run: python3 data_fetcher.py --fetch-options  to fetch real premiums")
 
     capital       = STARTING_CAPITAL
     current_month = None
@@ -536,6 +585,18 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             capital      += MONTHLY_TOPUP
             current_month = month_key
 
+        # Look up real ATM premium for this date + direction
+        signal     = str(row.get("signal", "")).upper()
+        real_prem  = None
+        prem_src   = "approx"
+        if opt_premiums:
+            opt_row = opt_premiums.get(date)
+            if opt_row:
+                key = "call_premium" if signal == "CALL" else "put_premium"
+                real_prem = opt_row.get(key)
+                if real_prem and real_prem > 0:
+                    prem_src = "real"
+
         capital_before = capital
         actual_dte  = get_dte(date) if use_actual_dte else None
         actual_lots = get_lot_size(date)
@@ -547,6 +608,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             day_rr_override=day_rr_override,
             bn_tp_pts=bn_tp_pts,
             bn_sl_pts=bn_sl_pts,
+            real_atm_premium=real_prem,
             dte_override=actual_dte,
             lot_size=actual_lots)
         capital += pnl
@@ -561,6 +623,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             "score":          row["score"],
             "bn_open":        round(bn_open, 2) if bn_open else None,
             "premium":        premium,
+            "premium_source": prem_src,      # "real" = rollingoption, "approx" = formula
             "lots":           lots,
             "lot_size":       actual_lots,
             "strike_dist":    strike_dist,   # <0=ITM, 0=ATM, >0=OTM in 100pt units
@@ -1082,6 +1145,14 @@ def print_summary(trade_df, monthly, threshold=None, ml=False):
     print(f"  Worst trade         : ₹{active['pnl'].min():>10,.2f}")
     print(f"  Avg trade P&L       : ₹{active['pnl'].mean():>10,.2f}")
     print(f"  Max drawdown        : {max_dd:.1f}%")
+    print(f"{'─'*60}")
+    if "premium_source" in trade_df.columns:
+        real_days  = (trade_df["premium_source"] == "real").sum()
+        total_days = len(trade_df)
+        print(f"  Premium source (real): {real_days}/{total_days} trade days  "
+              f"({real_days/total_days*100:.0f}%  from Dhan rollingoption)")
+        print(f"  Premium source (approx): {total_days-real_days}/{total_days} days "
+              f" (BN×K×√DTE formula)")
     print(f"{'='*60}")
 
     print(f"\nMonthly breakdown (first 8 months):")
@@ -1307,6 +1378,44 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--phases":
         print("Month-on-month breakdown by expiry regime phase...")
         run_phase_analysis()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--real-premium":
+        # ── Real-premium backtest (rule-based signals + Dhan option prices) ──
+        print("Running backtest with REAL option premiums [SL=15%, TP=30%, trail=₹5]")
+        print("Premium source: Dhan /charts/rollingoption  (falls back to formula if missing)")
+        trade_df, monthly = run_backtest(
+            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0,
+            use_actual_dte=True, ml=False, use_real_premiums=True,
+        )
+        trade_df.to_csv(f"{DATA_DIR}/trade_log_real.csv",    index=False)
+        monthly.to_csv( f"{DATA_DIR}/equity_curve_real.csv", index=False)
+        try:
+            threshold = int(pd.read_csv(f"{DATA_DIR}/signals.csv", nrows=1)
+                            .get("threshold", [None]).iloc[0] or 0) or None
+        except Exception:
+            threshold = None
+        print_summary(trade_df, monthly, threshold=threshold, ml=False)
+        print(f"\nSaved → {DATA_DIR}/trade_log_real.csv")
+        print(f"Saved → {DATA_DIR}/equity_curve_real.csv")
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--real-premium-ml":
+        # ── Real-premium ML backtest ──────────────────────────────────────────
+        sig_file = f"{DATA_DIR}/signals_ml.csv"
+        if not os.path.exists(sig_file):
+            print("signals_ml.csv not found. Run: python3 ml_engine.py first.")
+            return
+        print("Running ML backtest with REAL option premiums [SL=15%, TP=30%, trail=₹5]")
+        trade_df, monthly = run_backtest(
+            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0,
+            use_actual_dte=True, ml=True, use_real_premiums=True,
+        )
+        trade_df.to_csv(f"{DATA_DIR}/trade_log_ml_real.csv",    index=False)
+        monthly.to_csv( f"{DATA_DIR}/equity_curve_ml_real.csv", index=False)
+        print_summary(trade_df, monthly, threshold=None, ml=True)
+        print(f"\nSaved → {DATA_DIR}/trade_log_ml_real.csv")
+        print(f"Saved → {DATA_DIR}/equity_curve_ml_real.csv")
         return
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--ml":

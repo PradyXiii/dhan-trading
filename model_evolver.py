@@ -47,13 +47,47 @@ for _i, _a in enumerate(sys.argv):
 #  STEP 1 — DATA REFRESH
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _renew_token():
+    """
+    Extend the current Dhan token by 24 hours at 11 PM before the evolver runs.
+    Ensures the 9:15 AM auto_trader.py run tomorrow has a valid token.
+    PUT /v2/RenewToken — only works on active (non-expired) tokens.
+    """
+    import requests as _req
+    from dotenv import load_dotenv as _lde
+    import os as _os
+    _lde()
+    token     = _os.getenv("DHAN_ACCESS_TOKEN", "")
+    client_id = _os.getenv("DHAN_CLIENT_ID",    "")
+    if not token or not client_id:
+        print("  Token renewal: credentials not set — skipping")
+        return
+    try:
+        resp = _req.put(
+            "https://api.dhan.co/v2/RenewToken",
+            headers={"access-token": token, "dhanClientId": client_id,
+                     "Content-Type": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            print("  Token auto-renewed for another 24h ✓")
+        else:
+            print(f"  Token renewal: {resp.status_code} — token still valid for today")
+    except Exception as e:
+        print(f"  Token renewal skipped ({e})")
+
+
 def refresh_data():
     """Refresh all data CSVs using data_fetcher.py functions."""
     print("\n[1/6] Refreshing data...")
+
+    # Renew token first — 11 PM now, 9:15 AM trade tomorrow needs a valid token
+    _renew_token()
+
     from data_fetcher import (
         fetch_dhan_index, fetch_yfinance,
         fetch_gold, fetch_crude, fetch_usdinr, fetch_dxy, fetch_us10y,
-        fetch_fii_today, fetch_pcr_dhan_today,
+        fetch_fii_today, fetch_pcr_dhan_today, fetch_rollingoption,
         FROM_DATE, TO_DATE, DATA_DIR as DF_DIR,
     )
     os.makedirs(DF_DIR, exist_ok=True)
@@ -90,6 +124,12 @@ def refresh_data():
         fetch_pcr_dhan_today()
     except Exception as e:
         print(f"  pcr_dhan_today: {e}")
+
+    # Historical ATM option premiums — incremental update (only new rows fetched)
+    try:
+        fetch_rollingoption(FROM_DATE, TO_DATE)
+    except Exception as e:
+        print(f"  rollingoption: {e}")
 
     print("  Data refresh complete.")
 
@@ -503,6 +543,11 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
 
     direction  = today_signal if today_signal in ("CALL", "PUT") else "unclear"
     conf_pct   = round(today_conf * 100)
+    others_str = ", ".join(
+        "{} {}%".format(_MODEL_NAMES.get(r["model_type"], r["model_type"]),
+                        round(r["accuracy"] * 100))
+        for r in others
+    )
 
     msg = (
         f"Brain trained  |  {date_str}\n\n"
@@ -514,7 +559,7 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         f"\n"
         f"Tomorrow's lean: {direction}  (confidence: {conf_pct}%)\n"
         f"\n"
-        f"Other engines: {', '.join(f\"{_MODEL_NAMES.get(r['model_type'],r['model_type'])} {round(r['accuracy']*100)}%\" for r in others)}\n"
+        f"Other engines: {others_str}\n"
         f"Signals used: {n_used} indicators"
     )
 

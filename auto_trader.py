@@ -90,6 +90,28 @@ def die(msg: str):
     sys.exit(1)
 
 
+def _renew_token():
+    """
+    Extend the current valid Dhan token by another 24 hours.
+    PUT /v2/RenewToken — only works on active (non-expired) tokens.
+    Uses 'dhanClientId' header (not 'client-id' per Dhan v2 docs).
+    Called automatically after every successful credential check at 9:15 AM.
+    """
+    try:
+        resp = requests.put(
+            "https://api.dhan.co/v2/RenewToken",
+            headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID,
+                     "Content-Type": "application/json"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            notify.log("Token auto-renewed for another 24h ✓")
+        else:
+            notify.log(f"Token renewal: {resp.status_code} — token remains valid for today")
+    except Exception as e:
+        notify.log(f"Token renewal skipped ({e}) — proceeding with existing token")
+
+
 def check_credentials():
     if not TOKEN or not CLIENT_ID:
         die("DHAN_ACCESS_TOKEN or DHAN_CLIENT_ID missing from .env")
@@ -100,6 +122,9 @@ def check_credentials():
             die("Dhan token expired (401). Regenerate at dhan.co → API settings.")
         if resp.status_code not in (200, 429):
             notify.log(f"Dhan API check returned {resp.status_code}. Proceeding.")
+        # Token confirmed valid — auto-extend by 24h so it never expires mid-day
+        if resp.status_code == 200:
+            _renew_token()
     except requests.exceptions.ConnectionError:
         die("Cannot reach Dhan API. Check VM internet / DNS.")
 

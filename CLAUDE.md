@@ -144,6 +144,7 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/sp500_futures.csv` | ES=F from yfinance |
 | `data/signals.csv` | Rule-based signals (signal_engine.py output) |
 | `data/signals_ml.csv` | ML-overridden signals (ml_engine.py output) |
+| `data/options_atm_daily.csv` | Real ATM option opens from Dhan rollingoption (date, call_premium, put_premium) |
 | `models/champion.pkl` | Best HPO model from last evolver run |
 | `models/champion_meta.json` | Model type, accuracy, feature list, trained_at |
 
@@ -175,8 +176,13 @@ python3 ml_engine.py --predict-today  # fast single prediction (<10 sec)
 python3 ml_engine.py --analyze        # feature importance report
 
 # Backtest
-python3 backtest_engine.py            # rule-based backtest
-python3 backtest_engine.py --ml       # ML backtest
+python3 backtest_engine.py                   # rule-based backtest (uses real premiums if available)
+python3 backtest_engine.py --real-premium    # explicitly real-premium backtest (rule signals)
+python3 backtest_engine.py --real-premium-ml # real-premium ML backtest
+python3 backtest_engine.py --ml              # ML backtest (formula premium)
+
+# Fetch historical ATM option premiums (one-time, then incremental)
+python3 data_fetcher.py --fetch-options
 
 # Live test
 python3 auto_trader.py --dry-run

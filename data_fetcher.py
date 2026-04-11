@@ -291,6 +291,145 @@ def fetch_pcr_dhan_today():
         return pd.DataFrame()
 
 
+# Nov 20 2024: BN weekly options discontinued → monthly only from this date
+_WEEKLY_DISCONTINUED = datetime(2024, 11, 20)
+
+
+def fetch_rollingoption(from_date, to_date):
+    """
+    Fetch ATM CALL + PUT 9:15 AM open premiums from Dhan /charts/rollingoption.
+    Saves to data/options_atm_daily.csv:
+      date, call_premium, call_strike, put_premium, put_strike
+
+    Uses WEEK expiryFlag before Nov 20 2024, MONTH from Nov 20 2024 onwards.
+    30-day chunks to respect the API max-range limit. ~1 min for 5 years.
+    Falls back gracefully if individual chunks fail.
+    """
+    from datetime import date as _dt
+    out_path = f"{DATA_DIR}/options_atm_daily.csv"
+
+    start    = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end      = datetime.strptime(to_date,   "%Y-%m-%d").date()
+    boundary = _WEEKLY_DISCONTINUED.date()   # WEEK → MONTH transition
+
+    all_rows = []
+    current  = start
+
+    while current < end:
+        # Determine expiryFlag — cap chunk at phase boundary if it straddles it
+        if current < boundary:
+            expiry_flag = "WEEK"
+            chunk_end   = min(current + timedelta(days=28),
+                              min(end, boundary - timedelta(days=1)))
+        else:
+            expiry_flag = "MONTH"
+            chunk_end   = min(current + timedelta(days=28), end)
+
+        chunk_calls: dict = {}
+        chunk_puts:  dict = {}
+
+        for opt_type in ["CALL", "PUT"]:
+            payload = {
+                "exchangeSegment": "NSE_FNO",
+                "interval":        "1",       # 1-minute → first candle = 9:15 AM open
+                "securityId":      25,
+                "instrument":      "OPTIDX",
+                "expiryFlag":      expiry_flag,
+                "expiryCode":      0,          # nearest expiry
+                "strike":          "ATM",
+                "drvOptionType":   opt_type,
+                "requiredData":    ["open", "strike"],
+                "fromDate":        current.strftime("%Y-%m-%d"),
+                "toDate":          chunk_end.strftime("%Y-%m-%d"),
+            }
+            try:
+                resp = requests.post(
+                    "https://api.dhan.co/v2/charts/rollingoption",
+                    headers=HEADERS,
+                    json=payload,
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    print(f"  rollingoption {opt_type} [{current}→{chunk_end}]: "
+                          f"HTTP {resp.status_code} — {resp.text[:80]}")
+                    time.sleep(0.4)
+                    continue
+
+                d        = resp.json().get("data", {})
+                # CALL → data["ce"],  PUT → data["pe"]  (fallback to "ce")
+                opt_data = (d.get("ce") if opt_type == "CALL" else d.get("pe")) or \
+                           d.get("ce") or {}
+
+                if not opt_data or not opt_data.get("timestamp"):
+                    print(f"  rollingoption {opt_type} [{current}→{chunk_end}]: empty")
+                    time.sleep(0.4)
+                    continue
+
+                # Convert Unix epoch → IST, group by IST date, take first row
+                ts_ist = (pd.to_datetime(opt_data["timestamp"], unit="s")
+                          + pd.Timedelta(hours=5, minutes=30))
+                df_c   = pd.DataFrame({
+                    "dt":     ts_ist,
+                    "open":   opt_data["open"],
+                    "strike": opt_data.get("strike") or [None] * len(ts_ist),
+                })
+                df_c["date"] = df_c["dt"].dt.normalize()
+                daily = (df_c.groupby("date", sort=True)
+                              .first()
+                              .reset_index()[["date", "open", "strike"]])
+
+                col_p = "call_premium" if opt_type == "CALL" else "put_premium"
+                col_s = "call_strike"  if opt_type == "CALL" else "put_strike"
+                dest  = chunk_calls    if opt_type == "CALL" else chunk_puts
+
+                for _, r in daily.iterrows():
+                    dest[r["date"]] = {col_p: r["open"], col_s: r["strike"]}
+
+                print(f"  rollingoption ATM {opt_type} [{current}→{chunk_end}]: "
+                      f"{len(daily)} days  (flag={expiry_flag})")
+
+            except Exception as e:
+                print(f"  rollingoption {opt_type} [{current}→{chunk_end}]: error — {e}")
+
+            time.sleep(0.4)   # stay within data API rate limit (5/sec)
+
+        # Merge CALL + PUT for this chunk
+        all_dates = sorted(set(list(chunk_calls.keys()) + list(chunk_puts.keys())))
+        for d in all_dates:
+            row = {"date": d}
+            row.update(chunk_calls.get(d, {"call_premium": None, "call_strike": None}))
+            row.update(chunk_puts.get(d,  {"put_premium":  None, "put_strike":  None}))
+            all_rows.append(row)
+
+        current = chunk_end + timedelta(days=1)
+
+    if not all_rows:
+        print("  rollingoption: no data fetched — check Dhan credentials/subscription")
+        return pd.DataFrame()
+
+    new_df = (pd.DataFrame(all_rows)
+                .drop_duplicates("date")
+                .sort_values("date")
+                .reset_index(drop=True))
+
+    # Merge with existing (incremental updates on subsequent runs)
+    if os.path.exists(out_path):
+        existing = pd.read_csv(out_path, parse_dates=["date"])
+        combined = (pd.concat([existing, new_df])
+                      .drop_duplicates("date")
+                      .sort_values("date")
+                      .reset_index(drop=True))
+    else:
+        combined = new_df
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    combined.to_csv(out_path, index=False)
+    real_count = combined["call_premium"].notna().sum()
+    print(f"  → Saved options_atm_daily.csv  ({len(combined)} rows, "
+          f"{real_count} with real CALL premium)")
+    return new_df
+
+
 def fetch_nse_pcr(from_date, to_date):
     """
     Fetch BankNifty Put-Call Ratio from NSE historical data.
@@ -422,6 +561,15 @@ def main():
         fix_dhan_dates()
         return
 
+    # Handle --fetch-options: fetch historical ATM option premiums only
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-options":
+        print("=== Historical ATM Option Premiums (Dhan rollingoption) ===")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        df = fetch_rollingoption(FROM_DATE, TO_DATE)
+        if not df.empty:
+            print(f"  Done. {len(df)} new rows fetched.")
+        return
+
     # Handle --process-pcr flag
     if len(_sys.argv) >= 3 and _sys.argv[1] == "--process-pcr":
         pcr = process_pcr_from_nse_bhavcopy(_sys.argv[2])
@@ -513,6 +661,10 @@ def main():
 
     print("=== PCR — BankNifty Put-Call Ratio (Dhan live) ===")
     fetch_pcr_dhan_today()
+    print()
+
+    print("=== Historical ATM Option Premiums (Dhan rollingoption) ===")
+    fetch_rollingoption(FROM_DATE, TO_DATE)
     print()
 
     # ── Historical PCR/FII (inform user about manual steps) ──────────
