@@ -5,7 +5,7 @@ import os
 DATA_DIR         = "data"
 LOT_SIZE         = 30
 RISK_PCT         = 0.05     # 5% of capital risked per trade
-SL_PCT           = 0.30     # stop-loss = 30% of premium
+SL_PCT           = 0.20     # stop-loss = 20% of premium
 STARTING_CAPITAL = 30_000
 MONTHLY_TOPUP    = 10_000
 
@@ -26,12 +26,13 @@ DAY_DTE = {
     "Friday":    5,      # Fri → next Wed = 5 days
 }
 
-# Reward-to-risk ratios per day (higher DTE = richer premium = can target bigger)
-# Wednesday uses 1.0 (1:1 RR) — fast gamma, take quick exits on expiry day
+# Reward-to-risk ratios per day — flat 2.0x across all days
+# Chosen from SL%×RR grid backtest (trail=₹5): SL=20%, RR=2.0x gives best net P&L
+# TP = entry_premium × (1 + SL_PCT × RR) = +40% of premium
 DAY_RR = {
-    "Monday":    1.6,
-    "Tuesday":   1.4,
-    "Wednesday": 1.0,
+    "Monday":    2.0,
+    "Tuesday":   2.0,
+    "Wednesday": 2.0,
     "Thursday":  2.0,
     "Friday":    2.0,
 }
@@ -333,7 +334,7 @@ def run_sl_tp_grid(trail_jump_opt=5):
 
     print(f"\n{'='*90}")
     print(f"  SL% × RR GRID  —  trail=₹{trail_jump_opt}, ranked by net P&L")
-    print(f"  Current config: SL=30%, per-day RR (Fri/Thu=2.0×, Tue=1.4×, Mon=1.6×, Wed=1.0×)")
+    print(f"  Live config: SL=20%, flat RR=2.0×, trail=₹5  (TP=+40% of premium)")
     print(f"{'='*90}")
     print(df_display.drop(columns=["net_pnl_raw"] if "net_pnl_raw" in df_display else [])
           .to_string(index=True))
