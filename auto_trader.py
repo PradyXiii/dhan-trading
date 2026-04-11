@@ -53,8 +53,7 @@ RISK_PCT  = 0.05
 MAX_LOTS  = 20
 PREMIUM_K = 0.004
 
-DAY_DTE = {"Monday": 2, "Tuesday": 1, "Wednesday": 0.25, "Thursday": 6, "Friday": 5}
-DAY_RR  = {"Monday": 2.0, "Tuesday": 2.0, "Wednesday": 2.0, "Thursday": 2.0, "Friday": 2.0}
+RR = 2.0   # reward:risk ratio — flat across all days (SL=20%, TP=+40% of premium)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -449,9 +448,11 @@ def main():
             f"Option chain API may be down. Check Dhan app."
         )
 
-    # 5. Sizing — always use TODAY's weekday for DTE/RR, not the signal date's day
-    dte     = DAY_DTE.get(today_wd, 1)
-    rr      = DAY_RR.get(today_wd, 1.4)
+    # 5. Sizing — calculate actual DTE from today to expiry (monthly expiry now)
+    # BN switched to monthly expiry (last Wed of month). DTE varies 0–28 across the month.
+    # MIN 0.25 so expiry-day premium is nonzero; +1 because options trade on expiry morning.
+    dte     = max(0.25, (expiry - date.today()).days + 1)
+    rr      = RR
     premium = spot * PREMIUM_K * sqrt(dte)
 
     max_loss_1lot = LOT_SIZE * premium * SL_PCT
@@ -489,7 +490,7 @@ def main():
         f"Option     <code>{opt_sym}</code>\n"
         f"Qty        {lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares\n"
         f"Spot       ₹{spot:,.0f}   Premium  ~₹{premium:.0f}\n"
-        f"DTE        {dte} day{'s' if dte != 1 else ''}   RR  {rr}×\n"
+        f"DTE        {dte:.1f} days  ·  Expiry {expiry.strftime('%d %b')}   RR  {rr}×\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Stop loss  ₹{sl_price:.0f}  (−{SL_PCT*100:.0f}%)\n"
         f"Target     ₹{tp_price:.0f}  (+{SL_PCT*rr*100:.0f}%)\n"
