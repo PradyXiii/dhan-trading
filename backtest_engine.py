@@ -964,6 +964,104 @@ def run_comparison():
     print(f"      Lot cap: {MAX_LOTS} lots per trade (liquidity/margin constraint).")
 
 
+def run_phase_analysis():
+    """
+    Month-on-month breakdown of trades tagged by expiry regime phase.
+    Reads the saved trade_log.csv — run default backtest first.
+
+    Phase 1: Sep 2021 – Feb 2024   weekly Thursday
+    Phase 2: Mar 2024 – Nov 2024   weekly Wednesday
+    Phase 3: Nov 2024 – Aug 2025   monthly last Wednesday
+    Phase 4: Sep 2025 onwards      monthly last Tuesday
+    """
+    try:
+        df = pd.read_csv(f"{DATA_DIR}/trade_log.csv", parse_dates=["date"])
+    except FileNotFoundError:
+        print("trade_log.csv not found — run: python3 backtest_engine.py  first.")
+        return
+
+    active = df[df["result"].isin(["WIN", "LOSS", "PARTIAL", "TRAIL_SL"])].copy()
+    active["date"] = pd.to_datetime(active["date"])
+
+    def phase_label(d):
+        if d < pd.Timestamp(WEDNESDAY_WEEKLY_START):
+            return "Ph1 weekly-Thu"
+        elif d < pd.Timestamp(WEEKLY_DISCONTINUED):
+            return "Ph2 weekly-Wed"
+        elif d < pd.Timestamp(TUESDAY_EXPIRY_FROM):
+            return "Ph3 monthly-Wed"
+        else:
+            return "Ph4 monthly-Tue"
+
+    active["phase"]  = active["date"].apply(phase_label)
+    active["month"]  = active["date"].dt.to_period("M")
+
+    rows = []
+    for month, grp in active.groupby("month"):
+        wins     = (grp["result"] == "WIN").sum()
+        losses   = (grp["result"] == "LOSS").sum()
+        trail    = (grp["result"] == "TRAIL_SL").sum()
+        total    = len(grp)
+        wr       = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+        net_pnl  = grp["pnl"].sum()
+        cum_cap  = grp["capital_after"].iloc[-1]
+        phase    = grp["phase"].iloc[-1]   # phase of last trade in the month
+        rows.append({
+            "month":   str(month),
+            "phase":   phase,
+            "trades":  total,
+            "W":       wins,
+            "L":       losses,
+            "T":       trail,
+            "WR%":     f"{wr:.0f}%",
+            "net_pnl": net_pnl,
+            "P&L":     fmt_inr(net_pnl),
+            "cap_end":  fmt_inr(cum_cap),
+        })
+
+    result = pd.DataFrame(rows)
+
+    # ── Per-phase summary ─────────────────────────────────────────────────────
+    phase_order = ["Ph1 weekly-Thu", "Ph2 weekly-Wed",
+                   "Ph3 monthly-Wed", "Ph4 monthly-Tue"]
+    print(f"\n{'='*95}")
+    print(f"  PHASE SUMMARY")
+    print(f"{'='*95}")
+    print(f"  {'Phase':<18} {'Months':>6} {'Trades':>7} {'Wins':>5} {'Loss':>5}"
+          f" {'Trail':>6} {'WR%':>6} {'Net P&L':>12}")
+    print(f"  {'─'*85}")
+    for ph in phase_order:
+        sub = active[active["phase"] == ph]
+        if len(sub) == 0:
+            continue
+        pw = (sub["result"] == "WIN").sum()
+        pl = (sub["result"] == "LOSS").sum()
+        pt = (sub["result"] == "TRAIL_SL").sum()
+        pwr = pw / (pw + pl) * 100 if (pw + pl) > 0 else 0
+        months = sub["month"].nunique()
+        pnl = sub["pnl"].sum()
+        print(f"  {ph:<18} {months:>6} {len(sub):>7} {pw:>5} {pl:>5}"
+              f" {pt:>6} {pwr:>5.0f}% {fmt_inr(pnl):>12}")
+
+    # ── Month-on-month detail ─────────────────────────────────────────────────
+    print(f"\n{'='*95}")
+    print(f"  MONTH-ON-MONTH  (phase tag = regime active at end of month)")
+    print(f"{'='*95}")
+    print(f"  {'Month':<9} {'Phase':<16} {'Tr':>3} {'W':>4} {'L':>4} {'T':>4}"
+          f" {'WR%':>5} {'P&L':>10} {'Cap':>10}")
+    print(f"  {'─'*83}")
+
+    prev_phase = None
+    for _, r in result.iterrows():
+        sep = "  " if r["phase"] == prev_phase else "──"
+        print(f"{sep} {r['month']:<9} {r['phase']:<16} {r['trades']:>3}"
+              f" {r['W']:>4} {r['L']:>4} {r['T']:>4}"
+              f" {r['WR%']:>5} {r['P&L']:>10} {r['cap_end']:>10}")
+        prev_phase = r["phase"]
+
+    print(f"{'='*95}\n")
+
+
 def main():
     import sys as _sys
 
@@ -1003,6 +1101,11 @@ def main():
         tp = float(_sys.argv[2]) if len(_sys.argv) > 2 else 30
         print(f"Running fixed TP={tp:.0f}% SL sweep with trail=₹5 and actual DTE...")
         run_tp_fixed_grid(tp_pct=tp / 100, trail_jump_opt=5)
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--phases":
+        print("Month-on-month breakdown by expiry regime phase...")
+        run_phase_analysis()
         return
 
     # Read threshold embedded in signals.csv
