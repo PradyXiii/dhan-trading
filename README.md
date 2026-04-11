@@ -77,16 +77,18 @@ Premium approximation (no intraday options data used for sizing):
 ```
 dhan-trading/
 │
-├── auto_trader.py       Morning automation: data → ML signal → Dhan order → Telegram
-├── signal_engine.py     Rule-based indicators → signals.csv
-├── ml_engine.py         Walk-forward ML oracle → signals_ml.csv
-├── backtest_engine.py   Historical simulation with full cost model
-├── data_fetcher.py      Fetches OHLCV + global data → data/
-├── notify.py            Telegram notification helper
-├── dhan_mcp.py          MCP server: query live positions/P&L from Claude Code
-├── setup_automation.sh  One-shot VM setup: deps, cron, dry-run
+├── auto_trader.py         Morning automation: data → ML signal → Dhan order → Telegram
+├── signal_engine.py       Rule-based indicators → signals.csv
+├── ml_engine.py           Walk-forward ML oracle → signals_ml.csv
+├── model_evolver.py       Nightly 11 PM: HPO across RF/XGBoost/LightGBM → champion.pkl
+├── backtest_engine.py     Historical simulation with full cost model
+├── data_fetcher.py        Fetches OHLCV + global data → data/
+├── lot_expiry_scanner.py  Monthly check: detects BankNifty lot size / expiry day changes
+├── notify.py              Telegram notification helper
+├── dhan_mcp.py            MCP server: query live positions/P&L from Claude Code
+├── setup_automation.sh    One-shot VM setup: deps, cron, dry-run
 │
-└── data/                CSV files (gitignored — lives on GCP VM only)
+└── data/                  CSV files (gitignored — lives on GCP VM only)
     ├── banknifty.csv
     ├── signals.csv
     └── signals_ml.csv
@@ -189,7 +191,7 @@ If your Dhan account has TOTP enabled, a separate `refresh_token.py` script can 
 > "What's today's P&L?"  
 > "Did my stop-loss trigger?"
 
-Add to `~/.claude/claude.json`:
+Add to `~/.claude/settings.json`:
 
 ```json
 {

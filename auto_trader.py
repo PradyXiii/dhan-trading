@@ -876,11 +876,6 @@ def main():
     if not lots or lots < 1:
         die(f"Lot sizing returned {lots} — insufficient capital or premium too high for 1 lot.")
 
-    # Guard: RR must be positive and reasonable
-    if rr <= 0:
-        notify.log(f"RR={rr} is invalid — resetting to default {RR}")
-        rr = RR
-
     # 5. Sizing — DTE + risk/reward numbers come from the real premium returned above
     dte = max(0.25, (expiry - date.today()).days + 1)
     rr  = RR
