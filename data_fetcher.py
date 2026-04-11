@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
@@ -16,7 +17,7 @@ HEADERS = {
 }
 
 FROM_DATE = "2021-09-01"
-TO_DATE   = "2026-04-09"
+TO_DATE   = datetime.today().strftime("%Y-%m-%d")
 DATA_DIR  = "data"
 
 

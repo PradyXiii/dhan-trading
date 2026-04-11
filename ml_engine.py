@@ -340,8 +340,12 @@ def run_walkforward(X, y_bin, dates, mode="direction", ml_threshold=0.55,
             print(f"  {i}/{n} days  [{n_retrains} models trained]", end="\r", flush=True)
 
         if model is None:
+            # Single-class training slice — fall back to rule signal (no label leakage)
+            fallback = rule_signals[i] if rule_signals is not None else "NONE"
+            if fallback == "NONE":
+                fallback = "CALL" if X[i][FEATURE_COLS.index("trend5")] >= 0 else "PUT"
             results.append({
-                "date": date, "ml_signal": "CALL" if y[i] == 1 else "PUT",
+                "date": date, "ml_signal": fallback,
                 "ml_p_call": 0.5, "ml_p_put": 0.5, "ml_conf": 0.5, "ml_trained": False,
             })
             continue
@@ -489,7 +493,7 @@ def generate_ml_signals(mode="direction", ml_threshold=0.55):
     print(f"  Warmup days (rule-based fallback): {warmup}")
     print(f"{'─'*62}")
     print(f"  vs rule-based ({len(rule_traded)} trades):")
-    print(f"  ML agrees with rule      : {n_agree}  ({n_agree/len(traded)*100:.1f}% of ML trades)")
+    print(f"  ML agrees with rule      : {n_agree}  ({n_agree/len(traded)*100:.1f}% of ML trades)" if len(traded) > 0 else "  ML agrees with rule      : N/A (0 trades)")
     print(f"  ML flipped direction     : {n_flip}  (rule said X, ML says opposite)")
     print(f"{'─'*62}")
     for day in ["Monday","Tuesday","Thursday","Friday"]:
