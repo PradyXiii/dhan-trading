@@ -48,13 +48,13 @@ HEADERS = {
 
 DATA_DIR  = "data"
 LOT_SIZE  = 30
-SL_PCT    = 0.30
+SL_PCT    = 0.20
 RISK_PCT  = 0.05
 MAX_LOTS  = 20
 PREMIUM_K = 0.004
 
 DAY_DTE = {"Monday": 2, "Tuesday": 1, "Wednesday": 0.25, "Thursday": 6, "Friday": 5}
-DAY_RR  = {"Monday": 1.6, "Tuesday": 1.4, "Wednesday": 1.0, "Thursday": 2.0, "Friday": 2.0}
+DAY_RR  = {"Monday": 2.0, "Tuesday": 2.0, "Wednesday": 2.0, "Thursday": 2.0, "Friday": 2.0}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -344,7 +344,7 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "price":           0,
         "targetPrice":     tp_price,
         "stopLossPrice":   sl_price,
-        "trailingJump":    0,
+        "trailingJump":    5,
     }
     try:
         resp   = requests.post("https://api.dhan.co/v2/super/orders",
