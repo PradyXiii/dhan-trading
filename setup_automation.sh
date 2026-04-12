@@ -101,7 +101,7 @@ EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DI
 EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 
 # Remove old entries (auto_trader + scanner + evolver + renewer) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer")
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
