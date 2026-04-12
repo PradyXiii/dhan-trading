@@ -97,6 +97,9 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
                 all_frames.append(df)
                 print(f"  {name}: {len(df)} rows  "
                       f"({current.strftime('%Y-%m-%d')} → {chunk_end.strftime('%Y-%m-%d')})")
+        elif resp.status_code == 400 and "DH-905" in resp.text:
+            # DH-905 on a short/recent range = no trading data (weekend or holiday) — not an error
+            print(f"  {name}: no new trading data ({current.strftime('%Y-%m-%d')} — weekend/holiday)")
         else:
             print(f"  {name}: ERROR {resp.status_code}  "
                   f"chunk {current.strftime('%Y-%m-%d')} — {resp.text[:120]}")
