@@ -86,11 +86,11 @@ echo "[5] Installing cron job (9:15 AM IST = 3:45 AM UTC, Mon–Fri)..."
 CRON_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
 CRON_COMMENT="# BankNifty Auto Trader — runs at 9:15 AM IST"
 
-# Daily token renewer — 7:55 AM IST = 2:25 AM UTC, EVERY DAY including weekends
-# Fires 5 min BEFORE the 8 AM expiry window — token is still alive when the HTTP call hits Dhan.
-# Keeps token alive over weekends (evolver+trader only run Mon-Fri, token expires Sat night otherwise).
-RENEWER_CMD="25 2 * * * cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
-RENEWER_COMMENT="# Token renewer — daily 7:55 AM IST (incl. weekends) — 5-min buffer before expiry"
+# Dynamic token renewer — runs every 5 minutes, renews when 23h50m have elapsed
+# since the last renewal (10-min buffer before 24h expiry). Script exits immediately
+# if not due yet, so the 5-min polling is lightweight (just a file read + exit).
+RENEWER_CMD="*/5 * * * * cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
+RENEWER_COMMENT="# Token renewer — every 5 min, renews at 23h50m elapsed (10-min buffer, dynamic)"
 
 # Monthly lot/expiry scanner — 1st of month at 10 AM IST = 4:30 AM UTC
 SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
@@ -133,7 +133,7 @@ echo ""
 echo "════════════════════════════════════════════════"
 echo "  Setup complete!"
 echo ""
-echo "  Token renewer  : 7:55 AM IST every day (incl. weekends, 5-min buffer)"
+echo "  Token renewer  : every 5 min (renews at 23h50m — 10-min buffer, dynamic)"
 echo "  Renewer log    : $LOG_DIR/renew_token.log"
 echo ""
 echo "  Auto trader    : 9:15 AM IST every weekday (Mon–Fri)"

@@ -2,51 +2,73 @@
 """
 renew_token.py
 ──────────────
-Standalone token renewal — runs at 8:00 AM IST every day (including weekends).
+Dynamic token renewal — runs every 5 minutes via cron, renews when 23h50m
+have elapsed since the last renewal (10-minute buffer before 24h expiry).
 
-This is a pure safety net. It has zero dependencies on market data, ML, or
-any other part of the trading system. Its only job: keep the Dhan token alive.
+Why dynamic instead of fixed cron time:
+  A fixed daily cron (e.g. 7:55 AM) creates an exact 24h gap when the
+  previous run was also at 7:55 AM (weekends). Storing the last renewal
+  timestamp and always renewing at T + 23h50m guarantees the gap is
+  always 23h50m–23h55m, never 24h.
 
-Why weekends matter:
-  model_evolver and auto_trader only run Mon–Fri.
-  Friday 11 PM renewal expires Saturday 11 PM.
-  Without this script, Monday 9:15 AM would hit a 34-hour-stale expired token
-  and die with 401 before the trade.
+How it works:
+  1. Reads token_meta.json for last_renewed_at timestamp
+  2. If now < last_renewed_at + 23h50m  → exits silently (not due yet)
+  3. If now >= last_renewed_at + 23h50m → renews token, updates token_meta.json
+  4. All three components that renew tokens (renew_token.py, auto_trader.py,
+     model_evolver.py) write the same token_meta.json, so the clock always
+     resets from whoever renewed last.
 
-Cron (7:55 AM IST = 2:25 AM UTC, every day):
-  25 2 * * * cd /path/to/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
-
-Why 7:55 and not 8:00: the token is renewed at the previous day's 7:55 AM run, making it
-expire at 7:55 AM today. Firing at exactly 8:00 AM could hit Dhan's server after expiry.
-The 5-minute buffer ensures the token is still alive when the renewal call is made.
+Cron (every 5 minutes, every day):
+  */5 * * * * cd /path/to/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
 """
 
 import os
 import re
 import sys
+import json
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TOKEN     = os.getenv("DHAN_ACCESS_TOKEN", "")
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "")
-ENV_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH  = os.path.join(BASE_DIR, ".env")
+META_PATH = os.path.join(BASE_DIR, "token_meta.json")
+
+RENEWAL_INTERVAL = timedelta(hours=23, minutes=50)   # renew 10 min before expiry
+MAX_RETRIES      = 3
 
 import notify
 
 _ts = datetime.now().strftime("%H:%M:%S IST")
 
-if not TOKEN or not CLIENT_ID:
-    msg = "🚨 Token renewer: DHAN_ACCESS_TOKEN or CLIENT_ID missing from .env — manual action needed"
-    notify.send(msg)
-    print(f"[{_ts}] {msg}")
-    sys.exit(1)
+
+def _read_last_renewed():
+    """Return the last renewal datetime, or None if file missing/corrupt."""
+    try:
+        if os.path.exists(META_PATH):
+            with open(META_PATH) as f:
+                return datetime.fromisoformat(json.load(f)["last_renewed_at"])
+    except Exception:
+        pass
+    return None
 
 
-def _update_env_token(new_token: str) -> None:
+def _write_last_renewed(ts: datetime):
+    """Persist renewal timestamp so all components share the same clock."""
+    try:
+        with open(META_PATH, "w") as f:
+            json.dump({"last_renewed_at": ts.isoformat()}, f, indent=2)
+    except Exception as e:
+        print(f"[{_ts}] Warning: could not write token_meta.json — {e}")
+
+
+def _update_env_token(new_token: str):
     if not os.path.exists(ENV_PATH):
         return
     with open(ENV_PATH, "r") as f:
@@ -54,15 +76,36 @@ def _update_env_token(new_token: str) -> None:
     new_content = re.sub(
         r"^DHAN_ACCESS_TOKEN=.*$",
         f"DHAN_ACCESS_TOKEN={new_token}",
-        content,
-        flags=re.MULTILINE,
+        content, flags=re.MULTILINE,
     )
     with open(ENV_PATH, "w") as f:
         f.write(new_content)
 
 
-MAX_RETRIES = 3
-last_error  = ""
+# ── Check if renewal is due ───────────────────────────────────────────────────
+
+if not TOKEN or not CLIENT_ID:
+    msg = "🚨 Token renewer: credentials missing from .env — manual action needed"
+    notify.send(msg)
+    print(f"[{_ts}] {msg}")
+    sys.exit(1)
+
+now          = datetime.now()
+last_renewed = _read_last_renewed()
+
+if last_renewed is not None:
+    elapsed   = now - last_renewed
+    remaining = RENEWAL_INTERVAL - elapsed
+    if remaining.total_seconds() > 0:
+        mins_left = int(remaining.total_seconds() / 60)
+        print(f"[{_ts}] Not due — {mins_left} min until next renewal "
+              f"(last: {last_renewed.strftime('%d %b %H:%M')})")
+        sys.exit(0)
+    # else: overdue → fall through and renew
+
+# ── Renew token (with retries) ────────────────────────────────────────────────
+
+last_error = ""
 
 for attempt in range(1, MAX_RETRIES + 1):
     try:
@@ -76,10 +119,13 @@ for attempt in range(1, MAX_RETRIES + 1):
             new_token = resp.json().get("token")
             if new_token and new_token != TOKEN:
                 _update_env_token(new_token)
-                print(f"[{_ts}] Token renewed ✓  (attempt {attempt}/{MAX_RETRIES}  .env updated)")
+                _write_last_renewed(now)
+                print(f"[{_ts}] Token renewed ✓  (attempt {attempt}/{MAX_RETRIES}  "
+                      f".env + token_meta.json updated  next renewal in 23h50m)")
             else:
-                # 200 but same token returned — still valid, no action needed
-                print(f"[{_ts}] Token renewal 200 — no new token issued (still valid)")
+                # 200 but same token — still valid, reset the clock anyway
+                _write_last_renewed(now)
+                print(f"[{_ts}] Token renewal 200 — no new token issued (still valid, clock reset)")
             sys.exit(0)
 
         last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
@@ -90,15 +136,16 @@ for attempt in range(1, MAX_RETRIES + 1):
         print(f"[{_ts}] Attempt {attempt}/{MAX_RETRIES} exception — {last_error}")
 
     if attempt < MAX_RETRIES:
-        backoff = 2 ** attempt   # 2s, 4s
+        backoff = 2 ** attempt
         print(f"[{_ts}] Retrying in {backoff}s...")
         time.sleep(backoff)
 
-# All retries exhausted
+# ── All retries exhausted ─────────────────────────────────────────────────────
+
 msg = (
     f"🚨 Token renewal FAILED after {MAX_RETRIES} attempts — {last_error}\n"
-    f"Manual action needed: regenerate token at dhan.co → API Settings → Access Token\n"
-    f"Then update DHAN_ACCESS_TOKEN in .env on the VM."
+    f"Manual action: regenerate token at dhan.co → API Settings, "
+    f"then update DHAN_ACCESS_TOKEN in .env on the VM."
 )
 notify.send(msg)
 print(f"[{_ts}] {msg}")

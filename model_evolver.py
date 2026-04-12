@@ -84,7 +84,15 @@ def _renew_token():
                     )
                     with open(env_path, "w") as f:
                         f.write(new_content)
-                    print("  Token renewed ✓  (.env updated — 9:15 AM run will use new token)")
+                    # Reset the 23h50m renewal clock for renew_token.py
+                    import json as _json
+                    meta_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "token_meta.json")
+                    try:
+                        with open(meta_path, "w") as f:
+                            _json.dump({"last_renewed_at": __import__("datetime").datetime.now().isoformat()}, f, indent=2)
+                    except Exception:
+                        pass
+                    print("  Token renewed ✓  (.env + token_meta.json updated — clock reset)")
                 else:
                     print("  Token renewed but .env not found — update DHAN_ACCESS_TOKEN manually")
             else:

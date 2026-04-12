@@ -92,9 +92,11 @@ def die(msg: str):
 
 
 def _update_env_token(new_token: str) -> None:
-    """Rewrite DHAN_ACCESS_TOKEN in .env with the newly issued token."""
-    import re as _re
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    """Rewrite DHAN_ACCESS_TOKEN in .env + reset token_meta.json renewal clock."""
+    import re as _re, json as _json
+    base     = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(base, ".env")
+    meta_path = os.path.join(base, "token_meta.json")
     if not os.path.exists(env_path):
         return
     try:
@@ -110,6 +112,12 @@ def _update_env_token(new_token: str) -> None:
             f.write(new_content)
     except Exception as e:
         notify.log(f"Warning: could not write new token to .env — {e}")
+    # Reset the 23h50m renewal clock so renew_token.py knows when to fire next
+    try:
+        with open(meta_path, "w") as f:
+            _json.dump({"last_renewed_at": datetime.now().isoformat()}, f, indent=2)
+    except Exception as e:
+        notify.log(f"Warning: could not write token_meta.json — {e}")
 
 
 def _renew_token():
