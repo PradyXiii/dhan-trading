@@ -33,7 +33,7 @@ No human input needed during market hours.
 ## Key Constants (auto_trader.py)
 
 ```python
-LOT_SIZE     = 30        # BankNifty lot size (post Jun 2025 NSE mandate)
+LOT_SIZE     = 30        # BankNifty lot size (Jan 2026+ — was 35 Jun–Dec 2025, was 15 pre-Nov 2024)
 SL_PCT       = 0.15      # 15% stop-loss on premium
 RISK_PCT     = 0.05      # 5% of capital at risk per trade
 MAX_LOTS     = 20        # hard cap on position size

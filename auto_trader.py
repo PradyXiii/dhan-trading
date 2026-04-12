@@ -161,6 +161,59 @@ def check_credentials():
         die("Cannot reach Dhan API. Check VM internet / DNS.")
 
 
+# ── Lot-size sanity checker ───────────────────────────────────────────────────
+
+def _check_lot_size():
+    """
+    Verify LOT_SIZE constant matches the expected BankNifty lot size for today.
+    If they differ, send a Telegram alert BEFORE any trade is placed.
+    Does NOT block trading — the operator must fix the constant.
+    """
+    from datetime import date as _d
+    import json as _json
+
+    today = _d.today()
+
+    # Baseline timeline (mirrors backtest_engine._baseline_lot_size)
+    if today < _d(2024, 11, 20):
+        expected = 15
+    elif today < _d(2025, 6, 26):
+        expected = 30
+    elif today < _d(2026, 1, 27):
+        expected = 35
+    else:
+        expected = 30  # Jan 2026 onwards
+
+    # Override file (written by lot_expiry_scanner.py on NSE changes)
+    try:
+        ov_path = os.path.join(DATA_DIR, "lot_size_overrides.json")
+        if os.path.exists(ov_path):
+            with open(ov_path) as _f:
+                ov = _json.load(_f)
+            best_eff = _d(1900, 1, 1)
+            for entry in ov.get("active", []):
+                try:
+                    eff = _d.fromisoformat(entry["effective_from"])
+                except Exception:
+                    continue
+                if eff <= today and eff >= best_eff:
+                    expected = int(entry["lot_size"])
+                    best_eff = eff
+    except Exception:
+        pass
+
+    if LOT_SIZE != expected:
+        msg = (
+            f"🚨 LOT SIZE MISMATCH — auto_trader.py LOT_SIZE={LOT_SIZE} "
+            f"but expected {expected} for {today}. "
+            f"Update LOT_SIZE in auto_trader.py BEFORE next trade or sizing will be WRONG."
+        )
+        notify.send(msg)
+        notify.log(msg)
+    else:
+        notify.log(f"Lot-size check OK: LOT_SIZE={LOT_SIZE} matches expected {expected}")
+
+
 # ── Step 1: Fetch data + generate signal ─────────────────────────────────────
 
 def refresh_data_and_signal():
@@ -841,8 +894,9 @@ def main():
     mode_label = "DRY RUN" if DRY_RUN else "LIVE"
     notify.log(f"BankNifty Auto Trader starting [{mode_label}]")
 
-    # 0. Credentials check
+    # 0. Credentials + lot-size sanity check
     check_credentials()
+    _check_lot_size()
 
     # 1. Refresh data + signal
     refresh_data_and_signal()
