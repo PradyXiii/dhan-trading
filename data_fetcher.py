@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import os
 import time
@@ -19,6 +20,38 @@ HEADERS = {
 FROM_DATE = "2021-09-01"
 TO_DATE   = datetime.today().strftime("%Y-%m-%d")
 DATA_DIR  = "data"
+
+
+def _last_csv_date(path):
+    """
+    Return the day AFTER the last date in an existing CSV (as YYYY-MM-DD string),
+    so callers can use it directly as from_date for an incremental fetch.
+    Returns None if file doesn't exist or is unreadable.
+    """
+    try:
+        if os.path.exists(path):
+            df = pd.read_csv(path, usecols=["date"])
+            if not df.empty:
+                last = pd.to_datetime(df["date"]).max()
+                return (last + timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return None
+
+
+def _merge_and_save(csv_path, df_new):
+    """Merge new rows into existing CSV, deduplicate by date, sort, save."""
+    if df_new is None or df_new.empty:
+        return
+    if os.path.exists(csv_path):
+        existing = pd.read_csv(csv_path, parse_dates=["date"])
+        combined = (pd.concat([existing, df_new])
+                      .drop_duplicates("date")
+                      .sort_values("date")
+                      .reset_index(drop=True))
+    else:
+        combined = df_new
+    combined.to_csv(csv_path, index=False)
 
 
 def fetch_dhan_index(security_id, name, from_date, to_date):
@@ -586,97 +619,68 @@ def main():
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # ── Dhan API indices ──────────────────────────────────────────────
-    print("\n=== BankNifty (Dhan API) ===")
-    bn = fetch_dhan_index("25", "BankNifty", FROM_DATE, TO_DATE)
-    if not bn.empty:
-        bn.to_csv(f"{DATA_DIR}/banknifty.csv", index=False)
-        print(f"  → Saved banknifty.csv  ({len(bn)} rows total)\n")
+    # ── Dhan API indices — incremental (only fetch since last CSV date) ──────
+    print("\n=== Dhan API indices (incremental) ===")
+    for sec_id, name, csv_file in [("25", "BankNifty", "banknifty.csv"),
+                                    ("13", "Nifty50",   "nifty50.csv")]:
+        path      = f"{DATA_DIR}/{csv_file}"
+        from_date = _last_csv_date(path) or FROM_DATE
+        if from_date >= TO_DATE:
+            print(f"  {name}: up to date (last row = {from_date})")
+            continue
+        df = fetch_dhan_index(sec_id, name, from_date, TO_DATE)
+        _merge_and_save(path, df)
+        if not df.empty:
+            total = len(pd.read_csv(path))
+            print(f"  → {csv_file}  (+{len(df)} new rows, {total} total)")
 
-    print("=== Nifty50 (Dhan API) ===")
-    nf = fetch_dhan_index("13", "Nifty50", FROM_DATE, TO_DATE)
-    if not nf.empty:
-        nf.to_csv(f"{DATA_DIR}/nifty50.csv", index=False)
-        print(f"  → Saved nifty50.csv  ({len(nf)} rows total)\n")
+    # ── Yahoo Finance — all tickers fetched in parallel, incremental ─────────
+    print("\n=== Yahoo Finance (parallel, incremental) ===")
+    yf_sources = [
+        ("^INDIAVIX", "India VIX",   "india_vix.csv"),
+        ("^GSPC",     "S&P 500",     "sp500.csv"),
+        ("^N225",     "Nikkei 225",  "nikkei.csv"),
+        ("ES=F",      "S&P Futures", "sp500_futures.csv"),
+        ("GC=F",      "Gold",        "gold.csv"),
+        ("CL=F",      "Crude",       "crude.csv"),
+        ("USDINR=X",  "USD/INR",     "usdinr.csv"),
+        ("DX-Y.NYB",  "DXY",         "dxy.csv"),
+        ("^TNX",      "US 10Y",      "us10y.csv"),
+    ]
 
-    # ── Yahoo Finance (international data) ───────────────────────────
-    print("=== India VIX (Yahoo Finance) ===")
-    vix = fetch_yfinance("^INDIAVIX", "India VIX", FROM_DATE, TO_DATE)
-    if not vix.empty:
-        vix.to_csv(f"{DATA_DIR}/india_vix.csv", index=False)
-        print(f"  → Saved india_vix.csv  ({len(vix)} rows total)\n")
+    def _update_yf(ticker, name, csv_file):
+        path      = f"{DATA_DIR}/{csv_file}"
+        from_date = _last_csv_date(path) or FROM_DATE
+        if from_date >= TO_DATE:
+            print(f"  {name}: up to date")
+            return
+        df = fetch_yfinance(ticker, name, from_date, TO_DATE)
+        _merge_and_save(path, df)
+        if not df.empty:
+            total = len(pd.read_csv(path))
+            print(f"  → {csv_file}  (+{len(df)} new rows, {total} total)")
 
-    print("=== S&P 500 (Yahoo Finance) ===")
-    sp500 = fetch_yfinance("^GSPC", "S&P500", FROM_DATE, TO_DATE)
-    if not sp500.empty:
-        sp500.to_csv(f"{DATA_DIR}/sp500.csv", index=False)
-        print(f"  → Saved sp500.csv  ({len(sp500)} rows total)\n")
+    with ThreadPoolExecutor(max_workers=len(yf_sources)) as pool:
+        futures = {pool.submit(_update_yf, t, n, f): n
+                   for t, n, f in yf_sources}
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"  {futures[fut]}: ERROR — {e}")
 
-    print("=== Nikkei 225 (Yahoo Finance) ===")
-    nikkei = fetch_yfinance("^N225", "Nikkei225", FROM_DATE, TO_DATE)
-    if not nikkei.empty:
-        nikkei.to_csv(f"{DATA_DIR}/nikkei.csv", index=False)
-        print(f"  → Saved nikkei.csv  ({len(nikkei)} rows total)\n")
-
-    print("=== S&P 500 Futures (Yahoo Finance) ===")
-    spf = fetch_yfinance("ES=F", "S&P Futures", FROM_DATE, TO_DATE)
-    if not spf.empty:
-        spf.to_csv(f"{DATA_DIR}/sp500_futures.csv", index=False)
-        print(f"  → Saved sp500_futures.csv  ({len(spf)} rows total)\n")
-
-    print("=== Gold Futures (Yahoo Finance) ===")
-    gold = fetch_gold(FROM_DATE, TO_DATE)
-    if not gold.empty:
-        gold.to_csv(f"{DATA_DIR}/gold.csv", index=False)
-        print(f"  → Saved gold.csv  ({len(gold)} rows total)\n")
-
-    print("=== Crude Oil Futures (Yahoo Finance) ===")
-    crude = fetch_crude(FROM_DATE, TO_DATE)
-    if not crude.empty:
-        crude.to_csv(f"{DATA_DIR}/crude.csv", index=False)
-        print(f"  → Saved crude.csv  ({len(crude)} rows total)\n")
-
-    print("=== USD/INR (Yahoo Finance) ===")
-    usdinr = fetch_usdinr(FROM_DATE, TO_DATE)
-    if not usdinr.empty:
-        usdinr.to_csv(f"{DATA_DIR}/usdinr.csv", index=False)
-        print(f"  → Saved usdinr.csv  ({len(usdinr)} rows total)\n")
-
-    print("=== US Dollar Index DXY (Yahoo Finance) ===")
-    dxy = fetch_dxy(FROM_DATE, TO_DATE)
-    if not dxy.empty:
-        dxy.to_csv(f"{DATA_DIR}/dxy.csv", index=False)
-        print(f"  → Saved dxy.csv  ({len(dxy)} rows total)\n")
-
-    print("=== US 10Y Treasury Yield (Yahoo Finance) ===")
-    us10y = fetch_us10y(FROM_DATE, TO_DATE)
-    if not us10y.empty:
-        us10y.to_csv(f"{DATA_DIR}/us10y.csv", index=False)
-        print(f"  → Saved us10y.csv  ({len(us10y)} rows total)\n")
-
-    # ── Live snapshots (today only — append to rolling CSVs) ─────────
-    print("=== FII/DII Net Flows (NSE live) ===")
+    # ── Live snapshots (today only) ──────────────────────────────────────────
+    print("\n=== FII/DII live snapshot ===")
     fetch_fii_today()
-    print()
 
-    print("=== PCR — BankNifty Put-Call Ratio (Dhan live) ===")
+    print("\n=== PCR live snapshot (BankNifty) ===")
     fetch_pcr_dhan_today()
-    print()
 
-    print("=== Historical ATM Option Premiums (Dhan rollingoption) ===")
-    fetch_rollingoption(FROM_DATE, TO_DATE)
-    print()
+    # NOTE: fetch_rollingoption (historical ATM option premiums) is intentionally
+    # NOT run here — it takes several minutes and is only needed for backtesting.
+    # Run manually: python3 data_fetcher.py --fetch-options
 
-    # ── Historical PCR/FII (inform user about manual steps) ──────────
-    print("=== Historical PCR (NSE bhavcopy — manual) ===")
-    fetch_nse_pcr(FROM_DATE, TO_DATE)
-    print()
-
-    print("=== Historical FII/DII (NSE manual) ===")
-    fetch_nse_fii_dii(FROM_DATE, TO_DATE)
-    print()
-
-    print("=== All data files saved to data/ folder ===")
+    print("\n=== All data files updated ===")
 
 
 if __name__ == "__main__":

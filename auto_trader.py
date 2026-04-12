@@ -221,12 +221,12 @@ def refresh_data_and_signal():
     try:
         r1 = subprocess.run(
             [sys.executable, "data_fetcher.py"],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=60
         )
         if r1.returncode != 0:
             notify.log(f"data_fetcher.py had errors:\n{r1.stderr[-200:]}")
     except subprocess.TimeoutExpired:
-        notify.log("data_fetcher.py timed out (120s) — continuing with existing data files")
+        notify.log("data_fetcher.py timed out (60s) — continuing with existing data files")
     except FileNotFoundError:
         notify.log("data_fetcher.py not found — continuing with existing data files")
     except Exception as e:
