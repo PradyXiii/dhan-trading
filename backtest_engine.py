@@ -702,7 +702,7 @@ def run_sl_tp_grid(trail_jump_opt=5):
 
     print(f"\n{'='*90}")
     print(f"  SL% × RR GRID  —  trail=₹{trail_jump_opt}, ranked by net P&L")
-    print(f"  Live config: SL=15%, flat RR=2.0×, trail=₹5  (TP=+30% of premium)")
+    print(f"  Live config: SL=15%, flat RR=2.5×, trail=₹5  (TP=+37.5% of premium)")
     print(f"{'='*90}")
     print(df.drop(columns=["net_pnl"]).to_string(index=True))
     print(f"{'='*90}")
