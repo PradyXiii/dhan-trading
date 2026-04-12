@@ -120,28 +120,41 @@ def _renew_token():
       2. Update TOKEN + HEADERS in-process (old token is dead)
       3. Persist new token to .env (so next cron run loads it)
     Called automatically at 9:15 AM after successful credential check.
+    Retries 3× with backoff; Telegram alert if all attempts fail.
     """
     global TOKEN, HEADERS
-    try:
-        resp = requests.get(
-            "https://api.dhan.co/v2/RenewToken",
-            headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            new_token = resp.json().get("token")
-            if new_token and new_token != TOKEN:
-                TOKEN = new_token
-                HEADERS["access-token"] = new_token
-                _update_env_token(new_token)
-                notify.log("Token renewed ✓  (new token active, .env updated)")
-            else:
-                notify.log("Token renewal: 200 but no new token returned — existing token active")
-        else:
-            notify.log(f"Token renewal: HTTP {resp.status_code} — existing token remains active")
-            notify.log(f"Token renewal: {resp.status_code} — token remains valid for today")
-    except Exception as e:
-        notify.log(f"Token renewal skipped ({e}) — proceeding with existing token")
+    MAX_RETRIES = 3
+    last_err    = ""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                "https://api.dhan.co/v2/RenewToken",
+                headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                new_token = resp.json().get("token")
+                if new_token and new_token != TOKEN:
+                    TOKEN = new_token
+                    HEADERS["access-token"] = new_token
+                    _update_env_token(new_token)
+                    notify.log("Token renewed ✓  (new token active, .env updated)")
+                else:
+                    notify.log("Token renewal: 200 — no new token issued, existing token active")
+                return   # success
+            last_err = f"HTTP {resp.status_code}: {resp.text[:80]}"
+        except Exception as e:
+            last_err = str(e)
+        if attempt < MAX_RETRIES:
+            time.sleep(2 ** attempt)   # 2s, 4s backoff
+
+    # All retries failed — alert but don't block the trade (token may still be valid)
+    notify.send(
+        f"⚠️ Token renewal failed after {MAX_RETRIES} attempts — {last_err}\n"
+        f"Today's trade will proceed with existing token. "
+        f"If token is about to expire, regenerate manually at dhan.co."
+    )
+    notify.log(f"Token renewal failed ({last_err}) — proceeding with existing token")
 
 
 def check_credentials():

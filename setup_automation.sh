@@ -86,6 +86,11 @@ echo "[5] Installing cron job (9:15 AM IST = 3:45 AM UTC, Mon–Fri)..."
 CRON_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
 CRON_COMMENT="# BankNifty Auto Trader — runs at 9:15 AM IST"
 
+# Daily token renewer — 8:00 AM IST = 2:30 AM UTC, EVERY DAY including weekends
+# Keeps token alive over weekends (evolver+trader only run Mon-Fri, token expires Sat night otherwise)
+RENEWER_CMD="30 2 * * * cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
+RENEWER_COMMENT="# Token renewer — daily 8 AM IST (incl. weekends) — safety net for Mon 9:15 AM"
+
 # Monthly lot/expiry scanner — 1st of month at 10 AM IST = 4:30 AM UTC
 SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
 SCANNER_COMMENT="# BankNifty lot/expiry scanner — runs 1st of month 10 AM IST"
@@ -94,11 +99,13 @@ SCANNER_COMMENT="# BankNifty lot/expiry scanner — runs 1st of month 10 AM IST"
 EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DIR/evolver.log 2>&1"
 EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 
-# Remove old entries (auto_trader + scanner + evolver) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver")
+# Remove old entries (auto_trader + scanner + evolver + renewer) if any
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
+$RENEWER_COMMENT
+$RENEWER_CMD
 $CRON_COMMENT
 $CRON_CMD
 $SCANNER_COMMENT
@@ -125,14 +132,18 @@ echo ""
 echo "════════════════════════════════════════════════"
 echo "  Setup complete!"
 echo ""
-echo "  The cron job will run at 9:15 AM IST every weekday."
-echo "  Logs saved to: $LOG_DIR/auto_trader.log"
+echo "  Token renewer  : 8:00 AM IST every day (incl. weekends)"
+echo "  Renewer log    : $LOG_DIR/renew_token.log"
 echo ""
-echo "  ML Model Evolver runs at 11 PM IST every weekday."
-echo "  Evolver log: $LOG_DIR/evolver.log"
+echo "  Auto trader    : 9:15 AM IST every weekday (Mon–Fri)"
+echo "  Trader log     : $LOG_DIR/auto_trader.log"
 echo ""
-echo "  To watch the log live:  tail -f $LOG_DIR/auto_trader.log"
-echo "  To test manually now:   python3 auto_trader.py --dry-run"
-echo "  To force a live trade:  python3 auto_trader.py"
-echo "  To run evolver now:     python3 model_evolver.py --no-data"
+echo "  ML Evolver     : 11:00 PM IST every weekday (Mon–Fri)"
+echo "  Evolver log    : $LOG_DIR/evolver.log"
+echo ""
+echo "  To watch the log live:     tail -f $LOG_DIR/auto_trader.log"
+echo "  To test manually now:      python3 auto_trader.py --dry-run"
+echo "  To force a live trade:     python3 auto_trader.py"
+echo "  To run evolver now:        python3 model_evolver.py --no-data"
+echo "  To test token renewal:     python3 renew_token.py"
 echo "════════════════════════════════════════════════"
