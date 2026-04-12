@@ -15,6 +15,7 @@ data/
 portfolio_tracker.py
 refresh_token.py
 test_order.py
+validate_token_renewal.py
 logs/
 
 # GAS morning brief scripts — never committed (contain private prompts/logic)
