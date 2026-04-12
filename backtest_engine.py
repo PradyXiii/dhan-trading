@@ -369,6 +369,8 @@ def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
         lots_r = floor(capital * RISK_PCT / loss_1lot)
         lots_m = floor(capital * 0.85    / marg_1lot)
         lots   = min(MAX_LOTS, lots_r, lots_m)
+        if lots < 1 and lots_m >= 1:
+            lots = 1   # minimum floor: always trade 1 lot if physically affordable
         if lots >= 1:
             if dist == 0:
                 atm_result = (0, premium, lots, delta)
@@ -390,6 +392,8 @@ def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
         lots_r = floor(capital * RISK_PCT / loss_1lot)
         lots_m = floor(capital * 0.85    / marg_1lot)
         lots   = min(MAX_LOTS, lots_r, lots_m)
+        if lots < 1 and lots_m >= 1:
+            lots = 1   # minimum floor: always trade 1 lot if physically affordable
         if lots >= 1:
             return (-itm, premium, lots, delta)
 

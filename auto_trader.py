@@ -483,6 +483,8 @@ def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
         lots_by_risk   = floor(capital * RISK_PCT / loss_per_lot)
         lots_by_margin = floor(capital * 0.85    / margin_per_lot)
         lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+        if lots < 1 and lots_by_margin >= 1:
+            lots = 1   # minimum floor: always trade 1 lot if physically affordable
         return (str(sid), float(strike), ltp, int(lots)) if lots >= 1 else None
 
     # ── Phase 1: find cheapest acceptable strike (ATM → OTM) ─────────────────
@@ -598,6 +600,8 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
         lots_by_risk   = floor(capital * RISK_PCT / loss_per_lot) if loss_per_lot > 0 else 0
         lots_by_margin = floor(capital * 0.85    / margin_per_lot) if margin_per_lot > 0 else 0
         lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+        if lots < 1 and lots_by_margin >= 1:
+            lots = 1   # minimum floor: always trade 1 lot if physically affordable
 
         notify.log(f"DRY_RUN fallback: ATM {atm_strike} {opt_type} ≈ ₹{approx_premium:.0f} "
                    f"→ {lots} lots (approx)")
