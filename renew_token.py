@@ -13,8 +13,12 @@ Why weekends matter:
   Without this script, Monday 9:15 AM would hit a 34-hour-stale expired token
   and die with 401 before the trade.
 
-Cron (8:00 AM IST = 2:30 AM UTC, every day):
-  30 2 * * * cd /path/to/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
+Cron (7:55 AM IST = 2:25 AM UTC, every day):
+  25 2 * * * cd /path/to/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
+
+Why 7:55 and not 8:00: the token is renewed at the previous day's 7:55 AM run, making it
+expire at 7:55 AM today. Firing at exactly 8:00 AM could hit Dhan's server after expiry.
+The 5-minute buffer ensures the token is still alive when the renewal call is made.
 """
 
 import os
