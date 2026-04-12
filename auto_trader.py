@@ -30,7 +30,7 @@ import atexit
 import subprocess
 import requests
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from math import floor, sqrt
 from dotenv import load_dotenv
 
