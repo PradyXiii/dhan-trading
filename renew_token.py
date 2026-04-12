@@ -41,11 +41,18 @@ ENV_PATH  = os.path.join(BASE_DIR, ".env")
 META_PATH = os.path.join(BASE_DIR, "token_meta.json")
 
 RENEWAL_INTERVAL = timedelta(hours=23, minutes=50)   # renew 10 min before expiry
+IST_OFFSET       = timedelta(hours=5, minutes=30)
 MAX_RETRIES      = 3
 
 import notify
 
-_ts = datetime.now().strftime("%H:%M:%S IST")
+def _ist_now():
+    """Return current time in IST (UTC+5:30) as a formatted string."""
+    return (datetime.utcnow() + IST_OFFSET).strftime("%H:%M:%S IST")
+
+def _to_ist_display(dt):
+    """Convert a UTC datetime to IST display string for logs."""
+    return (dt + IST_OFFSET).strftime("%d %b %H:%M")
 
 
 def _read_last_renewed():
@@ -87,10 +94,10 @@ def _update_env_token(new_token: str):
 if not TOKEN or not CLIENT_ID:
     msg = "🚨 Token renewer: credentials missing from .env — manual action needed"
     notify.send(msg)
-    print(f"[{_ts}] {msg}")
+    print(f"[{_ist_now()}] {msg}")
     sys.exit(1)
 
-now          = datetime.now()
+now          = datetime.utcnow()   # UTC — consistent with token_meta.json
 last_renewed = _read_last_renewed()
 
 if last_renewed is not None:
@@ -98,8 +105,8 @@ if last_renewed is not None:
     remaining = RENEWAL_INTERVAL - elapsed
     if remaining.total_seconds() > 0:
         mins_left = int(remaining.total_seconds() / 60)
-        print(f"[{_ts}] Not due — {mins_left} min until next renewal "
-              f"(last: {last_renewed.strftime('%d %b %H:%M')})")
+        print(f"[{_ist_now()}] Not due — {mins_left} min until next renewal "
+              f"(last: {_to_ist_display(last_renewed)})")
         sys.exit(0)
     # else: overdue → fall through and renew
 
@@ -120,24 +127,23 @@ for attempt in range(1, MAX_RETRIES + 1):
             if new_token and new_token != TOKEN:
                 _update_env_token(new_token)
                 _write_last_renewed(now)
-                print(f"[{_ts}] Token renewed ✓  (attempt {attempt}/{MAX_RETRIES}  "
+                print(f"[{_ist_now()}] Token renewed ✓  (attempt {attempt}/{MAX_RETRIES}  "
                       f".env + token_meta.json updated  next renewal in 23h50m)")
             else:
-                # 200 but same token — still valid, reset the clock anyway
                 _write_last_renewed(now)
-                print(f"[{_ts}] Token renewal 200 — no new token issued (still valid, clock reset)")
+                print(f"[{_ist_now()}] Token renewal 200 — no new token issued (still valid, clock reset)")
             sys.exit(0)
 
         last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
-        print(f"[{_ts}] Attempt {attempt}/{MAX_RETRIES} failed — {last_error}")
+        print(f"[{_ist_now()}] Attempt {attempt}/{MAX_RETRIES} failed — {last_error}")
 
     except Exception as e:
         last_error = str(e)
-        print(f"[{_ts}] Attempt {attempt}/{MAX_RETRIES} exception — {last_error}")
+        print(f"[{_ist_now()}] Attempt {attempt}/{MAX_RETRIES} exception — {last_error}")
 
     if attempt < MAX_RETRIES:
         backoff = 2 ** attempt
-        print(f"[{_ts}] Retrying in {backoff}s...")
+        print(f"[{_ist_now()}] Retrying in {backoff}s...")
         time.sleep(backoff)
 
 # ── All retries exhausted ─────────────────────────────────────────────────────
@@ -148,5 +154,5 @@ msg = (
     f"then update DHAN_ACCESS_TOKEN in .env on the VM."
 )
 notify.send(msg)
-print(f"[{_ts}] {msg}")
+print(f"[{_ist_now()}] {msg}")
 sys.exit(1)
