@@ -49,13 +49,14 @@ for _i, _a in enumerate(sys.argv):
 
 def _renew_token():
     """
-    Extend the current Dhan token by 24 hours at 11 PM before the evolver runs.
-    Ensures the 9:15 AM auto_trader.py run tomorrow has a valid token.
-    PUT /v2/RenewToken — only works on active (non-expired) tokens.
+    Renew the Dhan token at 11 PM. GET /v2/RenewToken returns a BRAND NEW token
+    that immediately invalidates the old one.
+    Writes new token to .env so 9:15 AM auto_trader.py picks it up fresh.
     """
     import requests as _req
     from dotenv import load_dotenv as _lde
     import os as _os
+    import re as _re
     _lde()
     token     = _os.getenv("DHAN_ACCESS_TOKEN", "")
     client_id = _os.getenv("DHAN_CLIENT_ID",    "")
@@ -69,9 +70,27 @@ def _renew_token():
             timeout=10,
         )
         if resp.status_code == 200:
-            print("  Token auto-renewed for another 24h ✓")
+            new_token = resp.json().get("token")
+            if new_token and new_token != token:
+                env_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".env")
+                if _os.path.exists(env_path):
+                    with open(env_path, "r") as f:
+                        content = f.read()
+                    new_content = _re.sub(
+                        r"^DHAN_ACCESS_TOKEN=.*$",
+                        f"DHAN_ACCESS_TOKEN={new_token}",
+                        content,
+                        flags=_re.MULTILINE,
+                    )
+                    with open(env_path, "w") as f:
+                        f.write(new_content)
+                    print("  Token renewed ✓  (.env updated — 9:15 AM run will use new token)")
+                else:
+                    print("  Token renewed but .env not found — update DHAN_ACCESS_TOKEN manually")
+            else:
+                print("  Token renewal: 200 but no new token in response")
         else:
-            print(f"  Token renewal: {resp.status_code} — token still valid for today")
+            print(f"  Token renewal: HTTP {resp.status_code} — existing token remains active")
     except Exception as e:
         print(f"  Token renewal skipped ({e})")
 

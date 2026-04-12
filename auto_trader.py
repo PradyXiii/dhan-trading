@@ -91,13 +91,37 @@ def die(msg: str):
     sys.exit(1)
 
 
+def _update_env_token(new_token: str) -> None:
+    """Rewrite DHAN_ACCESS_TOKEN in .env with the newly issued token."""
+    import re as _re
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r") as f:
+            content = f.read()
+        new_content = _re.sub(
+            r"^DHAN_ACCESS_TOKEN=.*$",
+            f"DHAN_ACCESS_TOKEN={new_token}",
+            content,
+            flags=_re.MULTILINE,
+        )
+        with open(env_path, "w") as f:
+            f.write(new_content)
+    except Exception as e:
+        notify.log(f"Warning: could not write new token to .env — {e}")
+
+
 def _renew_token():
     """
-    Extend the current valid Dhan token by another 24 hours.
-    PUT /v2/RenewToken — only works on active (non-expired) tokens.
-    Uses 'dhanClientId' header (not 'client-id' per Dhan v2 docs).
-    Called automatically after every successful credential check at 9:15 AM.
+    Renew the Dhan token. GET /v2/RenewToken returns a BRAND NEW token that
+    immediately invalidates the old one. Must:
+      1. Extract new token from response["token"]
+      2. Update TOKEN + HEADERS in-process (old token is dead)
+      3. Persist new token to .env (so next cron run loads it)
+    Called automatically at 9:15 AM after successful credential check.
     """
+    global TOKEN, HEADERS
     try:
         resp = requests.get(
             "https://api.dhan.co/v2/RenewToken",
@@ -105,8 +129,16 @@ def _renew_token():
             timeout=10,
         )
         if resp.status_code == 200:
-            notify.log("Token auto-renewed for another 24h ✓")
+            new_token = resp.json().get("token")
+            if new_token and new_token != TOKEN:
+                TOKEN = new_token
+                HEADERS["access-token"] = new_token
+                _update_env_token(new_token)
+                notify.log("Token renewed ✓  (new token active, .env updated)")
+            else:
+                notify.log("Token renewal: 200 but no new token returned — existing token active")
         else:
+            notify.log(f"Token renewal: HTTP {resp.status_code} — existing token remains active")
             notify.log(f"Token renewal: {resp.status_code} — token remains valid for today")
     except Exception as e:
         notify.log(f"Token renewal skipped ({e}) — proceeding with existing token")

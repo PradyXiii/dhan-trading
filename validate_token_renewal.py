@@ -65,39 +65,58 @@ else:
     print(f"  ? Unexpected status: HTTP {r1.status_code}  body: {r1.text[:200]}")
 
 # ── Step 2: call RenewToken ───────────────────────────────────
-print("\n[2/3] Calling PUT /v2/RenewToken...")
+print("\n[2/3] Calling GET /v2/RenewToken...")
 r2 = requests.get(
     "https://api.dhan.co/v2/RenewToken",
     headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
     timeout=10,
 )
 print(f"  HTTP status  : {r2.status_code}")
-print(f"  Response body: {r2.text or '(empty)'}")
+
+# Track the active token — may change after renewal
+active_token = TOKEN
+new_expiry   = None
 
 if r2.status_code == 200:
     try:
-        body = r2.json()
-        # If Dhan returns a new token value or expiry, surface it
-        new_token  = body.get("accessToken") or body.get("access_token") or body.get("token")
-        new_expiry = body.get("expiresAt") or body.get("expires_at") or body.get("tokenValidTill")
-        if new_token:
-            print(f"\n  ⚡ NEW TOKEN in response: {_token_fingerprint(new_token)}")
-            print(f"     (Update DHAN_ACCESS_TOKEN in .env with the new value)")
-        if new_expiry:
-            print(f"  ⏰  Expires at: {new_expiry}")
-        if not new_token and not new_expiry:
-            print("  ✓ Renewal acknowledged — same token extended by 24h")
-            print("     (Dhan extends the existing token; no new token string returned)")
-    except Exception:
-        print("  ✓ Renewal acknowledged (non-JSON response)")
+        body      = r2.json()
+        new_token = body.get("token")
+        new_expiry = body.get("expiryTime") or body.get("expiresAt") or body.get("expires_at")
+
+        if new_token and new_token != TOKEN:
+            print(f"\n  ⚡ NEW TOKEN issued: {_token_fingerprint(new_token)}")
+            print(f"  ⏰  Expires at: {new_expiry or 'see response body'}")
+            print(f"\n  Auto-updating .env with new token...")
+            import re as _re
+            env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+            if os.path.exists(env_path):
+                with open(env_path, "r") as f:
+                    content = f.read()
+                new_content = _re.sub(
+                    r"^DHAN_ACCESS_TOKEN=.*$",
+                    f"DHAN_ACCESS_TOKEN={new_token}",
+                    content,
+                    flags=_re.MULTILINE,
+                )
+                with open(env_path, "w") as f:
+                    f.write(new_content)
+                print(f"  ✓ .env updated — old token invalidated, new token persisted")
+                active_token = new_token   # use new token for step 3
+            else:
+                print(f"  ✗ .env not found at {env_path} — update DHAN_ACCESS_TOKEN manually")
+        else:
+            print(f"  ✓ Renewal 200 (no new token in response)")
+    except Exception as e:
+        print(f"  ✓ Renewal 200 (could not parse response: {e})")
 else:
+    print(f"  Response body: {r2.text[:300]}")
     print(f"  ✗ Renewal FAILED — check token and CLIENT_ID in .env")
 
-# ── Step 3: confirm token still works after renewal ───────────
-print("\n[3/3] Confirming token still valid after renewal (GET /v2/fundlimit)...")
+# ── Step 3: confirm NEW token works ──────────────────────────
+print("\n[3/3] Confirming NEW token is valid (GET /v2/fundlimit)...")
 r3 = requests.get(
     "https://api.dhan.co/v2/fundlimit",
-    headers={"access-token": TOKEN, "client-id": CLIENT_ID,
+    headers={"access-token": active_token, "client-id": CLIENT_ID,
              "Content-Type": "application/json"},
     timeout=10,
 )
