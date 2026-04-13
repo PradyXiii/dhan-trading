@@ -1,6 +1,6 @@
 # Refresh Dhan API Docs
 
-Fetch the latest Dhan API v2 documentation, update `docs/dhan_api_v2.md`, then cross-check all code files for inaccuracies.
+Fetch the latest Dhan API v2 documentation, update `docs/DHAN_API_V2_REFERENCE.md`, then cross-check all code files for inaccuracies.
 
 ## Steps
 
@@ -25,7 +25,7 @@ https://dhanhq.co/docs/v2/live-order-update/
 https://dhanhq.co/docs/v2/annexure/
 ```
 
-### 2. Update docs/dhan_api_v2.md
+### 2. Update docs/DHAN_API_V2_REFERENCE.md
 
 Rewrite the file with everything from the live docs — endpoints, parameters, response fields, error codes, constraints, release notes. Nothing omitted.
 
