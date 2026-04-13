@@ -2,25 +2,27 @@
 """
 renew_token.py
 ──────────────
-Dynamic token renewal — runs every 5 minutes via cron, renews when 23h50m
+Dynamic token renewal — runs once daily via cron, renews when 23h50m
 have elapsed since the last renewal (10-minute buffer before 24h expiry).
+@reboot entry handles VM restarts that occur during the renewal window.
 
-Why dynamic instead of fixed cron time:
-  A fixed daily cron (e.g. 7:55 AM) creates an exact 24h gap when the
-  previous run was also at 7:55 AM (weekends). Storing the last renewal
-  timestamp and always renewing at T + 23h50m guarantees the gap is
-  always 23h50m–23h55m, never 24h.
+Why once daily instead of polling every 5 minutes:
+  Polling 288×/day wastes CPU credits on burstable VMs (e2-micro/small).
+  A daily cron at 7:55 AM IST fires once; the internal 23h50m check still
+  guarantees the token never expires even if a run is slightly delayed.
+  The @reboot entry covers the edge case of the VM being down at renewal time.
 
 How it works:
   1. Reads token_meta.json for last_renewed_at timestamp
   2. If now < last_renewed_at + 23h50m  → exits silently (not due yet)
   3. If now >= last_renewed_at + 23h50m → renews token, updates token_meta.json
-  4. All three components that renew tokens (renew_token.py, auto_trader.py,
-     model_evolver.py) write the same token_meta.json, so the clock always
-     resets from whoever renewed last.
+  4. All three components that write token_meta.json (renew_token.py,
+     auto_trader.py, model_evolver.py) share the same clock — whoever
+     renewed last resets the 23h50m countdown.
 
-Cron (every 5 minutes, every day):
-  */5 * * * * cd /path/to/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
+Cron (once daily 7:55 AM IST = 2:25 AM UTC, plus @reboot safety net):
+  25 2 * * *  cd ~/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
+  @reboot     sleep 30 && cd ~/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
 """
 
 import os
@@ -72,7 +74,7 @@ def _write_last_renewed(ts: datetime):
         with open(META_PATH, "w") as f:
             json.dump({"last_renewed_at": ts.isoformat()}, f, indent=2)
     except Exception as e:
-        print(f"[{_ts}] Warning: could not write token_meta.json — {e}")
+        print(f"[{_ist_now()}] Warning: could not write token_meta.json — {e}")
 
 
 def _update_env_token(new_token: str):
