@@ -1,449 +1,334 @@
-# DHAN API v2 — COMPLETE REFERENCE
-*Source: https://dhanhq.co/docs/v2/ | Compiled April 2026*
+# Dhan API v2 — Complete Reference
+*Source: dhanhq.co/docs/v2 + DhanHQ-py SDK | Updated April 2026*
 
 ---
 
-## TABLE OF CONTENTS
-1. [Introduction](#introduction)
-2. [Authentication](#authentication)
-3. [Orders](#orders)
-4. [Super Order](#super-order)
-5. [Historical Data](#historical-data)
-6. [Expired Options Data](#expired-options-data)
-7. [Option Chain](#option-chain)
-8. [Market Quote](#market-quote)
-9. [Annexure](#annexure)
+## Base URL & Auth Headers
+
+```
+Base URL:  https://api.dhan.co/v2
+
+Headers (all REST calls):
+  access-token:   <your_access_token>
+  client-id:      <your_client_id>
+  Content-Type:   application/json
+```
+
+`dhanClientId` must also be included in every POST/PUT request body.
 
 ---
 
-## INTRODUCTION
+## Rate Limits
 
-DhanHQ API is a REST-based platform for building trading and investment services. All requests accept JSON. Responses are JSON. Auth via access token in header.
-
-**Base URL:** `https://api.dhan.co/v2/`
-
-**Standard request format:**
-```
-curl --request POST \
-  --url https://api.dhan.co/v2/ \
-  --header 'Content-Type: application/json' \
-  --header 'access-token: JWT' \
-  --data '{Request JSON}'
-```
-
-**Python SDK install:**
-```bash
-pip install dhanhq
-```
-```python
-from dhanhq import dhanhq
-dhan = dhanhq("client_id", "access_token")
-```
-
-### Error Response Structure
-```json
-{
-  "errorType": "",
-  "errorCode": "",
-  "errorMessage": ""
-}
-```
-
-### Rate Limits
-
-| | Order APIs | Data APIs | Quote APIs | Non-Trading APIs |
+| API Group | Per Second | Per Minute | Per Hour | Per Day |
 |---|---|---|---|---|
-| Per second | 10 | 5 | 1 | 20 |
-| Per minute | 250 | — | Unlimited | Unlimited |
-| Per hour | 1000 | — | Unlimited | Unlimited |
-| Per day | 7000 | 100,000 | Unlimited | Unlimited |
+| Order APIs | 10 | 250 | 1,000 | 7,000 |
+| Data APIs | 5 | — | — | 100,000 |
+| Quote APIs | 1 | Unlimited | Unlimited | Unlimited |
+| Non-Trading | 20 | Unlimited | Unlimited | Unlimited |
+| Option Chain | 1 per 3 seconds | — | — | — |
 
 Order modifications capped at 25 per order.
 
 ---
 
-## AUTHENTICATION
+## Authentication
 
-### Individual Traders — Two Methods
-
-#### Method 1: Access Token (Manual)
-- Login to web.dhan.co → My Profile → Access DhanHQ APIs → Generate Access Token
+### Individual Trader — Manual Token
+- Login → web.dhan.co → My Profile → Access DhanHQ APIs → Generate Access Token
 - Valid for **24 hours**
-- Can include Postback URL for order updates
 
-#### Generate Token via API (requires TOTP enabled)
+### Renew Token (extends active token by 24h)
 ```
-POST https://auth.dhan.co/app/generateAccessToken?dhanClientId=1000000001&pin=111111&totp=000000
+GET https://api.dhan.co/v2/RenewToken
+Headers: access-token, dhanClientId
 ```
+Only works on non-expired tokens. Returns new token.
 
-**Query Parameters:**
-| Field | Description |
-|---|---|
-| dhanClientId | Your Dhan Client ID |
-| pin | 6-digit Dhan PIN |
-| totp | 6-digit TOTP code (from authenticator) |
-
-**Response:**
-```json
-{
-  "dhanClientId": "1000000401",
-  "dhanClientName": "JOHN DOE",
-  "dhanClientUcc": "ABCD12345E",
-  "givenPowerOfAttorney": false,
-  "accessToken": "eyJ...",
-  "expiryTime": "2026-01-01T00:00:00.000"
-}
+### Generate Token via API (requires TOTP)
+```
+POST https://auth.dhan.co/app/generateAccessToken
+Query params: dhanClientId, pin, totp
 ```
 
-#### Renew Token (extends by 24 hours)
-```
-curl --location 'https://api.dhan.co/v2/RenewToken' \
-  --header 'access-token: {JWT Token}' \
-  --header 'dhanClientId: {Client ID}'
-```
-Note: Only works on active (non-expired) tokens.
+### OAuth Flow (App/API Key — 12 months)
+1. `POST https://auth.dhan.co/app/generate-consent?client_id={id}` → `consentAppId`
+2. Browser: `https://auth.dhan.co/login/consentApp-login?consentAppId={id}` → redirects with `tokenId`
+3. `GET https://auth.dhan.co/app/consumeApp-consent?tokenId={id}` → `accessToken`
 
----
-
-#### Method 2: API Key & Secret (OAuth flow — 3 steps)
-API key valid for **12 months**. Still requires browser-based login in Step 2.
-
-**Step 1 — Generate Consent:**
-```
-POST https://auth.dhan.co/app/generate-consent?client_id={dhanClientId}
-Headers: app_id, app_secret
-```
-Response: `consentAppId`
-
-**Step 2 — Browser Login:**
-```
-https://auth.dhan.co/login/consentApp-login?consentAppId={consentAppId}
-```
-Redirects to your URL with `tokenId` appended.
-
-**Step 3 — Consume Consent:**
-```
-GET https://auth.dhan.co/app/consumeApp-consent?tokenId={Token ID}
-Headers: app_id, app_secret
-```
-Response: `accessToken` (same structure as above)
-
----
-
-### Static IP Setup
-Mandatory for **Order Placement APIs only** (not required for Data APIs).
-- Set primary + secondary IP
-- Cannot modify for 7 days after setting
-- IPv4 and IPv6 supported
-
-```
-POST https://api.dhan.co/v2/ip/setIP
-Body: { "dhanClientId": "...", "ip": "10.x.x.x", "ipFlag": "PRIMARY" }
-```
-
-```
-PUT  https://api.dhan.co/v2/ip/modifyIP
-GET  https://api.dhan.co/v2/ip/getIP
-```
-
----
-
-### Setup TOTP
-1. Dhan Web → DhanHQ Trading APIs → Setup TOTP
-2. Scan QR or enter secret into authenticator app
-3. Confirm with first TOTP code
-
-TOTP = 6-digit code generated every 30 seconds from shared secret (RFC 6238).
-
----
-
-### User Profile (Token Validation)
+### Token Validity Check
 ```
 GET https://api.dhan.co/v2/profile
-Header: access-token: {JWT}
 ```
+Response: `dhanClientId`, `tokenValidity`, `activeSegment`, `ddpi`, `mtf`, `dataPlan`, `dataValidity`
 
-**Response:**
-```json
-{
-  "dhanClientId": "1100003626",
-  "tokenValidity": "30/03/2025 15:37",
-  "activeSegment": "Equity, Derivative, Currency, Commodity",
-  "ddpi": "Active",
-  "mtf": "Active",
-  "dataPlan": "Active",
-  "dataValidity": "2024-12-05 09:37:52.0"
-}
+### Static IP (mandatory for order APIs from Apr 1 2026)
+```
+POST  /ip/setIP      body: { "ip": "x.x.x.x", "ipFlag": "PRIMARY"|"SECONDARY" }
+PUT   /ip/modifyIP   (cannot modify within 7 days of last set)
+GET   /ip/getIP
 ```
 
 ---
 
-## ORDERS
+## Orders
 
-**Static IP required for all order placement, modification, cancellation.**
-**Effective Mar 21 2026:** Market orders converted to LIMIT with MPP. Rate limit 10/sec.
-**Effective Apr 1 2026:** All order API calls must come from whitelisted static IP.
+**From Apr 1 2026:** All order placement/modification/cancellation must come from whitelisted static IP.
+**From Mar 21 2026:** Market orders converted to LIMIT with MPP. Rate limit 10/sec.
 
 | Method | Endpoint | Action |
 |---|---|---|
-| POST | /orders | Place new order |
+| POST | /orders | Place order |
 | PUT | /orders/{order-id} | Modify pending order |
 | DELETE | /orders/{order-id} | Cancel pending order |
-| POST | /orders/slicing | Slice order over freeze limit |
-| GET | /orders | All orders for the day |
-| GET | /orders/{order-id} | Status of specific order |
-| GET | /orders/external/{correlation-id} | Status by correlation ID |
-| GET | /trades | All trades for the day |
-| GET | /trades/{order-id} | Trades for specific order |
+| POST | /orders/slicing | Place slice order (large qty) |
+| GET | /orders | All orders today |
+| GET | /orders/{order-id} | Single order status |
+| GET | /orders/external/{correlation-id} | Order by correlation ID |
+| GET | /trades | All trades today |
+| GET | /trades/{order-id} | Trades for one order |
+| GET | /trades/{from}/{to}/{page} | Paginated trade history |
 
-### Order Placement
-```
-POST https://api.dhan.co/v2/orders
-```
+### Place Order — POST /orders
 
-**Request:**
+**Request body:**
 ```json
 {
-  "dhanClientId": "1000000003",
-  "correlationId": "123abc678",
-  "transactionType": "BUY",
-  "exchangeSegment": "NSE_FNO",
-  "productType": "INTRADAY",
-  "orderType": "LIMIT",
-  "validity": "DAY",
-  "securityId": "11536",
-  "quantity": 1,
-  "price": 150.0,
-  "triggerPrice": "",
-  "afterMarketOrder": false,
-  "amoTime": ""
+  "dhanClientId":      "string",
+  "correlationId":     "string",
+  "transactionType":   "BUY|SELL",
+  "exchangeSegment":   "NSE_FNO|NSE_EQ|BSE_EQ|...",
+  "productType":       "CNC|INTRADAY|MARGIN|MTF",
+  "orderType":         "LIMIT|MARKET|STOP_LOSS|STOP_LOSS_MARKET",
+  "validity":          "DAY|IOC",
+  "securityId":        "string",
+  "quantity":          0,
+  "disclosedQuantity": 0,
+  "price":             0.0,
+  "triggerPrice":      0.0,
+  "afterMarketOrder":  false,
+  "amoTime":           "OPEN|OPEN_30|OPEN_60"
 }
 ```
 
-**Key Parameters:**
-| Field | Values |
-|---|---|
-| transactionType | `BUY`, `SELL` |
-| productType | `CNC`, `INTRADAY`, `MARGIN`, `MTF` |
-| orderType | `LIMIT`, `MARKET`, `STOP_LOSS`, `STOP_LOSS_MARKET` |
-| validity | `DAY`, `IOC` |
-| amoTime | `PRE_OPEN`, `OPEN`, `OPEN_30`, `OPEN_60` (only if afterMarketOrder=true) |
+- `amoTime` only required when `afterMarketOrder: true`. Must be one of the 3 values above.
+- `correlationId` is optional (your own tag for tracking)
 
-**Response:** `{ "orderId": "112111182198", "orderStatus": "PENDING" }`
+**Response:** `{ "orderId": "string", "orderStatus": "TRANSIT" }`
 
-### Order Modification
-```
-PUT https://api.dhan.co/v2/orders/{order-id}
-```
-Can modify: price, quantity, orderType, validity. Pass only fields to change plus required dhanClientId and orderId.
+### Order Status Values
+`TRANSIT` → `PENDING` → `PART_TRADED` → `TRADED`
+Also: `REJECTED`, `CANCELLED`, `EXPIRED`
+Super Order only: `CLOSED` (both entry and exit placed), `TRIGGERED` (SL or TP leg hit)
 
-### Order Cancellation
+### Modify Order — PUT /orders/{order-id}
+```json
+{
+  "orderId": "string",
+  "orderType": "LIMIT|MARKET|STOP_LOSS|STOP_LOSS_MARKET",
+  "legName": "ENTRY_LEG|TARGET_LEG|STOP_LOSS_LEG",
+  "quantity": 0,
+  "price": 0.0,
+  "disclosedQuantity": 0,
+  "triggerPrice": 0.0,
+  "validity": "DAY|IOC"
+}
 ```
-DELETE https://api.dhan.co/v2/orders/{order-id}
-```
-No request body. Returns `202 Accepted` on success.
+Can only modify when status is `PENDING` or `PART_TRADED`.
 
-### Order Slicing
-```
-POST https://api.dhan.co/v2/orders/slicing
-```
-Same body as Order Placement. Use when quantity exceeds exchange freeze limit. Dhan splits into multiple orders automatically.
-
-### Order Book
-```
-GET https://api.dhan.co/v2/orders
-```
-Returns all orders for the current trading day including status, filled qty, traded price.
-
-### Trade Book
-```
-GET https://api.dhan.co/v2/trades
-GET https://api.dhan.co/v2/trades/{order-id}
-```
-Returns executed trades. Per-order version gives fill details for a specific order.
-
-Order Status values: `TRANSIT`, `PENDING`, `PART_TRADED`, `TRADED`, `REJECTED`, `CANCELLED`, `EXPIRED`
+### Trade Book — GET /trades/{from}/{to}/{page}
+Paginated. Includes cost breakdown fields: `sebiTax`, `stt`, `brokerageCharges`, `serviceTax`, `exchangeTransactionCharges`, `stampDuty`.
 
 ---
 
-## SUPER ORDER
+## Super Orders
 
-Entry + Target + Stop Loss in a single API call. Supports all segments. Optional trailing stop loss.
+Entry + Target + Stop-Loss in a single API call. Trailing SL supported.
 
 | Method | Endpoint | Action |
 |---|---|---|
 | POST | /super/orders | Create super order |
-| PUT | /super/orders/{order-id} | Modify super order leg |
-| DELETE | /super/orders/{order-id}/{order-leg} | Cancel order leg |
-| GET | /super/orders | List all super orders |
+| PUT | /super/orders/{order-id} | Modify a leg |
+| DELETE | /super/orders/{order-id}/{leg} | Cancel leg or all |
+| GET | /super/orders | All super orders |
 
-### Place Super Order
-```
-POST https://api.dhan.co/v2/super/orders
-```
+### Place Super Order — POST /super/orders
 
-**Request:**
+**Request body (exact fields — no extras):**
 ```json
 {
-  "dhanClientId": "1000000003",
-  "transactionType": "BUY",
-  "exchangeSegment": "NSE_FNO",
-  "productType": "INTRADAY",
-  "orderType": "LIMIT",
-  "securityId": "11536",
-  "quantity": 1,
-  "price": 150,
-  "targetPrice": 225,
-  "stopLossPrice": 105,
-  "trailingJump": 0
+  "dhanClientId":    "string",
+  "correlationId":   "string",
+  "transactionType": "BUY|SELL",
+  "exchangeSegment": "NSE_FNO|NSE_EQ|...",
+  "productType":     "CNC|INTRADAY|MARGIN",
+  "orderType":       "LIMIT|MARKET",
+  "securityId":      "string",
+  "quantity":        0,
+  "price":           0.0,
+  "targetPrice":     0.0,
+  "stopLossPrice":   0.0,
+  "trailingJump":    0.0
 }
 ```
 
-- `trailingJump`: Set to 0 for no trailing stop loss
-- `orderType`: Only `LIMIT` or `MARKET`
+**Super orders do NOT support:** `validity`, `disclosedQuantity`, `afterMarketOrder`, `amoTime`.
 
-### Modify Super Order Legs
-Three leg types:
-- `ENTRY_LEG` — modifies entire order (only when PENDING or PART_TRADED)
-- `TARGET_LEG` — modify target price only
-- `STOP_LOSS_LEG` — modify SL price and trailing jump
+**Validation:**
+- At least one of `targetPrice` or `stopLossPrice` must be > 0
+- BUY: `targetPrice > price` AND `stopLossPrice < price`
+- SELL: `targetPrice < price` AND `stopLossPrice > price`
+- `trailingJump`: 0 = no trailing SL
 
-### Cancel Super Order
-```
-DELETE /super/orders/{order-id}/{order-leg}
-```
-`order-leg` values: `ENTRY_LEG`, `TARGET_LEG`, `STOP_LOSS_LEG`, `ALL`
+**Leg rules:**
+- `ENTRY_LEG`: modifiable only when status is `PENDING` or `PART_TRADED`
+- `TARGET_LEG` / `STOP_LOSS_LEG`: modifiable after entry is `TRADED` (price + trailingJump only)
+- Once a leg is individually cancelled, it cannot be re-added
+
+### Modify Super Order — PUT /super/orders/{order-id}
+
+ENTRY_LEG: `{ "orderId", "legName": "ENTRY_LEG", "orderType", "quantity", "price", "targetPrice", "stopLossPrice", "trailingJump" }`
+
+TARGET_LEG: `{ "orderId", "legName": "TARGET_LEG", "targetPrice" }`
+
+STOP_LOSS_LEG: `{ "orderId", "legName": "STOP_LOSS_LEG", "stopLossPrice", "trailingJump" }`
+
+### Cancel Super Order — DELETE /super/orders/{order-id}/{leg}
+`leg` values: `ENTRY_LEG`, `TARGET_LEG`, `STOP_LOSS_LEG`
+Cancelling by `orderId` without leg cancels all legs.
 
 ---
 
-## HISTORICAL DATA
+## Portfolio & Positions
 
 | Method | Endpoint | Action |
 |---|---|---|
-| POST | /charts/historical | Daily OHLCV candles |
-| POST | /charts/intraday | Intraday OHLCV candles |
+| GET | /holdings | All holdings in demat |
+| GET | /positions | Open positions today |
+| POST | /positions/convert | Convert intraday ↔ delivery |
+| DELETE | /positions | Exit all open positions |
 
-### Daily Historical Data
-```
-POST https://api.dhan.co/v2/charts/historical
-```
-
-**Request:**
+### Positions Response (key fields)
 ```json
 {
-  "securityId": "13",
-  "exchangeSegment": "IDX_I",
-  "instrument": "INDEX",
+  "securityId": "string",
+  "positionType": "LONG|SHORT",
+  "exchangeSegment": "NSE_FNO|...",
+  "productType": "INTRADAY|MARGIN|...",
+  "buyAvg": 0.0,
+  "buyQty": 0,
+  "sellAvg": 0.0,
+  "sellQty": 0,
+  "netQty": 0,
+  "costPrice": 0.0,
+  "realizedProfit": 0.0,
+  "unrealizedProfit": 0.0,
+  "drvExpiryDate": "string",
+  "drvOptionType": "CALL|PUT",
+  "drvStrikePrice": 0.0
+}
+```
+
+---
+
+## Funds & Margin
+
+### Fund Limit — GET /fundlimit
+
+```json
+{
+  "dhanClientId": "string",
+  "availabelBalance": 0.0,
+  "sodLimit": 0.0,
+  "collateralAmount": 0.0,
+  "receiveableAmount": 0.0,
+  "utilizedAmount": 0.0,
+  "blockedPayoutAmount": 0.0,
+  "withdrawableBalance": 0.0
+}
+```
+**Note:** Field is `availabelBalance` — that's a typo in the Dhan API itself, not our code.
+
+### Margin Calculator — POST /margincalculator
+```json
+{
+  "dhanClientId": "string",
+  "securityId": "string",
+  "exchangeSegment": "NSE_FNO|...",
+  "transactionType": "BUY|SELL",
+  "quantity": 0,
+  "productType": "CNC|INTRADAY|...",
+  "price": 0.0,
+  "triggerPrice": 0.0
+}
+```
+Response: `totalMargin`, `spanMargin`, `exposureMargin`, `availableBalance`, `brokerage`, `leverage`
+
+---
+
+## Historical Data
+
+### Daily OHLCV — POST /charts/historical
+```json
+{
+  "dhanClientId": "string",
+  "securityId": "string",
+  "exchangeSegment": "IDX_I|NSE_EQ|NSE_FNO|...",
+  "instrument": "INDEX|EQUITY|FUTIDX|OPTIDX|...",
   "expiryCode": 0,
   "oi": false,
-  "fromDate": "2021-09-01",
-  "toDate": "2026-04-01"
+  "fromDate": "YYYY-MM-DD",
+  "toDate": "YYYY-MM-DD"
 }
 ```
+`expiryCode` valid values: `0` (current), `1` (next), `2` (far), `3`
 
-**Key fields:**
-| Field | Values |
-|---|---|
-| securityId | 13 = Nifty 50, 25 = BankNifty |
-| exchangeSegment | `IDX_I` for indices, `NSE_EQ` for equity, `NSE_FNO` for F&O |
-| instrument | `INDEX`, `EQUITY`, `FUTIDX`, `OPTIDX` etc |
-| expiryCode | 0 = current, 1 = next, 2 = far |
+**Response:** arrays of `open`, `high`, `low`, `close`, `volume`, `timestamp` (Unix epoch seconds)
 
-**Response:**
+### Intraday OHLCV — POST /charts/intraday
 ```json
 {
-  "open": [3978, 3856, ...],
-  "high": [3978, 3925, ...],
-  "low":  [3861, 3856, ...],
-  "close": [3879, 3915, ...],
-  "volume": [3937092, 1906106, ...],
-  "timestamp": [1326220200, 1326306600, ...]
-}
-```
-Timestamps are Unix epoch (seconds). Convert: `new Date(ts * 1000)`
-
----
-
-### Intraday Historical Data
-```
-POST https://api.dhan.co/v2/charts/intraday
-```
-
-**Request:**
-```json
-{
-  "securityId": "13",
-  "exchangeSegment": "IDX_I",
-  "instrument": "INDEX",
-  "interval": "15",
+  "dhanClientId": "string",
+  "securityId": "string",
+  "exchangeSegment": "IDX_I|NSE_FNO|...",
+  "instrument": "INDEX|OPTIDX|...",
+  "interval": 15,
   "oi": false,
-  "fromDate": "2024-09-11 09:30:00",
-  "toDate": "2024-09-15 13:00:00"
+  "fromDate": "YYYY-MM-DD",
+  "toDate": "YYYY-MM-DD"
 }
 ```
+`interval` valid values (int): `1`, `5`, `15`, `25`, `60`
+Max date range: 75 days. Data available for last 5 years.
 
-- `interval` values: `1`, `5`, `15`, `25`, `60` (minutes)
-- Data available for last **5 years**
-- Max date range per call: **75 days** for intraday
-
----
-
-## EXPIRED OPTIONS DATA
-
-Pre-processed historical options data on a rolling basis. ATM ±10 strikes for index options, ATM ±3 for others. Minute-level data, up to 5 years.
-
-| Method | Endpoint | Action |
-|---|---|---|
-| POST | /charts/rollingoption | Get expired options data |
-
-```
-POST https://api.dhan.co/v2/charts/rollingoption
-```
-
-**Request:**
+### Expired Options (Rolling) — POST /charts/rollingoption
 ```json
 {
-  "exchangeSegment": "NSE_FNO",
-  "interval": "15",
+  "dhanClientId": "string",
   "securityId": 25,
+  "exchangeSegment": "NSE_FNO",
   "instrument": "OPTIDX",
-  "expiryFlag": "WEEK",
+  "expiryFlag": "WEEK|MONTH",
   "expiryCode": 1,
   "strike": "ATM",
-  "drvOptionType": "CALL",
+  "drvOptionType": "CALL|PUT",
   "requiredData": ["open", "high", "low", "close", "iv", "volume", "strike", "oi", "spot"],
-  "fromDate": "2024-01-01",
-  "toDate": "2024-01-31"
+  "fromDate": "YYYY-MM-DD",
+  "toDate": "YYYY-MM-DD",
+  "interval": 15
 }
 ```
-
-**Key Parameters:**
-| Field | Values |
-|---|---|
-| securityId | 25 = BankNifty, 13 = Nifty |
-| expiryFlag | `WEEK` or `MONTH` |
-| expiryCode | 0 = current, 1 = next, 2 = far |
-| strike | `ATM`, `ATM+1`, `ATM-1`, ..., `ATM+10`, `ATM-10` |
-| drvOptionType | `CALL` or `PUT` |
-| requiredData | Any combo: `open` `high` `low` `close` `iv` `volume` `strike` `oi` `spot` |
-
-**Max 30 days per API call.** For 5-year backtest, chunk into 28-day windows.
+- `interval` valid values (int): `1`, `5`, `15`, `25`, `60`
+- `expiryCode` valid values: `0`, `1`, `2`, `3`
+- `strike`: `ATM`, `ATM+1` to `ATM+10`, `ATM-1` to `ATM-10`
+- **Max 30 days per call.** Chunk into 28-day windows for multi-year fetches.
+- **Quirk:** `expiryCode: 0` treated as missing by API — use `1` for current/nearest expiry.
 
 **Response:**
 ```json
 {
   "data": {
-    "ce": {
-      "open": [354, 360.3, ...],
-      "high": [...],
-      "low": [...],
-      "close": [...],
-      "iv": [...],
-      "volume": [...],
-      "strike": [...],
-      "spot": [...],
-      "timestamp": [1756698300, 1756699200, ...]
-    },
+    "ce": { "open": [...], "close": [...], "iv": [...], "strike": [...], "spot": [...], "timestamp": [...] },
     "pe": null
   }
 }
@@ -451,38 +336,26 @@ POST https://api.dhan.co/v2/charts/rollingoption
 
 ---
 
-## OPTION CHAIN
+## Option Chain
 
-Real-time option chain for any underlying. OI, Greeks, IV, Volume, Bid/Ask for all strikes.
+Rate limit: **1 unique request per 3 seconds**
 
-**Rate limit: 1 unique request per 3 seconds.**
-
-| Method | Endpoint | Action |
-|---|---|---|
-| POST | /optionchain | Get full option chain |
-| POST | /optionchain/expirylist | Get all active expiry dates |
-
-### Headers Required (both endpoints)
-```
-access-token: {JWT}
-client-id: {dhanClientId}
-```
-
-### Option Chain
-```
-POST https://api.dhan.co/v2/optionchain
-```
-
-**Request:**
+### Expiry List — POST /optionchain/expirylist
 ```json
-{
-  "UnderlyingScrip": 25,
-  "UnderlyingSeg": "IDX_I",
-  "Expiry": "2026-04-17"
-}
+{ "UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I" }
 ```
+**Response:** `{ "data": ["YYYY-MM-DD", "YYYY-MM-DD", ...] }` — nearest first
 
-**Response structure:**
+Always call this first before calling `/optionchain`.
+
+### Option Chain — POST /optionchain
+```json
+{ "UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": "YYYY-MM-DD" }
+```
+Note: these three fields use **PascalCase** — different from all other Dhan endpoints.
+`UnderlyingScrip` is an **int** (not string).
+
+**Response:**
 ```json
 {
   "data": {
@@ -490,303 +363,223 @@ POST https://api.dhan.co/v2/optionchain
     "oc": {
       "55500.000000": {
         "ce": {
-          "average_price": 146.99,
-          "greeks": {
-            "delta": 0.53871,
-            "theta": -15.1539,
-            "gamma": 0.00132,
-            "vega": 12.18593
-          },
+          "security_id": 42528,
           "implied_volatility": 9.789,
           "last_price": 134,
+          "average_price": 146.99,
           "oi": 3786445,
           "previous_close_price": 244.85,
           "previous_oi": 402220,
-          "security_id": 42528,
-          "top_ask_price": 134,
+          "volume": 117567970,
           "top_bid_price": 133.55,
-          "volume": 117567970
+          "top_ask_price": 134,
+          "greeks": { "delta": 0.539, "theta": -15.15, "gamma": 0.00132, "vega": 12.19 }
         },
-        "pe": { ... }
+        "pe": { "...same fields..." }
       }
     }
   }
 }
 ```
-
-**Computing PCR from response:**
-```python
-total_ce_oi = sum(strike['ce']['oi'] for strike in oc.values() if strike.get('ce'))
-total_pe_oi = sum(strike['pe']['oi'] for strike in oc.values() if strike.get('pe'))
-pcr = total_pe_oi / total_ce_oi
-```
-
-**Computing ATM IV:**
-```python
-spot = data['last_price']
-atm_strike = round(spot / 100) * 100  # for BankNifty use /100, Nifty use /50
-atm_data = oc[str(float(atm_strike))]
-atm_iv = (atm_data['ce']['implied_volatility'] + atm_data['pe']['implied_volatility']) / 2
-```
+Strike keys are float-strings: `"55500.000000"`. `security_id` is an int.
 
 ---
 
-### Expiry List
-```
-POST https://api.dhan.co/v2/optionchain/expirylist
-```
+## Market Quote
 
-**Request:**
-```json
-{
-  "UnderlyingScrip": 25,
-  "UnderlyingSeg": "IDX_I"
-}
-```
+Snapshot for up to 1000 instruments. Rate limit: 1 req/sec.
+Headers required: `access-token`, `client-id`
 
-**Response:**
-```json
-{
-  "data": ["2026-04-17", "2026-04-24", "2026-04-30", ...]
-}
-```
-
-Always call this first to get the correct expiry date before calling optionchain.
-
----
-
-## MARKET QUOTE
-
-Snapshot data for up to 1000 instruments per request. Rate limit: 1 request/second.
-
-| Method | Endpoint | Action |
+| Method | Endpoint | Data |
 |---|---|---|
 | POST | /marketfeed/ltp | LTP only |
 | POST | /marketfeed/ohlc | OHLC + LTP |
 | POST | /marketfeed/quote | Full depth + OHLC + OI |
 
-**Headers required:** `access-token`, `client-id`
+**Request:** `{ "NSE_FNO": [49081, 49082], "IDX_I": [13, 25] }`
 
-### LTP Request
-```json
-{ "NSE_FNO": [49081, 49082], "IDX_I": [13, 25] }
+Full quote response includes: `last_price`, `ohlc`, `volume`, `oi`, `oi_day_high`, `oi_day_low`, 5-level `depth`, `upper_circuit_limit`, `lower_circuit_limit`, `average_price` (VWAP)
+
+---
+
+## Trader's Control
+
 ```
+POST  /killswitch?killSwitchStatus=ACTIVATE     body: {}
+POST  /killswitch?killSwitchStatus=DEACTIVATE   body: {}
+GET   /killswitch
+```
+Kill switch disables all trading for the day. All positions must be closed first. Resets next trading day.
+`killSwitchStatus` is a query parameter, not in the body.
 
-### Full Quote Response includes:
-- `last_price`, `ohlc`, `volume`, `oi`, `oi_day_high`, `oi_day_low`
-- `depth` (5-level bid/ask)
-- `upper_circuit_limit`, `lower_circuit_limit`
-- `average_price` (VWAP)
-
----
-
-## ANNEXURE
-
-### Exchange Segments
-| Enum | Exchange | Segment | Numeric |
-|---|---|---|---|
-| `IDX_I` | Index | Index Value | 0 |
-| `NSE_EQ` | NSE | Equity Cash | 1 |
-| `NSE_FNO` | NSE | Futures & Options | 2 |
-| `NSE_CURRENCY` | NSE | Currency | 3 |
-| `BSE_EQ` | BSE | Equity Cash | 4 |
-| `MCX_COMM` | MCX | Commodity | 5 |
-| `BSE_CURRENCY` | BSE | Currency | 7 |
-| `BSE_FNO` | BSE | Futures & Options | 8 |
-
-### Instrument Types
-| Enum | Description |
-|---|---|
-| `INDEX` | Index |
-| `FUTIDX` | Index Futures |
-| `OPTIDX` | Index Options |
-| `EQUITY` | Equity |
-| `FUTSTK` | Stock Futures |
-| `OPTSTK` | Stock Options |
-| `FUTCOM` | Commodity Futures |
-| `OPTFUT` | Options on Commodity Futures |
-| `FUTCUR` | Currency Futures |
-| `OPTCUR` | Currency Options |
-
-### Product Types
-| Enum | Description |
-|---|---|
-| `CNC` | Cash & Carry (equity delivery) |
-| `INTRADAY` | Intraday (equity, F&O) — auto-squared off EOD |
-| `MARGIN` | Carry Forward F&O — position held if SL/TP not triggered |
-| `MTF` | Margin Trade Funding |
-
-### Order Status
-| Status | Meaning |
-|---|---|
-| `TRANSIT` | Did not reach exchange |
-| `PENDING` | Awaiting execution |
-| `PART_TRADED` | Partially filled |
-| `TRADED` | Fully executed |
-| `REJECTED` | Rejected by broker/exchange |
-| `CANCELLED` | Cancelled by user |
-| `EXPIRED` | Validity expired |
-| `CLOSED` | Super Order — both entry and exit placed |
-| `TRIGGERED` | Super Order — target or SL leg triggered |
-
-### Expiry Code
-| Code | Meaning |
-|---|---|
-| 0 | Current/Near Expiry |
-| 1 | Next Expiry |
-| 2 | Far Expiry |
-
-### Trading API Errors
-| Code | Type | Message |
-|---|---|---|
-| DH-901 | Invalid Auth | Token invalid or expired |
-| DH-902 | Invalid Access | Data API not subscribed or no Trading API access |
-| DH-903 | User Account | Segment not activated or account requirement not met |
-| DH-904 | Rate Limit | Too many requests — throttle API calls |
-| DH-905 | Input Exception | Missing required fields or bad parameter values |
-| DH-906 | Order Error | Incorrect order request — cannot be processed (includes market-closed rejections) |
-| DH-907 | Data Error | Incorrect parameters or no data available |
-| DH-908 | Internal Server Error | Rare server-side failure |
-| DH-909 | Network Error | Backend communication failure |
-| DH-910 | Others | Miscellaneous errors |
-| DH-911 | Invalid IP | Request from non-whitelisted IP — static IP not whitelisted |
-
-### Data API Errors
-| Code | Description |
-|---|---|
-| 800 | Internal Server Error |
-| 804 | Instruments exceed limit |
-| 805 | Too many requests — may result in block |
-| 806 | Data APIs not subscribed |
-| 807 | Access token expired |
-| 808 | Auth failed — ClientID or token invalid |
-| 809 | Access token invalid |
-| 810 | Client ID invalid |
-| 811 | Invalid Expiry Date |
-| 812 | Invalid Date Format |
-| 813 | Invalid SecurityId |
-| 814 | Invalid Request |
-
-### Key Security IDs
-| ID | Instrument |
-|---|---|
-| 13 | Nifty 50 Index |
-| 25 | Bank Nifty Index |
-
----
-
-## PORTFOLIO AND POSITIONS
-
-| Method | Endpoint | Action |
-|---|---|---|
-| GET | /holdings | All holdings in demat |
-| GET | /positions | Open positions for the day |
-| POST | /positions/convert | Convert intraday ↔ delivery |
-| DELETE | /positions | Exit all open positions |
-
-### Positions Response (key fields)
-```json
-{
-  "securityId": "11536",
-  "positionType": "LONG",
-  "exchangeSegment": "NSE_FNO",
-  "productType": "INTRADAY",
-  "buyAvg": 150.0,
-  "buyQty": 1,
-  "netQty": 1,
-  "unrealizedProfit": 1200.0,
-  "drvExpiryDate": "2026-04-17",
-  "drvOptionType": "CALL",
-  "drvStrikePrice": 55000.0
-}
+### P&L Based Exit
+```
+POST   /pnlExit   body: { "profitValue": 1500.0, "lossValue": 500.0, "productType": ["INTRADAY"], "enableKillSwitch": true }
+DELETE /pnlExit
+GET    /pnlExit
 ```
 
 ---
 
-## TRADER'S CONTROL
+## Forever Orders (GTT)
+
+Good Till Triggered — persist across sessions.
 
 | Method | Endpoint | Action |
 |---|---|---|
-| POST | /killswitch?killSwitchStatus=ACTIVATE | Activate kill switch (disables all trading) |
-| POST | /killswitch?killSwitchStatus=DEACTIVATE | Deactivate kill switch |
-| GET | /killswitch | Get kill switch status |
-| POST | /pnlExit | Configure P&L based auto-exit |
-| DELETE | /pnlExit | Stop P&L based exit |
-| GET | /pnlExit | Get current P&L exit config |
+| POST | /forever/orders | Create |
+| PUT | /forever/orders/{id} | Modify |
+| DELETE | /forever/orders/{id} | Cancel |
+| GET | /forever/orders | List all |
 
-**Kill Switch:** Disables all trading for the day. All positions must be closed first. Resets next trading day.
-
-**P&L Based Exit request:**
-```json
-{
-  "profitValue": 1500.00,
-  "lossValue": 500.00,
-  "productType": ["INTRADAY"],
-  "enableKillSwitch": true
-}
-```
+`orderFlag`: `SINGLE` or `OCO` (One Cancels Other)
+OCO extra fields: `price1`, `triggerPrice1`, `quantity1` (stop-loss leg)
 
 ---
 
-## FOREVER ORDER (GTT)
-
-Good Till Triggered orders — persist across sessions until triggered or cancelled. Two types: `SINGLE` and `OCO` (One Cancels Other).
-
-| Method | Endpoint | Action |
-|---|---|---|
-| POST | /forever/orders | Create forever order |
-| PUT | /forever/orders/{order-id} | Modify forever order |
-| DELETE | /forever/orders/{order-id} | Cancel forever order |
-| GET | /forever/orders | Get all forever orders |
-
----
-
-## MARGIN CALCULATOR
-
-| Method | Endpoint | Action |
-|---|---|---|
-| POST | /margincalculator | Margin for single order |
-| POST | /margincalculator/multi | Margin for multiple orders |
-| GET | /fundlimit | Available fund limits |
-
-### Fund Limit Response fields
-`availabelBalance` (Dhan typo), `sodLimit`, `collateralAmount`, `receiveableAmount`, `utilizedAmount`, `blockedPayoutAmount`, `withdrawableBalance`
-
----
-
-## LIVE ORDER UPDATE (WEBSOCKET)
-
-Real-time order status updates. JSON messages (not binary).
+## Live Order Update (WebSocket)
 
 ```
 wss://api-order-update.dhan.co
 ```
 
-**Auth after connecting:**
+**Auth after connect:**
 ```json
 {
-  "LoginReq": { "MsgCode": 42, "ClientId": "1000000001", "Token": "JWT" },
+  "LoginReq": { "MsgCode": 42, "ClientId": "string", "Token": "JWT" },
   "UserType": "SELF"
 }
 ```
 
 ---
 
-## RELEASES
+## Market Feed WebSocket
+
+```
+wss://api-feed.dhan.co?version=2&token={token}&clientId={id}&authType=2
+```
+
+**Subscription message:**
+```json
+{
+  "RequestCode": 15,
+  "InstrumentCount": 1,
+  "InstrumentList": [{ "ExchangeSegment": "NSE_FNO", "SecurityId": "token_string" }]
+}
+```
+
+Request codes: `15` Ticker, `17` Quote, `21` Full (5-level depth), `23` FullDepth (20/200 level)
+Unsubscribe = subscribe code + 1. Disconnect: `{ "RequestCode": 12 }`
+Max 100 instruments per subscription batch.
+
+**Binary packet first byte:** `2` Ticker, `3` Depth, `4` Quote, `5` OI, `8` Full, `50` Server disconnect
+
+**Disconnect error codes:** `805` Too many connections, `806` Not subscribed, `807` Token expired, `808` Invalid client, `809` Auth failed
+
+### Full Market Depth WebSocket
+- 20-level: `wss://depth-api-feed.dhan.co/twentydepth?token=...&clientId=...&authType=2` (up to 50 instruments)
+- 200-level: `wss://full-depth-api.dhan.co/?token=...&clientId=...&authType=2` (1 instrument only)
+- Both support NSE_EQ and NSE_FNO only.
+
+---
+
+## Security Master
+
+Compact CSV: `https://images.dhan.co/api-data/api-scrip-master.csv`
+Detailed CSV: `https://images.dhan.co/api-data/api-scrip-master-detailed.csv`
+
+---
+
+## Annexure
+
+### Exchange Segments
+| Enum | Description | Numeric |
+|---|---|---|
+| `IDX_I` | Index | 0 |
+| `NSE_EQ` | NSE Equity | 1 |
+| `NSE_FNO` | NSE F&O | 2 |
+| `NSE_CURRENCY` | NSE Currency | 3 |
+| `BSE_EQ` | BSE Equity | 4 |
+| `MCX_COMM` | MCX Commodity | 5 |
+| `BSE_CURRENCY` | BSE Currency | 7 |
+| `BSE_FNO` | BSE F&O | 8 |
+
+Numeric codes used in WebSocket only.
+
+### Product Types
+| Enum | Description |
+|---|---|
+| `CNC` | Cash & Carry (delivery) |
+| `INTRADAY` | Intraday — auto squared off EOD |
+| `MARGIN` | Carry Forward F&O — held if SL/TP not triggered |
+| `MTF` | Margin Trade Funding |
+
+### Instrument Types
+`INDEX`, `EQUITY`, `FUTIDX`, `OPTIDX`, `FUTSTK`, `OPTSTK`, `FUTCOM`, `OPTFUT`, `FUTCUR`, `OPTCUR`
+
+### Key Security IDs
+| ID | Instrument |
+|---|---|
+| 13 | Nifty 50 |
+| 25 | BankNifty |
+
+### Error Codes — Trading API
+| Code | Meaning |
+|---|---|
+| DH-901 | Token invalid or expired |
+| DH-902 | Data API not subscribed / no Trading API access |
+| DH-903 | Segment not activated |
+| DH-904 | Rate limit exceeded |
+| DH-905 | Missing/bad parameter values (also: weekend/holiday, no data) |
+| DH-906 | Incorrect order request — includes market-closed rejections |
+| DH-907 | Incorrect parameters or no data available |
+| DH-908 | Internal server error |
+| DH-909 | Network/backend failure |
+| DH-910 | Miscellaneous |
+| DH-911 | Request from non-whitelisted IP |
+
+### Error Codes — Data API
+| Code | Meaning |
+|---|---|
+| 800 | Internal server error |
+| 804 | Instruments exceed limit |
+| 805 | Too many requests |
+| 806 | Data APIs not subscribed |
+| 807 | Access token expired |
+| 808 | ClientID or token invalid |
+| 809 | Access token invalid |
+| 810 | Client ID invalid |
+| 811 | Invalid expiry date |
+| 812 | Invalid date format |
+| 813 | Invalid SecurityId |
+| 814 | Invalid request |
+
+### Standard Response Envelope
+```json
+{
+  "status": "success|failure",
+  "remarks": "" | { "error_code": "DH-9xx", "error_type": "...", "error_message": "..." },
+  "data": {}
+}
+```
+
+---
+
+## Release Notes
 
 ### v2.5.1 — Mar 17 2026
 - Market orders via API converted to LIMIT with MPP (effective Mar 21)
-- Order rate limits reduced to 10/sec (effective Mar 21)
+- Order rate limits → 10/sec (effective Mar 21)
 - Static IP mandatory for all order APIs (effective Apr 1)
 
 ### v2.5 — Feb 09 2026
-- New: Conditional Trigger Orders (price + technical indicator based)
+- New: Conditional Trigger Orders
 - New: P&L Based Exit under Trader's Control
 - New: Exit All Positions API
 - Improved: Option Chain API enhancements
 
 ### v2.4
-- New: Full Market Depth (20-level and 200-level WebSocket)
+- New: Full Market Depth WebSocket (20-level and 200-level)
 
 ### v2.3
 - New: Expired Options Data API (`/charts/rollingoption`)
@@ -796,11 +589,11 @@ wss://api-order-update.dhan.co
 - New: Forever Order (GTT) API
 
 ### v2.1
-- New: Option Chain API (`/optionchain` and `/optionchain/expirylist`)
+- New: Option Chain API
 - New: Live Order Update WebSocket
 
 ### v2.0
-- Complete rewrite from v1. New base URL `api.dhan.co/v2/`
+- Complete rewrite. New base URL `api.dhan.co/v2/`
 
 ---
 

@@ -367,7 +367,7 @@ def fetch_rollingoption(from_date, to_date):
         for opt_type in ["CALL", "PUT"]:
             payload = {
                 "exchangeSegment": "NSE_FNO",
-                "interval":        "15",      # 15-min bars; first bar open = 9:15 AM open
+                "interval":        15,         # 15-min bars; first bar open = 9:15 AM open
                 "securityId":      25,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
