@@ -92,80 +92,6 @@ def die(msg: str):
     sys.exit(1)
 
 
-def _update_env_token(new_token: str) -> None:
-    """Rewrite DHAN_ACCESS_TOKEN in .env + reset token_meta.json renewal clock."""
-    import re as _re, json as _json
-    base     = os.path.dirname(os.path.abspath(__file__))
-    env_path = os.path.join(base, ".env")
-    meta_path = os.path.join(base, "token_meta.json")
-    if not os.path.exists(env_path):
-        return
-    try:
-        with open(env_path, "r") as f:
-            content = f.read()
-        new_content = _re.sub(
-            r"^DHAN_ACCESS_TOKEN=.*$",
-            f"DHAN_ACCESS_TOKEN={new_token}",
-            content,
-            flags=_re.MULTILINE,
-        )
-        with open(env_path, "w") as f:
-            f.write(new_content)
-    except Exception as e:
-        notify.log(f"Warning: could not write new token to .env — {e}")
-    # Reset the 23h50m renewal clock so renew_token.py knows when to fire next
-    try:
-        with open(meta_path, "w") as f:
-            _json.dump({"last_renewed_at": datetime.now().isoformat()}, f, indent=2)
-    except Exception as e:
-        notify.log(f"Warning: could not write token_meta.json — {e}")
-
-
-def _renew_token():
-    """
-    Renew the Dhan token. GET /v2/RenewToken returns a BRAND NEW token that
-    immediately invalidates the old one. Must:
-      1. Extract new token from response["token"]
-      2. Update TOKEN + HEADERS in-process (old token is dead)
-      3. Persist new token to .env (so next cron run loads it)
-    Called automatically at 9:15 AM after successful credential check.
-    Retries 3× with backoff; Telegram alert if all attempts fail.
-    """
-    global TOKEN, HEADERS
-    MAX_RETRIES = 3
-    last_err    = ""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.get(
-                "https://api.dhan.co/v2/RenewToken",
-                headers={"access-token": TOKEN, "dhanClientId": CLIENT_ID},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                new_token = resp.json().get("token")
-                if new_token and new_token != TOKEN:
-                    TOKEN = new_token
-                    HEADERS["access-token"] = new_token
-                    _update_env_token(new_token)
-                    notify.log("Token renewed ✓  (new token active, .env updated)")
-                else:
-                    notify.log("Token renewal: 200 — no new token issued, existing token active")
-                return   # success
-            last_err = f"HTTP {resp.status_code}: {resp.text[:80]}"
-        except Exception as e:
-            last_err = str(e)
-        if attempt < MAX_RETRIES:
-            time.sleep(2 ** attempt)   # 2s, 4s backoff
-
-    # All retries failed — alert but don't block the trade (token may still be valid)
-    notify.send(
-        f"⚠️ Token renewal failed after {MAX_RETRIES} attempts — {last_err}\n"
-        f"Today's trade will proceed with existing token. "
-        f"If token is about to expire, regenerate manually at dhan.co."
-    )
-    notify.log(f"Token renewal failed ({last_err}) — proceeding with existing token")
-
-
 def check_credentials():
     if not TOKEN or not CLIENT_ID:
         die("DHAN_ACCESS_TOKEN or DHAN_CLIENT_ID missing from .env")
@@ -176,9 +102,6 @@ def check_credentials():
             die("Dhan token expired (401). Regenerate at dhan.co → API settings.")
         if resp.status_code not in (200, 429):
             notify.log(f"Dhan API check returned {resp.status_code}. Proceeding.")
-        # Token confirmed valid — auto-extend by 24h so it never expires mid-day
-        if resp.status_code == 200:
-            _renew_token()
     except requests.exceptions.ConnectionError:
         die("Cannot reach Dhan API. Check VM internet / DNS.")
 
