@@ -144,6 +144,26 @@ def load_all_data():
     df[ff_cols] = df[ff_cols].ffill(limit=3)
     df = df.dropna(subset=["bn_close","nf_close","vix_close","sp_close",
                             "nk_close","spf_open","spf_close"])
+
+    # ── PCR (optional) — merge from pcr_live.csv + pcr.csv if available ──────
+    # Missing dates are filled with 0 so the model treats no-PCR days as neutral.
+    for pcr_file in [f"{DATA_DIR}/pcr.csv", f"{DATA_DIR}/pcr_live.csv"]:
+        if os.path.exists(pcr_file):
+            try:
+                pcr_df = pd.read_csv(pcr_file, parse_dates=["date"])[["date", "pcr"]]
+                pcr_df = pcr_df.rename(columns={"pcr": "_pcr_src"})
+                df = df.merge(pcr_df, on="date", how="left")
+                if "pcr" in df.columns:
+                    df["pcr"] = df["pcr"].combine_first(df["_pcr_src"])
+                else:
+                    df = df.rename(columns={"_pcr_src": "pcr"})
+                df = df.drop(columns=["_pcr_src"], errors="ignore")
+            except Exception:
+                pass
+    if "pcr" not in df.columns:
+        df["pcr"] = 0.0
+    df["pcr"] = df["pcr"].fillna(0.0)   # 0 = neutral when PCR missing
+
     return df
 
 
@@ -208,7 +228,7 @@ def compute_features(df):
     return d.dropna(subset=req)
 
 
-# 21 features fed into the RF
+# 22 features fed into the RF
 FEATURE_COLS = [
     # Rule-based score components (discrete ±1 signals)
     "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",
@@ -224,6 +244,8 @@ FEATURE_COLS = [
     "bn_ret1", "bn_ret20",
     # Calendar
     "dow", "dte",
+    # Options market sentiment (0 when not available, builds over time)
+    "pcr",
 ]
 
 

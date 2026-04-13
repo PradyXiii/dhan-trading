@@ -123,6 +123,23 @@ def load_data():
             print(f"  WARNING: {n} {day}s in dataset — Dhan timezone bug not fixed!")
             print(f"  Run: python3 data_fetcher.py --fix-dates  to patch.")
 
+    # ── PCR (optional) — merge from pcr_live.csv + pcr.csv if available ──────
+    # pcr_live.csv: daily live fetch from Dhan option chain (accumulated over time)
+    # pcr.csv: historical PCR from NSE bhavcopy (run: python3 data_fetcher.py --process-pcr)
+    for pcr_file in [f"{DATA_DIR}/pcr.csv", f"{DATA_DIR}/pcr_live.csv"]:
+        if os.path.exists(pcr_file):
+            try:
+                pcr_df = pd.read_csv(pcr_file, parse_dates=["date"])[["date", "pcr"]]
+                pcr_df = pcr_df.rename(columns={"pcr": "_pcr_src"})
+                result = result.merge(pcr_df, on="date", how="left")
+                if "pcr" in result.columns:
+                    result["pcr"] = result["pcr"].combine_first(result["_pcr_src"])
+                else:
+                    result = result.rename(columns={"_pcr_src": "pcr"})
+                result = result.drop(columns=["_pcr_src"], errors="ignore")
+            except Exception:
+                pass
+
     return result
 
 

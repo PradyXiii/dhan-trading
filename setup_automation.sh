@@ -100,8 +100,13 @@ SCANNER_COMMENT="# BankNifty lot/expiry scanner — runs 1st of month 10 AM IST"
 EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DIR/evolver.log 2>&1"
 EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 
-# Remove old entries (auto_trader + scanner + evolver + renewer) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer")
+# EOD position squareoff — 3:15 PM IST = 9:45 AM UTC, Mon–Fri
+# Closes any open BankNifty NRML positions that SL/TP didn't catch by end of day
+EXIT_CMD="45 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/exit.log 2>&1"
+EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, closes open NRML positions before market close"
+
+# Remove old entries (auto_trader + scanner + evolver + renewer + exit) if any
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "exit_positions" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer" | grep -v "EOD squareoff")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -109,6 +114,8 @@ $RENEWER_COMMENT
 $RENEWER_CMD
 $CRON_COMMENT
 $CRON_CMD
+$EXIT_COMMENT
+$EXIT_CMD
 $SCANNER_COMMENT
 $SCANNER_CMD
 $EVOLVER_COMMENT
@@ -138,6 +145,9 @@ echo "  Renewer log    : $LOG_DIR/renew_token.log"
 echo ""
 echo "  Auto trader    : 9:15 AM IST every weekday (Mon–Fri)"
 echo "  Trader log     : $LOG_DIR/auto_trader.log"
+echo ""
+echo "  EOD squareoff  : 3:15 PM IST every weekday (Mon–Fri)"
+echo "  Exit log       : $LOG_DIR/exit.log"
 echo ""
 echo "  ML Evolver     : 11:00 PM IST every weekday (Mon–Fri)"
 echo "  Evolver log    : $LOG_DIR/evolver.log"
