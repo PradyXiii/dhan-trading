@@ -280,6 +280,23 @@ def refresh_data_and_signal():
         notify.log(f"ml_engine.py failed: {e} — falling back to rule signal")
 
 
+def _is_trading_day() -> bool:
+    """
+    Return True only if today's date appears in banknifty.csv.
+    data_fetcher populates that file from Dhan — it will have today's row only
+    on actual NSE trading days. Holidays (Diwali, Holi, Republic Day, etc.)
+    produce no row, so this reliably detects non-trading days without needing
+    a manual holiday list.
+    Must be called AFTER refresh_data_and_signal() has run.
+    """
+    today = date.today()
+    try:
+        bn = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+        return pd.Timestamp(today) in bn["date"].values
+    except Exception:
+        return True   # if CSV unreadable, proceed and let Dhan reject if needed
+
+
 def get_todays_signal() -> tuple:
     """
     Returns (signal_dict, sig_note_str).
@@ -305,6 +322,9 @@ def get_todays_signal() -> tuple:
                     notify.log("Using rule-based signal (signals_ml.csv unavailable)")
                 return row.iloc[0].to_dict(), ""
 
+            # Fallback only for data-pipeline failures (e.g. API outage yesterday).
+            # Holidays are handled upstream via _is_trading_day() — we should not
+            # reach here on a holiday.
             last     = df.iloc[-1]
             days_gap = (today - last["date"]).days
 
@@ -921,6 +941,18 @@ def main():
 
     # 1. Refresh data + signal
     refresh_data_and_signal()
+
+    # 1b. Holiday check — if BankNifty has no data for today, NSE is closed
+    # (handles Diwali, Republic Day, Holi, etc. without a manual holiday list)
+    if not _is_trading_day() and not DRY_RUN:
+        today_label = date.today().strftime("%d %b %Y")
+        notify.send(
+            f"📆  <b>Market Holiday</b>\n\n"
+            f"{today_label} — NSE is closed today.\n"
+            f"No trade placed. See you tomorrow."
+        )
+        notify.log(f"Market holiday detected ({today_label}) — no BN data in CSV. Exiting.")
+        return
 
     # 2. Read signal
     sig, sig_note = get_todays_signal()

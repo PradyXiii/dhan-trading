@@ -14,6 +14,7 @@ Cron (3:15 PM IST = 9:45 AM UTC):
 import os
 import sys
 import requests
+import pandas as pd
 from datetime import date
 from dotenv import load_dotenv
 
@@ -29,6 +30,18 @@ HEADERS = {
     "client-id":    CLIENT_ID,
     "Content-Type": "application/json",
 }
+
+DATA_DIR = "data"
+
+
+def _is_trading_day() -> bool:
+    """Return True only if today's date appears in banknifty.csv (NSE trading day)."""
+    today = date.today()
+    try:
+        bn = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+        return pd.Timestamp(today) in bn["date"].values
+    except Exception:
+        return True   # if CSV unreadable, attempt squareoff anyway
 
 
 def get_open_bn_positions():
@@ -94,7 +107,13 @@ def square_off(pos) -> dict:
 
 
 def main():
-    notify.log(f"EOD exit check — {date.today().strftime('%d %b %Y')} 3:15 PM IST")
+    today_label = date.today().strftime("%d %b %Y")
+    notify.log(f"EOD exit check — {today_label} 3:15 PM IST")
+
+    # Holiday guard — banknifty.csv has no row for today → NSE is closed
+    if not DRY_RUN and not _is_trading_day():
+        notify.log(f"Market holiday ({today_label}) — skipping squareoff.")
+        return
 
     positions = get_open_bn_positions()
     if not positions:
