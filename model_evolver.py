@@ -128,16 +128,9 @@ def load_extended_data():
         else:
             df[col] = np.nan
 
-    # PCR: prefer pcr_live.csv (live Dhan) over pcr.csv (manual bhavcopy)
-    pcr_loaded = False
-    for pcr_path in [f"{DATA_DIR}/pcr_live.csv", f"{DATA_DIR}/pcr.csv"]:
-        if os.path.exists(pcr_path):
-            pcr = pd.read_csv(pcr_path, parse_dates=["date"])[["date", "pcr"]]
-            df  = df.merge(pcr, on="date", how="left")
-            df["pcr"] = df["pcr"].ffill(limit=3)
-            pcr_loaded = True
-            break
-    if not pcr_loaded:
+    # PCR: already loaded by ml_engine.compute_features() → guaranteed in df
+    # Just ensure column exists (defensive)
+    if "pcr" not in df.columns:
         df["pcr"] = np.nan
 
     # FII futures net position
