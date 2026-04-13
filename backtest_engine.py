@@ -1137,9 +1137,9 @@ def run_otm_tp_grid(trail_jump_opt=5):
         )
         s = _stats(trade_df)
         rows.append({
-            "Config":      f"OTM {int(tp_pct*100)}%TP / {int(rr)}x RR  (ATM stays 37.5%)",
+            "Config":      f"OTM {round(tp_pct*100)}%TP / {rr:.1f}x RR  (ATM stays 37.5%)",
             "OTM SL%":     f"{otm_sl*100:.1f}%",
-            "OTM TP%":     f"{tp_pct*100:.0f}%",
+            "OTM TP%":     f"{round(tp_pct*100)}%",
             "Total":       s["total"],
             "OTM trades":  s["otm_trades"],
             "ATM trades":  s["atm_trades"],
