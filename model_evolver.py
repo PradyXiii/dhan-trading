@@ -368,7 +368,207 @@ def _build_model(model_type, params):
     raise ValueError(f"Unknown model_type: {model_type}")
 
 
-def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val):
+# ─────────────────────────────────────────────────────────────────────────────
+#  LIVE TRADE FEEDBACK — inject real outcomes + boost miss-day patterns
+# ─────────────────────────────────────────────────────────────────────────────
+
+LIVE_TRADES_PATH = f"{DATA_DIR}/live_trades.csv"
+LIVE_INJECT_WEIGHT = 10.0   # live trade rows are 10× more valuable than synthetic labels
+MISS_BOOST         = 3.0    # historical rows matching miss patterns get 3× weight
+MIN_LIVE_TRADES    = 5      # minimum labeled trades before feedback kicks in
+MIN_MISSES         = 2      # minimum misses before boosting historical rows
+
+
+def _load_live_outcomes(df_full, selected_cols):
+    """
+    Load live_trades.csv, join each trade with its feature vector from df_full.
+    df_full must have a 'date' column and all selected_cols.
+
+    Returns dict with keys:
+      inject_rows  — list of (feature_vector, y_label) for ALL labeled trades
+      X_hits       — feature matrix for oracle-correct trades (or None)
+      X_misses     — feature matrix for oracle-wrong trades (or None)
+      n_labeled    — count of labeled trades (True/False, not blank)
+      n_misses     — count of oracle-wrong trades
+    """
+    import csv as _csv
+    from pathlib import Path
+
+    empty = dict(inject_rows=[], X_hits=None, X_misses=None, n_labeled=0, n_misses=0)
+
+    if not Path(LIVE_TRADES_PATH).exists():
+        return empty
+
+    try:
+        with open(LIVE_TRADES_PATH) as f:
+            rows = list(_csv.DictReader(f))
+    except Exception as e:
+        print(f"  [feedback] Cannot read live_trades.csv: {e}")
+        return empty
+
+    labeled = [r for r in rows
+               if str(r.get("oracle_correct", "")).lower() in ("true", "false")]
+    if len(labeled) < MIN_LIVE_TRADES:
+        print(f"  [feedback] {len(labeled)} labeled live trades — need {MIN_LIVE_TRADES} to activate feedback")
+        return {**empty, "n_labeled": len(labeled)}
+
+    df_full = df_full.copy()
+    df_full["date"] = pd.to_datetime(df_full["date"])
+
+    inject_rows = []
+    X_hits      = []
+    X_misses    = []
+
+    for row in labeled:
+        try:
+            dt      = pd.Timestamp(row["date"])
+            correct = str(row["oracle_correct"]).lower() == "true"
+            signal  = str(row.get("signal", "")).upper()
+        except Exception:
+            continue
+
+        match = df_full[df_full["date"] == dt]
+        if match.empty:
+            continue
+
+        try:
+            feats = match[selected_cols].fillna(0).values[0].astype(float)
+        except KeyError:
+            # Some selected cols may not exist in df_full (extended features added later)
+            available = [c for c in selected_cols if c in match.columns]
+            row_series = match.reindex(columns=selected_cols).fillna(0).iloc[0]
+            feats = row_series.values.astype(float)
+
+        # Convert signal + oracle_correct → binary direction label (1=CALL, 0=PUT)
+        if signal in ("CALL", "PUT"):
+            if correct:
+                y_label = 1 if signal == "CALL" else 0
+            else:
+                y_label = 0 if signal == "CALL" else 1  # oracle wrong → opposite was right
+            inject_rows.append((feats, int(y_label)))
+
+        if correct:
+            X_hits.append(feats)
+        else:
+            X_misses.append(feats)
+
+    n_misses = len(X_misses)
+    return dict(
+        inject_rows = inject_rows,
+        X_hits      = np.array(X_hits)   if X_hits   else None,
+        X_misses    = np.array(X_misses) if X_misses else None,
+        n_labeled   = len(labeled),
+        n_misses    = n_misses,
+    )
+
+
+def _identify_miss_drivers(X_misses, X_hits, selected_cols, top_n=3):
+    """
+    Find features most different between miss days and hit days using effect size.
+    Returns list of (col, direction, effect_size, miss_mean, hit_mean).
+    """
+    if X_misses is None or X_hits is None:
+        return []
+    if len(X_misses) < 2 or len(X_hits) < 1:
+        return []
+
+    drivers = []
+    for i, col in enumerate(selected_cols):
+        miss_vals = X_misses[:, i]
+        hit_vals  = X_hits[:, i]
+        miss_mean = float(miss_vals.mean())
+        hit_mean  = float(hit_vals.mean())
+        pooled_std = float(np.std(np.concatenate([miss_vals, hit_vals]))) + 1e-8
+        effect     = abs(miss_mean - hit_mean) / pooled_std
+        direction  = "HIGH" if miss_mean > hit_mean else "LOW"
+        drivers.append((col, direction, round(effect, 2), round(miss_mean, 3), round(hit_mean, 3)))
+
+    drivers.sort(key=lambda x: -x[2])
+    return drivers[:top_n]
+
+
+def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
+    """
+    Build augmented (X, y, sample_weight) incorporating live trade feedback.
+
+    Steps:
+    1. Load live_trades.csv + join feature vectors
+    2. Inject live rows into training set (weight=LIVE_INJECT_WEIGHT)
+    3. Boost historical rows matching miss-day patterns (weight=MISS_BOOST)
+
+    Returns (X_aug, y_aug, sample_weights, live_info) where live_info
+    is a dict for Telegram reporting.
+    """
+    result = _load_live_outcomes(df_full, selected_cols)
+    n_labeled   = result["n_labeled"]
+    n_misses    = result["n_misses"]
+    inject_rows = result["inject_rows"]
+    X_hits      = result["X_hits"]
+    X_misses    = result["X_misses"]
+
+    miss_drivers = []
+    sample_weights = np.ones(len(X_all))
+
+    # ── Step 1: inject live rows ──────────────────────────────────────────────
+    if inject_rows:
+        X_inject = np.array([r[0] for r in inject_rows])
+        y_inject = np.array([r[1] for r in inject_rows])
+        X_aug = np.vstack([X_all, X_inject])
+        y_aug = np.concatenate([y_all, y_inject])
+        # Live rows get high weight; historical rows keep 1.0 for now
+        sample_weights = np.concatenate([
+            sample_weights,
+            np.full(len(inject_rows), LIVE_INJECT_WEIGHT)
+        ])
+        print(f"  [feedback] Injected {len(inject_rows)} live trades (weight={LIVE_INJECT_WEIGHT}×)")
+    else:
+        X_aug = X_all.copy()
+        y_aug = y_all.copy()
+
+    # ── Step 2: boost historical rows matching miss patterns ──────────────────
+    if n_misses >= MIN_MISSES:
+        miss_drivers = _identify_miss_drivers(X_misses, X_hits, selected_cols)
+
+        if miss_drivers:
+            n_hist = len(X_all)
+            for col, direction, effect, miss_mean, hit_mean in miss_drivers:
+                if col not in selected_cols:
+                    continue
+                idx      = selected_cols.index(col)
+                col_vals = X_aug[:n_hist, idx]
+                col_mean = col_vals.mean()
+                col_std  = col_vals.std() + 1e-8
+
+                if direction == "HIGH":
+                    threshold = col_mean + 0.5 * col_std
+                    mask = col_vals >= threshold
+                else:
+                    threshold = col_mean - 0.5 * col_std
+                    mask = col_vals <= threshold
+
+                sample_weights[:n_hist][mask] *= MISS_BOOST
+
+            # Re-normalise so total weight stays consistent with dataset size
+            n_total = len(X_aug)
+            sample_weights = sample_weights / sample_weights.mean()
+
+            print(f"  [feedback] Miss pattern boost ({MISS_BOOST}×) on {len(miss_drivers)} drivers:")
+            for col, direction, effect, mm, hm in miss_drivers:
+                label = _FEATURE_LABELS.get(col, col)
+                print(f"    {label}: {direction} on miss days (effect={effect:.2f})")
+
+    live_info = dict(
+        n_labeled    = n_labeled,
+        n_misses     = n_misses,
+        n_hits       = n_labeled - n_misses,
+        n_injected   = len(inject_rows),
+        miss_drivers = miss_drivers,
+    )
+
+    return X_aug, y_aug, sample_weights, live_info
+
+
+def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
     if model_type == "rf":
         params = {
             "n_estimators":    trial.suggest_int("n_estimators", 100, 500),
@@ -395,24 +595,35 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val):
         }
 
     model = _build_model(model_type, params)
-    model.fit(X_tr, y_tr)
+    model.fit(X_tr, y_tr, sample_weight=sw_tr)
     y_pred = model.predict(X_val)
     y_prob = model.predict_proba(X_val)[:, list(model.classes_).index(1)] \
              if 1 in model.classes_ else np.zeros(len(y_val))
     return _score(y_val, y_pred, y_prob)
 
 
-def run_competition(X, y, feature_cols, n_trials=N_TRIALS):
+def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
     """
     Run Optuna HPO for RF, XGBoost, LightGBM on the same temporal split.
     Returns list of result dicts sorted by composite score descending.
+    sample_weight: optional array of per-row weights (same length as X/y).
     """
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     X_tr, y_tr, X_val, y_val = _temporal_split(X, y)
+
+    # Split sample_weight the same way as _temporal_split
+    if sample_weight is not None:
+        n = len(X)
+        split = n - len(y_val)
+        sw_tr = sample_weight[:split]
+    else:
+        sw_tr = None
+
     print(f"\n[4/6] Model competition  (train={len(X_tr)}, holdout={len(X_val)}, "
-          f"trials={n_trials} each)")
+          f"trials={n_trials} each)"
+          + ("  +live-feedback" if sample_weight is not None else ""))
 
     results = []
     for mtype in ["rf", "xgb", "lgb"]:
@@ -421,7 +632,7 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS):
         study = optuna.create_study(direction="maximize",
                                     sampler=optuna.samplers.TPESampler(seed=42))
         study.optimize(
-            lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val),
+            lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val, sw_tr),
             n_trials=n_trials,
             show_progress_bar=False,
         )
@@ -468,10 +679,10 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS):
 #  STEP 5+6 — CHAMPION SELECTION + FINAL TRAINING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_champion(champion_meta, X_all, y_all):
+def train_champion(champion_meta, X_all, y_all, sample_weight=None):
     """Retrain champion model with best params on ALL data."""
     model = _build_model(champion_meta["model_type"], champion_meta["params"])
-    model.fit(X_all, y_all)
+    model.fit(X_all, y_all, sample_weight=sample_weight)
     return model
 
 
@@ -537,7 +748,7 @@ _MODEL_NAMES = {"rf": "Random Forest", "xgb": "XGBoost", "lgb": "LightGBM"}
 
 
 def send_telegram_report(results, champion_meta, today_signal, today_conf,
-                         feature_importances, n_features_total):
+                         feature_importances, n_features_total, live_info=None):
     """Send a plain-English Telegram report after nightly training."""
     import notify
 
@@ -575,7 +786,7 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         for r in others
     )
 
-    # Live trade scorecard (only shown when >= 3 live trades recorded)
+    # ── Live trade scorecard ──────────────────────────────────────────────────
     live_section = ""
     try:
         import csv as _csv
@@ -583,25 +794,43 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         if os.path.exists(journal_path):
             with open(journal_path) as f:
                 rows = list(_csv.DictReader(f))
-            total = len(rows)
+            total  = len(rows)
+            wins   = sum(1 for r in rows if str(r.get("oracle_correct", "")).lower() == "true")
+            losses = sum(1 for r in rows if str(r.get("oracle_correct", "")).lower() == "false")
             if total >= 3:
-                wins     = sum(1 for r in rows if str(r.get("oracle_correct", "")).lower() == "true")
-                losses   = sum(1 for r in rows if str(r.get("oracle_correct", "")).lower() == "false")
-                live_wr  = round(wins / total * 100)
+                live_wr  = round(wins / total * 100) if total > 0 else 0
                 slips    = [float(r["entry_slippage_pct"]) for r in rows
                             if r.get("entry_slippage_pct") not in ("", None)]
                 avg_slip = f"{sum(slips)/len(slips):+.1f}%" if slips else "n/a"
                 pnls     = [float(r["actual_pnl"]) for r in rows
                             if r.get("actual_pnl") not in ("", None)]
-                avg_pnl  = f"₹{sum(pnls)/len(pnls):,.0f}" if pnls else "n/a"
+                avg_pnl  = f"Rs.{sum(pnls)/len(pnls):,.0f}" if pnls else "n/a"
                 live_section = (
-                    f"\n\nLive trade scorecard ({total} trades):\n"
-                    f"  Oracle accuracy: {live_wr}% ({wins}W / {losses}L)\n"
-                    f"  Avg entry slippage: {avg_slip}\n"
-                    f"  Avg actual P&L: {avg_pnl}"
+                    f"\n\nLive oracle ({total} trades): {live_wr}%  "
+                    f"({wins}W / {losses}L)\n"
+                    f"  Avg slippage: {avg_slip}   Avg P&L: {avg_pnl}"
                 )
     except Exception:
         pass
+
+    # ── Miss driver analysis ──────────────────────────────────────────────────
+    miss_section = ""
+    if live_info and live_info.get("n_misses", 0) >= MIN_MISSES:
+        drivers = live_info.get("miss_drivers", [])
+        n_miss  = live_info["n_misses"]
+        n_hit   = live_info["n_hits"]
+        if drivers:
+            driver_lines = "\n".join(
+                f"  • {_FEATURE_LABELS.get(d[0], d[0])}: was {d[1]} (effect {d[2]:.1f}x)"
+                for d in drivers
+            )
+            miss_section = (
+                f"\n\nWhat went wrong on {n_miss} missed calls:\n"
+                f"{driver_lines}\n"
+                f"  Brain now {MISS_BOOST:.0f}x more cautious about these patterns."
+            )
+        elif n_miss > 0:
+            miss_section = f"\n\nMisses: {n_miss} — not enough data yet to identify pattern."
 
     msg = (
         f"Brain trained  |  {date_str}\n\n"
@@ -616,6 +845,7 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         f"Other engines: {others_str}\n"
         f"Signals used: {n_used} indicators"
         f"{live_section}"
+        f"{miss_section}"
     )
 
     notify.send(msg)
@@ -677,8 +907,18 @@ def main():
                    "importances":  feature_importances,
                    "updated_at":   datetime.now(_IST).isoformat()}, f, indent=2)
 
+    # ── 3b. Live trade feedback — inject real outcomes + boost miss patterns ──
+    print("\n[3b/6] Live trade feedback...")
+    X_aug, y_aug, sample_weights, live_info = _compute_live_feedback(
+        X_all, y_all, df, selected_cols
+    )
+    has_feedback = live_info["n_injected"] > 0 or live_info["n_misses"] >= MIN_MISSES
+
     # ── 4. Model competition ──────────────────────────────────────────────────
-    results, X_tr, y_tr, X_val, y_val = run_competition(X_all, y_all, selected_cols)
+    results, X_tr, y_tr, X_val, y_val = run_competition(
+        X_aug, y_aug, selected_cols,
+        sample_weight=sample_weights if has_feedback else None,
+    )
 
     print("\n[4/6] Competition results:")
     for i, r in enumerate(results):
@@ -689,8 +929,12 @@ def main():
     champion = results[0]
 
     # ── 5+6. Final training on all data ──────────────────────────────────────
-    print(f"\n[5/6] Final training: {_MODEL_NAMES[champion['model_type']]} on all {len(X_all)} rows...")
-    final_model = train_champion(champion, X_all, y_all)
+    print(f"\n[5/6] Final training: {_MODEL_NAMES[champion['model_type']]} on all {len(X_aug)} rows"
+          f"{'  (+live feedback)' if has_feedback else ''}...")
+    final_model = train_champion(
+        champion, X_aug, y_aug,
+        sample_weight=sample_weights if has_feedback else None,
+    )
 
     # ── 7. Save champion ──────────────────────────────────────────────────────
     meta = {
@@ -732,12 +976,13 @@ def main():
     print("\n[6/6] Sending Telegram report...")
     try:
         send_telegram_report(
-            results         = results,
-            champion_meta   = meta,
-            today_signal    = today_signal,
-            today_conf      = today_conf,
+            results             = results,
+            champion_meta       = meta,
+            today_signal        = today_signal,
+            today_conf          = today_conf,
             feature_importances = feature_importances,
             n_features_total    = len(all_cols_present),
+            live_info           = live_info,
         )
     except Exception as e:
         print(f"  Telegram report failed: {e}")
