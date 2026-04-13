@@ -403,7 +403,8 @@ def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
 def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                    flat_rr=None, day_rr_override=None,
                    bn_tp_pts=None, bn_sl_pts=None, dte_override=None,
-                   lot_size=None, real_atm_premium=None):
+                   lot_size=None, real_atm_premium=None,
+                   otm_sl_pct=None, otm_flat_rr=None):
     """
     Simulate one trade using same-day OHLCV to approximate intraday exit.
 
@@ -416,6 +417,8 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     dte_override     : actual DTE calculated from real expiry date. Overrides DAY_DTE dict.
     real_atm_premium : actual 9:15 AM ATM open from Dhan rollingoption data.
                        When provided replaces the BN × PREMIUM_K × √DTE formula.
+    otm_sl_pct       : SL% applied only when selected strike is OTM (dist > 0). Overrides sl_pct for OTM.
+    otm_flat_rr      : RR applied only when selected strike is OTM (dist > 0). Overrides flat_rr for OTM.
 
     Returns (pnl, result, lots, premium, charges_total, charges_breakdown, strike_dist).
       strike_dist: negative=ITM, 0=ATM, positive=OTM (0=unknown for skipped)
@@ -466,6 +469,11 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         if sel is None:
             return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
         _dist, premium, lots, delta = sel
+        # OTM-specific SL/TP override: apply different params when strike is OTM
+        if _dist > 0 and otm_sl_pct is not None:
+            sl = otm_sl_pct
+        if _dist > 0 and otm_flat_rr is not None:
+            rr = otm_flat_rr
         # SL/TP in BN points — use actual delta, not hardcoded 0.5
         sl_pts = (sl * premium) / delta
         tp_pts = (rr * sl * premium) / delta
@@ -560,7 +568,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
 
 def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None,
                  bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True, ml=False,
-                 use_real_premiums=True):
+                 use_real_premiums=True, otm_sl_pct=None, otm_flat_rr=None):
     signals      = load_signals(ml=ml)
     bn_ohlcv     = load_bn_ohlcv()
     opt_premiums = load_real_premiums() if use_real_premiums else {}
@@ -614,7 +622,9 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             bn_sl_pts=bn_sl_pts,
             real_atm_premium=real_prem,
             dte_override=actual_dte,
-            lot_size=actual_lots)
+            lot_size=actual_lots,
+            otm_sl_pct=otm_sl_pct,
+            otm_flat_rr=otm_flat_rr)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -1050,6 +1060,118 @@ def run_tp_fixed_grid(tp_pct=0.30, trail_jump_opt=5):
     print()
 
 
+def run_otm_tp_grid(trail_jump_opt=5):
+    """
+    OTM-specific TP grid: test TP=25–30% at RR=2.5× only for OTM strikes.
+    ATM strikes always keep the live config: SL=15%, TP=37.5% (RR=2.5×).
+
+    Motivation: OTM options have lower delta and higher extrinsic — a 37.5% TP
+    on an OTM option requires a much larger BN move than the same TP on ATM.
+    Lower TP targets (25–30%) may hit more often, improving win rate.
+
+    Uses real premiums where available, falls back to formula.
+    """
+    otm_configs = [
+        (0.25, 2.5),   # TP=25%, SL=10%, RR=2.5×
+        (0.26, 2.5),   # TP=26%, SL=10.4%
+        (0.27, 2.5),   # TP=27%, SL=10.8%
+        (0.28, 2.5),   # TP=28%, SL=11.2%
+        (0.29, 2.5),   # TP=29%, SL=11.6%
+        (0.30, 2.5),   # TP=30%, SL=12%
+    ]
+
+    # Baseline: uniform ATM params applied to all strikes (current live config)
+    baseline_df, _ = run_backtest(
+        trail_jump_opt=trail_jump_opt, sl_pct=0.15, flat_rr=2.5,
+        use_actual_dte=True, use_real_premiums=True,
+    )
+
+    def _stats(df):
+        active   = df[df["result"].isin(["WIN", "LOSS", "PARTIAL", "TRAIL_SL"])]
+        wins     = (active["result"] == "WIN").sum()
+        losses   = (active["result"] == "LOSS").sum()
+        trail_sl = (active["result"] == "TRAIL_SL").sum()
+        total    = len(active)
+        net_pnl  = active["pnl"].sum()
+        end_cap  = df["capital_after"].iloc[-1]
+        wr       = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+        cap_series = df["capital_after"]
+        max_dd   = ((cap_series - cap_series.cummax()) / cap_series.cummax() * 100).min()
+        # OTM/ATM/ITM breakdown
+        otm_rows = active[active["strike_dist"] > 0]
+        atm_rows = active[active["strike_dist"] == 0]
+        otm_wr   = (otm_rows["result"] == "WIN").sum() / max(1, (otm_rows["result"] == "WIN").sum() + (otm_rows["result"] == "LOSS").sum()) * 100
+        atm_wr   = (atm_rows["result"] == "WIN").sum() / max(1, (atm_rows["result"] == "WIN").sum() + (atm_rows["result"] == "LOSS").sum()) * 100
+        return {
+            "total": total, "wins": wins, "losses": losses, "trail_sl": trail_sl,
+            "wr": wr, "net_pnl": net_pnl, "end_cap": end_cap, "max_dd": max_dd,
+            "otm_trades": len(otm_rows), "atm_trades": len(atm_rows),
+            "otm_wr": otm_wr, "atm_wr": atm_wr,
+        }
+
+    base_stats = _stats(baseline_df)
+
+    rows = []
+    rows.append({
+        "Config":      "BASELINE (uniform ATM 15%/37.5%)",
+        "OTM SL%":     "15%",
+        "OTM TP%":     "37.5%",
+        "Total":       base_stats["total"],
+        "OTM trades":  base_stats["otm_trades"],
+        "ATM trades":  base_stats["atm_trades"],
+        "WR%":         f"{base_stats['wr']:.1f}%",
+        "OTM WR%":     f"{base_stats['otm_wr']:.1f}%",
+        "ATM WR%":     f"{base_stats['atm_wr']:.1f}%",
+        "Net P&L":     fmt_inr(base_stats["net_pnl"]),
+        "End Cap":     fmt_inr(base_stats["end_cap"]),
+        "Max DD":      f"{base_stats['max_dd']:.1f}%",
+        "_net_pnl":    base_stats["net_pnl"],
+    })
+
+    for tp_pct, rr in otm_configs:
+        otm_sl = tp_pct / rr
+        trade_df, _ = run_backtest(
+            trail_jump_opt=trail_jump_opt, sl_pct=0.15, flat_rr=2.5,
+            otm_sl_pct=otm_sl, otm_flat_rr=rr,
+            use_actual_dte=True, use_real_premiums=True,
+        )
+        s = _stats(trade_df)
+        rows.append({
+            "Config":      f"OTM {int(tp_pct*100)}%TP / {int(rr)}x RR  (ATM stays 37.5%)",
+            "OTM SL%":     f"{otm_sl*100:.1f}%",
+            "OTM TP%":     f"{tp_pct*100:.0f}%",
+            "Total":       s["total"],
+            "OTM trades":  s["otm_trades"],
+            "ATM trades":  s["atm_trades"],
+            "WR%":         f"{s['wr']:.1f}%",
+            "OTM WR%":     f"{s['otm_wr']:.1f}%",
+            "ATM WR%":     f"{s['atm_wr']:.1f}%",
+            "Net P&L":     fmt_inr(s["net_pnl"]),
+            "End Cap":     fmt_inr(s["end_cap"]),
+            "Max DD":      f"{s['max_dd']:.1f}%",
+            "_net_pnl":    s["net_pnl"],
+        })
+        print(f"  OTM TP={int(tp_pct*100)}% SL={otm_sl*100:.1f}%: "
+              f"WR={s['wr']:.1f}% | OTM WR={s['otm_wr']:.1f}% | "
+              f"Net={fmt_inr(s['net_pnl'])} | DD={s['max_dd']:.1f}%")
+
+    df = pd.DataFrame(rows).sort_values("_net_pnl", ascending=False).reset_index(drop=True)
+
+    print(f"\n{'='*115}")
+    print(f"  OTM TP GRID  —  ATM always: SL=15%, TP=37.5%, RR=2.5×  |  OTM: varies  |  trail=₹{trail_jump_opt}")
+    print(f"  Ranked by Net P&L.  OTM WR% = win rate for OTM strikes only, ATM WR% = ATM-only")
+    print(f"{'='*115}")
+    print(df.drop(columns=["_net_pnl"]).to_string(index=False))
+    print(f"{'='*115}")
+    best = df.iloc[0]
+    print(f"\n  BEST: {best['Config']}")
+    print(f"  OTM SL={best['OTM SL%']}  OTM TP={best['OTM TP%']}  →  WR={best['WR%']}  OTM WR={best['OTM WR%']}  Net={best['Net P&L']}  DD={best['Max DD']}")
+    print(f"\n  OTM trades = capital-thin days where system walks OTM instead of ATM")
+    print(f"  If OTM WR improves significantly, update auto_trader.py:")
+    print(f"    Add conditional: if otm_strike: SL_PCT=X, RR=Y  else: SL_PCT=0.15, RR=2.5")
+    print()
+
+
 def print_summary(trade_df, monthly, threshold=None, ml=False):
     active   = trade_df[trade_df["result"].isin(["WIN", "LOSS", "PARTIAL", "TRAIL_SL"])]
     wins     = (active["result"] == "WIN").sum()
@@ -1382,6 +1504,11 @@ def main():
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--phases":
         print("Month-on-month breakdown by expiry regime phase...")
         run_phase_analysis()
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--otm-grid":
+        print("Running OTM TP grid (OTM: 25–30% TP at RR=2.5×  |  ATM: 15% SL / 37.5% TP)...")
+        run_otm_tp_grid(trail_jump_opt=5)
         return
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--real-premium":
