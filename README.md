@@ -5,7 +5,7 @@ Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:15 AM 
 ---
 
 > **Disclaimer**
-> This project is for educational and research purposes only. Nothing here is financial advice or a recommendation to trade. Options trading involves substantial risk of loss. Past backtest results don't guarantee future performance. Trade at your own risk. Consult a SEBI-registered advisor before making any real trading decisions.
+> This project is for educational and research purposes only. Nothing here is financial advice or a recommendation to trade. Options trading involves substantial risk of loss. Past results do not guarantee future performance. Trade at your own risk. Consult a SEBI-registered advisor before making any real trading decisions.
 
 ---
 
@@ -13,8 +13,8 @@ Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:15 AM 
 
 ```
 Every 5 minutes (all 7 days)
-  └── renew_token.py       — checks if token is 23h50m old, renews if so
-                             (never lets it expire, no manual action needed)
+  └── renew_token.py         — checks if token is 23h50m old, renews if so
+                               (never lets it expire, no manual action needed)
 
 9:15 AM IST, Mon–Fri
   └── auto_trader.py
@@ -25,11 +25,26 @@ Every 5 minutes (all 7 days)
         5. Place Dhan Super Order        →  entry + SL + target in one call
         6. Send Telegram alert
 
+3:15 PM IST, Mon–Fri
+  └── exit_positions.py
+        — Closes any open BankNifty NRML positions not already hit by SL/TP
+        — Prevents unintended overnight carry
+
+3:30 PM IST, Mon–Fri
+  └── trade_journal.py
+        — Reads Dhan tradebook for actual fill prices
+        — Compares oracle intent vs actual entry/exit
+        — Computes slippage, P&L, exit reason (SL/TP/TRAIL/EOD)
+        — Appends row to data/live_trades.csv
+        — Sends EOD journal to Telegram
+
 11:00 PM IST, Mon–Fri
   └── model_evolver.py
         — Retrains the ML brain: Optuna HPO across RF + XGBoost + LightGBM
-        — Picks the best model, saves it as champion.pkl
-        — Sends a Telegram brain-training report
+        — Injects live trade outcomes as real-label training signal (10× weight)
+        — Boosts historical rows matching miss-day patterns to reduce repeat errors
+        — Picks the best model, saves it as models/champion.pkl
+        — Sends a plain-English brain-training report to Telegram
 
 1st of every month, 10:00 AM IST
   └── lot_expiry_scanner.py
@@ -44,7 +59,7 @@ Every 5 minutes (all 7 days)
 | | |
 |---|---|
 | Instrument | BankNifty options (monthly last-Tuesday expiry, Phase 4 Sep 2025+) |
-| Trading days | All 5 weekdays — Wednesday is a normal day (not an expiry day anymore) |
+| Trading days | All 5 weekdays — Wednesday is a normal day (not expiry day) |
 | Direction | CALL or PUT — decided by ML oracle, informed by rule-based score |
 | Strike | ATM first, walks OTM if unaffordable for your capital |
 | Stop-loss | 15% of premium |
@@ -54,7 +69,7 @@ Every 5 minutes (all 7 days)
 | Minimum trade | 1 lot (always trades if you can physically afford it) |
 | Max lots | 20 |
 | Lot size | 30 (Jan 2026+) |
-| Exit | Same-day intraday (MIS) — no overnight risk |
+| Product | MARGIN (NRML) — EOD squareoff by exit_positions.py at 3:15 PM |
 
 ---
 
@@ -73,11 +88,11 @@ Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT
 
 **Step 2 — ML override:**
 
-A walk-forward Random Forest (trained on 4.5 years of data, 71 models) overrides the rule direction when it disagrees. The ML model is right ~86% of the time when it conflicts with the rules. It is a direction oracle — always outputs CALL or PUT, never skips.
+A walk-forward model (champion selected nightly from RF / XGBoost / LightGBM) overrides the rule direction. It is a direction oracle — always outputs CALL or PUT, never skips a trade day.
 
-Top ML features: yesterday's BN return (40% weight), BN-Nifty divergence, overnight gap.
+**Step 3 — Live feedback loop:**
 
-**Nightly evolution:** `model_evolver.py` runs Optuna HPO across three model types every night and promotes the best one. So the model you trade with tomorrow was selected last night from a competition of 120 variants.
+After each live trade, `trade_journal.py` records the actual outcome. Every night the evolver injects those real outcomes back into training and boosts historical rows that match "miss-day" market conditions, so the model incrementally corrects its own mistakes.
 
 ---
 
@@ -86,15 +101,17 @@ Top ML features: yesterday's BN return (40% weight), BN-Nifty divergence, overni
 ```
 auto_trader.py         Morning runner — orchestrates everything, places the order
 signal_engine.py       Rule-based indicators → data/signals.csv
-ml_engine.py           Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast morning predict
+ml_engine.py           Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast predict
 model_evolver.py       Nightly 11 PM — Optuna HPO (RF/XGB/LGB) → models/champion.pkl
 backtest_engine.py     Historical P&L simulation with full cost model
 data_fetcher.py        Downloads OHLCV + global data → data/  (incremental, parallel)
+exit_positions.py      EOD 3:15 PM — closes any open NRML positions before market close
+trade_journal.py       EOD 3:30 PM — captures actual fills vs oracle, builds live_trades.csv
 lot_expiry_scanner.py  Monthly check: BankNifty lot size / expiry day changes
 renew_token.py         Dynamic token renewal — 23h50m interval, 7 days a week
-notify.py              Telegram send helper (2 functions)
+notify.py              Telegram send helper
 dhan_mcp.py            MCP server — query live Dhan positions/P&L from Claude Code
-setup_automation.sh    One-shot VM setup: install deps, set up cron, dry-run test
+setup_automation.sh    One-shot VM setup: install deps, set up all cron jobs, dry-run test
 ```
 
 ---
@@ -110,7 +127,7 @@ setup_automation.sh    One-shot VM setup: install deps, set up cron, dry-run tes
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/PradyXiii/dhan-trading.git
+git clone <your-repo-url>
 cd dhan-trading
 pip3 install pandas numpy yfinance requests python-dotenv scikit-learn \
              optuna xgboost lightgbm joblib mcp --break-system-packages
@@ -123,8 +140,9 @@ cp .env.example .env
 nano .env
 ```
 
+Fill in:
 ```
-DHAN_ACCESS_TOKEN=eyJ...           # from dhan.co → API settings
+DHAN_ACCESS_TOKEN=your_token       # from dhan.co → API settings
 DHAN_CLIENT_ID=your_client_id
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
@@ -145,13 +163,13 @@ python3 model_evolver.py      # first HPO run — takes 5–10 min, saves models
 bash setup_automation.sh      # sets up all cron jobs, tests API, runs dry-run
 ```
 
-This sets up four cron jobs: token renewer (every 5 min), auto trader (9:15 AM), model evolver (11 PM), lot scanner (1st of month).
+This installs six cron jobs: token renewer (every 5 min), auto trader (9:15 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), lot scanner (1st of month).
 
-### 5. Verify it's all working
+### 5. Verify
 
 ```bash
 python3 auto_trader.py --dry-run    # full morning flow without placing an order
-crontab -l                          # confirm all 4 cron jobs are listed
+crontab -l                          # confirm all cron jobs are listed
 cat token_meta.json                 # shows when token was last renewed
 ```
 
@@ -167,8 +185,8 @@ python3 ml_engine.py --predict-today         # fast single ML prediction (<10 se
 python3 ml_engine.py --analyze               # feature importance report
 
 # Backtesting
-python3 backtest_engine.py                   # rule-based backtest (uses real premiums if available)
-python3 backtest_engine.py --real-premium    # explicitly use real premiums
+python3 backtest_engine.py                   # rule-based backtest
+python3 backtest_engine.py --real-premium    # use real historical premiums
 python3 backtest_engine.py --real-premium-ml # ML backtest with real premiums
 
 # Live test
@@ -178,7 +196,11 @@ python3 auto_trader.py --dry-run             # see exactly what would trade toda
 python3 model_evolver.py                     # run nightly HPO manually
 python3 model_evolver.py --no-data           # HPO only, skip data fetch
 
-# Token management (manual, rarely needed)
+# EOD scripts (run manually if needed)
+python3 exit_positions.py --dry-run          # check open positions without closing
+python3 trade_journal.py --dry-run           # journal check without API calls
+
+# Token management
 python3 renew_token.py                       # check / force token renewal
 cat token_meta.json                          # see when it was last renewed
 
@@ -193,8 +215,8 @@ python3 lot_expiry_scanner.py                # run scan + alert if anything chan
 
 `dhan_mcp.py` is an MCP server that lets you ask Claude Code about your live positions:
 
-> "Show me my current positions"  
-> "What's today's P&L?"  
+> "Show me my current positions"
+> "What's today's P&L?"
 > "Did my stop-loss trigger?"
 
 Add to `~/.claude/settings.json`:
@@ -204,7 +226,7 @@ Add to `~/.claude/settings.json`:
   "mcpServers": {
     "dhan": {
       "command": "python3",
-      "args": ["/home/user/dhan-trading/dhan_mcp.py"]
+      "args": ["/path/to/dhan-trading/dhan_mcp.py"]
     }
   }
 }
@@ -214,15 +236,17 @@ Add to `~/.claude/settings.json`:
 
 ## Key design choices
 
-**ML as direction oracle, not filter** — Rules alone are only ~50% directionally accurate. The ML model hits 84.8% directional accuracy. Rather than filtering trades away, it just corrects the direction.
+**ML as direction oracle, not filter** — Rules provide a starting direction. The ML model overrides it when market conditions disagree. It always produces a direction — CALL or PUT — and never skips a trade.
 
-**Monthly expiry (Phase 4, Sep 2025+)** — BankNifty switched from weekly Thursday expiry to monthly last-Tuesday expiry. This means Wednesday is now a normal trading day with 5–20 DTE, not an expiry-day skip.
+**Live feedback loop** — After each trade, the actual outcome (SL hit vs TP hit) gets injected back into the model's training data with high weight. Patterns that caused past misses get upweighted in historical training so the model gradually reduces repeat errors.
 
-**Dynamic token renewal** — Rather than renewing at a fixed time daily (which creates an exact 24h gap over weekends), `renew_token.py` checks every 5 minutes and renews at exactly T+23h50m. Max gap is always 23h55m regardless of day.
+**Monthly expiry (Phase 4, Sep 2025+)** — BankNifty switched from weekly Thursday expiry to monthly last-Tuesday expiry. All 5 weekdays are now valid trading days.
 
-**1-lot minimum** — The 5% risk rule is for sizing (more capital → more lots), not a gate. If you can physically afford 1 lot, the system trades it even if 5% risk would say 0 lots.
+**Dynamic token renewal** — `renew_token.py` checks every 5 minutes and renews at exactly T+23h50m. The token never reaches its 24h expiry regardless of day or time.
 
-**Nightly model competition** — Three model types (RF, XGBoost, LightGBM) compete every night via Optuna HPO. The winner is promoted to champion. Next morning loads in <5 seconds.
+**1-lot minimum** — The 5% risk rule sizes positions (more capital → more lots), not a gate. If you can physically afford 1 lot, the system trades it.
+
+**Nightly model competition** — RF, XGBoost, and LightGBM compete every night via Optuna HPO (120 trials total). The winner is saved as champion.pkl and loaded in under 5 seconds the next morning.
 
 ---
 
