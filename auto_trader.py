@@ -24,6 +24,7 @@ Add --dry-run flag for testing without placing real orders.
 
 import os
 import sys
+import json
 import time
 import fcntl
 import atexit
@@ -278,6 +279,36 @@ def refresh_data_and_signal():
         notify.log("ml_engine.py timed out (60s) — falling back to rule signal")
     except Exception as e:
         notify.log(f"ml_engine.py failed: {e} — falling back to rule signal")
+
+
+def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
+                       sl_price, tp_price, security_id, score, iv=0.0):
+    """
+    Write oracle intent to data/today_trade.json so trade_journal.py can
+    compare it against actual fills at EOD.  Overwrites any previous file.
+    Data stays on VM only — gitignored.
+    """
+    payload = {
+        "date":           date.today().isoformat(),
+        "signal":         signal,
+        "strike":         float(strike),
+        "lots":           int(lots),
+        "dte":            float(dte),
+        "spot_at_signal": float(spot),
+        "oracle_premium": float(oracle_premium),
+        "sl_price":       round(float(sl_price), 2),
+        "tp_price":       round(float(tp_price), 2),
+        "security_id":    str(security_id),
+        "signal_score":   int(score),
+        "iv_at_entry":    float(iv),
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(f"{DATA_DIR}/today_trade.json", "w") as f:
+            json.dump(payload, f, indent=2)
+        notify.log("trade intent written → data/today_trade.json")
+    except Exception as e:
+        notify.log(f"Could not write today_trade.json: {e}")
 
 
 def _is_trading_day() -> bool:
@@ -1131,6 +1162,13 @@ def main():
             f"{footer}"
         )
         return
+
+    # Write oracle intent for EOD trade journal (live trades only)
+    iv_val = float(sig.get("iv_at_entry", sig.get("iv", 0.0)) or 0.0)
+    _write_today_trade(signal, atm_strike, lots, dte, spot,
+                       oracle_premium=premium,
+                       sl_price=sl_price, tp_price=tp_price,
+                       security_id=security_id, score=score, iv=iv_val)
 
     # Live result
     mode = result.get("mode", "SUPER_ORDER")

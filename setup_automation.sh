@@ -105,8 +105,13 @@ EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 EXIT_CMD="45 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/exit.log 2>&1"
 EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, closes open NRML positions before market close"
 
-# Remove old entries (auto_trader + scanner + evolver + renewer + exit) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "exit_positions" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer" | grep -v "EOD squareoff")
+# Trade journal — 3:30 PM IST = 10:00 AM UTC, Mon–Fri
+# Captures actual fills vs oracle intent, appends to data/live_trades.csv
+JOURNAL_CMD="0 10 * * 1-5 cd $SCRIPT_DIR && python3 trade_journal.py >> $LOG_DIR/journal.log 2>&1"
+JOURNAL_COMMENT="# Trade journal — 3:30 PM IST, captures live fills + oracle scorecard"
+
+# Remove old entries (auto_trader + scanner + evolver + renewer + exit + journal) if any
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "exit_positions" | grep -v "trade_journal" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer" | grep -v "EOD squareoff" | grep -v "Trade journal")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -116,6 +121,8 @@ $CRON_COMMENT
 $CRON_CMD
 $EXIT_COMMENT
 $EXIT_CMD
+$JOURNAL_COMMENT
+$JOURNAL_CMD
 $SCANNER_COMMENT
 $SCANNER_CMD
 $EVOLVER_COMMENT
@@ -148,6 +155,9 @@ echo "  Trader log     : $LOG_DIR/auto_trader.log"
 echo ""
 echo "  EOD squareoff  : 3:15 PM IST every weekday (Mon–Fri)"
 echo "  Exit log       : $LOG_DIR/exit.log"
+echo ""
+echo "  Trade journal  : 3:30 PM IST every weekday (Mon–Fri)"
+echo "  Journal log    : $LOG_DIR/journal.log"
 echo ""
 echo "  ML Evolver     : 11:00 PM IST every weekday (Mon–Fri)"
 echo "  Evolver log    : $LOG_DIR/evolver.log"

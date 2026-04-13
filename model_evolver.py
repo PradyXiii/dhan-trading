@@ -575,6 +575,34 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         for r in others
     )
 
+    # Live trade scorecard (only shown when >= 3 live trades recorded)
+    live_section = ""
+    try:
+        import csv as _csv
+        journal_path = f"{DATA_DIR}/live_trades.csv"
+        if os.path.exists(journal_path):
+            with open(journal_path) as f:
+                rows = list(_csv.DictReader(f))
+            total = len(rows)
+            if total >= 3:
+                wins     = sum(1 for r in rows if str(r.get("oracle_correct", "")).lower() == "true")
+                losses   = sum(1 for r in rows if str(r.get("oracle_correct", "")).lower() == "false")
+                live_wr  = round(wins / total * 100)
+                slips    = [float(r["entry_slippage_pct"]) for r in rows
+                            if r.get("entry_slippage_pct") not in ("", None)]
+                avg_slip = f"{sum(slips)/len(slips):+.1f}%" if slips else "n/a"
+                pnls     = [float(r["actual_pnl"]) for r in rows
+                            if r.get("actual_pnl") not in ("", None)]
+                avg_pnl  = f"₹{sum(pnls)/len(pnls):,.0f}" if pnls else "n/a"
+                live_section = (
+                    f"\n\nLive trade scorecard ({total} trades):\n"
+                    f"  Oracle accuracy: {live_wr}% ({wins}W / {losses}L)\n"
+                    f"  Avg entry slippage: {avg_slip}\n"
+                    f"  Avg actual P&L: {avg_pnl}"
+                )
+    except Exception:
+        pass
+
     msg = (
         f"Brain trained  |  {date_str}\n\n"
         f"Today's winner: {champ_name}\n"
@@ -587,6 +615,7 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         f"\n"
         f"Other engines: {others_str}\n"
         f"Signals used: {n_used} indicators"
+        f"{live_section}"
     )
 
     notify.send(msg)
