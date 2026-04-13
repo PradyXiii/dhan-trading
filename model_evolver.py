@@ -47,68 +47,9 @@ for _i, _a in enumerate(sys.argv):
 #  STEP 1 — DATA REFRESH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _renew_token():
-    """
-    Renew the Dhan token at 11 PM. GET /v2/RenewToken returns a BRAND NEW token
-    that immediately invalidates the old one.
-    Writes new token to .env so 9:15 AM auto_trader.py picks it up fresh.
-    """
-    import requests as _req
-    from dotenv import load_dotenv as _lde
-    import os as _os
-    import re as _re
-    _lde()
-    token     = _os.getenv("DHAN_ACCESS_TOKEN", "")
-    client_id = _os.getenv("DHAN_CLIENT_ID",    "")
-    if not token or not client_id:
-        print("  Token renewal: credentials not set — skipping")
-        return
-    try:
-        resp = _req.get(
-            "https://api.dhan.co/v2/RenewToken",
-            headers={"access-token": token, "dhanClientId": client_id},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            new_token = resp.json().get("token")
-            if new_token and new_token != token:
-                env_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".env")
-                if _os.path.exists(env_path):
-                    with open(env_path, "r") as f:
-                        content = f.read()
-                    new_content = _re.sub(
-                        r"^DHAN_ACCESS_TOKEN=.*$",
-                        f"DHAN_ACCESS_TOKEN={new_token}",
-                        content,
-                        flags=_re.MULTILINE,
-                    )
-                    with open(env_path, "w") as f:
-                        f.write(new_content)
-                    # Reset the 23h50m renewal clock for renew_token.py
-                    import json as _json
-                    meta_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "token_meta.json")
-                    try:
-                        with open(meta_path, "w") as f:
-                            _json.dump({"last_renewed_at": __import__("datetime").datetime.now().isoformat()}, f, indent=2)
-                    except Exception:
-                        pass
-                    print("  Token renewed ✓  (.env + token_meta.json updated — clock reset)")
-                else:
-                    print("  Token renewed but .env not found — update DHAN_ACCESS_TOKEN manually")
-            else:
-                print("  Token renewal: 200 but no new token in response")
-        else:
-            print(f"  Token renewal: HTTP {resp.status_code} — existing token remains active")
-    except Exception as e:
-        print(f"  Token renewal skipped ({e})")
-
-
 def refresh_data():
     """Refresh all data CSVs using data_fetcher.py functions."""
     print("\n[1/6] Refreshing data...")
-
-    # Renew token first — 11 PM now, 9:15 AM trade tomorrow needs a valid token
-    _renew_token()
 
     from data_fetcher import (
         fetch_dhan_index, fetch_yfinance,
