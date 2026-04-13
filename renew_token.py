@@ -21,8 +21,8 @@ How it works:
      renewed last resets the 23h50m countdown.
 
 Cron (once daily 7:55 AM IST = 2:25 AM UTC, plus @reboot safety net):
-  25 2 * * *  cd ~/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
-  @reboot     sleep 30 && cd ~/dhan-trading && python3 renew_token.py >> logs/renew_token.log 2>&1
+  25 2 * * *  cd /home/pradeeshr_r9/dhan-trading && python3 renew_token.py >> /home/pradeeshr_r9/dhan-trading/logs/renew_token.log 2>&1
+  @reboot     sleep 30 && cd /home/pradeeshr_r9/dhan-trading && python3 renew_token.py >> /home/pradeeshr_r9/dhan-trading/logs/renew_token.log 2>&1
 """
 
 import os
