@@ -9,7 +9,7 @@ from math import floor
 DATA_DIR         = "data"
 LOT_SIZE         = 30
 RISK_PCT         = 0.05
-SL_PCT           = 0.15   # 15% SL → TP=30% at RR=2.0x (final strategy)
+SL_PCT           = 0.15   # 15% SL → TP=37.5% at RR=2.5x (matches auto_trader.py)
 STARTING_CAPITAL = 30_000
 MONTHLY_TOPUP    = 10_000
 PREMIUM_K        = 0.004
@@ -1570,8 +1570,8 @@ def main():
             threshold = None
             ml_mode   = "ML"
 
-        print(f"Running ML backtest...  [{ml_mode} | SL=15%, TP=30%, RR=2.0x, trail=₹5, actual DTE]")
-        trade_df, monthly = run_backtest(trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0,
+        print(f"Running ML backtest...  [{ml_mode} | SL=15%, TP=37.5%, RR=2.5x, trail=₹5, actual DTE]")
+        trade_df, monthly = run_backtest(trail_jump_opt=5, sl_pct=0.15, flat_rr=2.5,
                                          use_actual_dte=True, ml=True)
 
         trade_df.to_csv(f"{DATA_DIR}/trade_log_ml.csv",    index=False)
@@ -1589,8 +1589,8 @@ def main():
     except Exception:
         threshold = None
 
-    print("Running backtest...  [SL=15%, TP=30%, RR=2.0x, trail=₹5, actual DTE]")
-    trade_df, monthly = run_backtest(trail_jump_opt=5, sl_pct=0.15, flat_rr=2.0, use_actual_dte=True)
+    print("Running backtest...  [SL=15%, TP=37.5%, RR=2.5x, trail=₹5, actual DTE]")
+    trade_df, monthly = run_backtest(trail_jump_opt=5, sl_pct=0.15, flat_rr=2.5, use_actual_dte=True)
 
     trade_df.to_csv(f"{DATA_DIR}/trade_log.csv",    index=False)
     monthly.to_csv( f"{DATA_DIR}/equity_curve.csv", index=False)

@@ -26,6 +26,7 @@ from datetime import date, datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 import notify
+from backtest_engine import get_lot_size
 
 load_dotenv()
 
@@ -256,7 +257,7 @@ def main():
 
     entry_slippage_pct = round((buy_price - oracle_premium) / oracle_premium * 100, 2)
 
-    lot_size    = 30   # BankNifty lot size (Jan 2026+)
+    lot_size    = get_lot_size(date.today())  # 15 pre-Sep2021, 25 Sep2021-Nov2022, 30 Jan2026+
     actual_pnl  = 0.0
     actual_pnl_pct = 0.0
     exit_reason = "OPEN"   # no sell yet

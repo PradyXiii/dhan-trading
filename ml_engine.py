@@ -61,10 +61,10 @@ CHAMPION_META= f"{MODELS_DIR}/champion_meta.json"
 # Max age of champion model before falling back to retrain (calendar days)
 CHAMPION_MAX_AGE_DAYS = 2
 
-# Strategy params — keep in sync with backtest_engine.py
+# Strategy params — keep in sync with backtest_engine.py and auto_trader.py
 SL_PCT    = 0.15
-RR        = 2.0
-TP_PCT    = SL_PCT * RR   # 0.30
+RR        = 2.5
+TP_PCT    = SL_PCT * RR   # 0.375
 
 # Walk-forward params
 MIN_TRAIN      = 252   # ~1 year before first ML prediction
