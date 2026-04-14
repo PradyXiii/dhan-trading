@@ -17,6 +17,7 @@ refresh_token.py
 test_order.py
 validate_token_renewal.py
 logs/
+models/
 
 # GAS morning brief scripts — never committed (contain private prompts/logic)
 *.gs
