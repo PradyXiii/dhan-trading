@@ -237,11 +237,13 @@ def main():
     score          = int(intent.get("signal_score", 0))
     iv             = float(intent.get("iv_at_entry", 0.0))
 
+    lot_size = get_lot_size(date.today())
+
     # 2. Fetch tradebook
     if DRY_RUN:
         notify.log("DRY RUN — skipping tradebook fetch, using oracle premium as placeholder")
-        buy_price, buy_qty   = oracle_premium, lots * 30
-        sell_price, sell_qty = oracle_premium, lots * 30
+        buy_price, buy_qty   = oracle_premium, lots * lot_size
+        sell_price, sell_qty = oracle_premium, lots * lot_size
         sell_time            = None
     else:
         trades = _get_tradebook()
@@ -257,7 +259,6 @@ def main():
 
     entry_slippage_pct = round((buy_price - oracle_premium) / oracle_premium * 100, 2)
 
-    lot_size    = get_lot_size(date.today())  # 15 pre-Sep2021, 25 Sep2021-Nov2022, 30 Jan2026+
     actual_pnl  = 0.0
     actual_pnl_pct = 0.0
     exit_reason = "OPEN"   # no sell yet
