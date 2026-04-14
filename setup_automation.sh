@@ -86,11 +86,13 @@ echo "[5] Installing cron job (9:15 AM IST = 3:45 AM UTC, Mon–Fri)..."
 CRON_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
 CRON_COMMENT="# BankNifty Auto Trader — runs at 9:15 AM IST"
 
-# Dynamic token renewer — runs every 5 minutes, renews when 23h50m have elapsed
-# since the last renewal (10-min buffer before 24h expiry). Script exits immediately
-# if not due yet, so the 5-min polling is lightweight (just a file read + exit).
-RENEWER_CMD="*/5 * * * * cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
-RENEWER_COMMENT="# Token renewer — every 5 min, renews at 23h50m elapsed (10-min buffer, dynamic)"
+# Token renewer — twice daily + @reboot safety net.
+# 7:55 AM IST (2:25 UTC): renews before 9:15 AM trade. 11:00 PM IST (17:30 UTC): overnight renewal.
+# @reboot: covers VM restarts between daily runs.
+RENEWER_CMD_MORNING="25 2  * * *  cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
+RENEWER_CMD_EVENING="30 17 * * *  cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
+RENEWER_CMD_REBOOT="@reboot      sleep 30 && cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
+RENEWER_COMMENT="# Token renewer — twice daily 7:55 AM IST (2:25 UTC) + 11:00 PM IST (17:30 UTC) + @reboot"
 
 # Monthly lot/expiry scanner — 1st of month at 10 AM IST = 4:30 AM UTC
 SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
@@ -116,7 +118,9 @@ EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
 $RENEWER_COMMENT
-$RENEWER_CMD
+$RENEWER_CMD_MORNING
+$RENEWER_CMD_EVENING
+$RENEWER_CMD_REBOOT
 $CRON_COMMENT
 $CRON_CMD
 $EXIT_COMMENT
