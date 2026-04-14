@@ -3,14 +3,12 @@
 renew_token.py — Unconditional Dhan token renewal.
 
 Renews every time it is called — no timing logic, no token_meta.json.
-Run via cron twice daily (7:55 AM and 11:00 PM IST) plus @reboot.
-The ~9h and ~15h gaps between runs keep the token well within its 24h expiry.
-The @reboot entry covers any VM downtime between the two daily runs.
+Run via cron every 5 minutes (installed automatically by setup_automation.sh).
+Renews unconditionally on each call; the Dhan API is idempotent and returns
+a new token only when the previous one is near expiry (24h window).
 
-Cron (add to crontab -e):
-  25 2  * * *  cd /home/pradeeshr_r9/dhan-trading && python3 renew_token.py >> /home/pradeeshr_r9/dhan-trading/logs/renew_token.log 2>&1
-  30 17 * * *  cd /home/pradeeshr_r9/dhan-trading && python3 renew_token.py >> /home/pradeeshr_r9/dhan-trading/logs/renew_token.log 2>&1
-  @reboot      sleep 30 && cd /home/pradeeshr_r9/dhan-trading && python3 renew_token.py >> /home/pradeeshr_r9/dhan-trading/logs/renew_token.log 2>&1
+Cron (installed by setup_automation.sh — do not edit manually):
+  */5 * * * *  cd <SCRIPT_DIR> && python3 renew_token.py >> <LOG_DIR>/renew_token.log 2>&1
 """
 
 import os
