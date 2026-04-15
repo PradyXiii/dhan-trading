@@ -626,6 +626,18 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
 
         print(f"\n  [{mtype.upper()}] Running {n_trials} Optuna trials...")
 
+        try:
+            # Quick import check before spinning up Optuna trials
+            _build_model(mtype, {"n_estimators": 10, "max_depth": 2} if mtype == "rf"
+                         else {"iterations": 10, "depth": 2, "learning_rate": 0.1,
+                               "l2_leaf_reg": 1.0, "bagging_temperature": 0.5} if mtype == "cat"
+                         else {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1,
+                               "subsample": 0.8, "colsample_bytree": 0.8,
+                               "scale_pos_weight": 1.0})
+        except Exception as e:
+            print(f"  [{mtype.upper()}] Not installed — skipping ({e})")
+            continue
+
         # MedianPruner: prune trials scoring below median of first 5 after trial 3
         pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0)
         study  = optuna.create_study(direction="maximize",
