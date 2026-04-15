@@ -467,6 +467,114 @@ def fetch_rollingoption(from_date, to_date):
     return new_df
 
 
+def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
+    """
+    Download NSE F&O bhavcopy archives and compute BankNifty daily PCR.
+
+    Archives: https://nsearchives.nseindia.com/content/historical/DERIVATIVES/
+              YYYY/MON/foDDMONYYYYbhav.csv.zip
+
+    PCR = sum(BANKNIFTY PE open interest) / sum(BANKNIFTY CE open interest).
+    Appends new rows to data/pcr.csv. Skips dates already present.
+    """
+    import io, zipfile
+
+    if to_date is None:
+        to_date = datetime.today().strftime("%Y-%m-%d")
+
+    out_path = f"{DATA_DIR}/pcr.csv"
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    # Dates already in pcr.csv — skip them
+    existing_dates = set()
+    if os.path.exists(out_path):
+        try:
+            ex = pd.read_csv(out_path, parse_dates=["date"])
+            existing_dates = set(ex["date"].dt.date)
+        except Exception:
+            pass
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+        "Referer":    "https://nsearchives.nseindia.com/",
+        "Accept":     "*/*",
+    }
+
+    start = datetime.strptime(from_date, "%Y-%m-%d")
+    end   = datetime.strptime(to_date,   "%Y-%m-%d")
+    new_rows = []
+
+    print(f"  Fetching NSE bhavcopy PCR: {from_date} → {to_date}")
+
+    d = start
+    while d <= end:
+        if d.weekday() >= 5 or d.date() in existing_dates:
+            d += timedelta(days=1)
+            continue
+
+        date_str = d.strftime("%d%b%Y").upper()          # 13APR2026
+        year_str = d.strftime("%Y")
+        mon_str  = d.strftime("%b").upper()               # APR
+        url = (f"https://nsearchives.nseindia.com/content/historical/"
+               f"DERIVATIVES/{year_str}/{mon_str}/fo{date_str}bhav.csv.zip")
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code == 404:
+                d += timedelta(days=1)
+                continue        # holiday / non-trading
+            if resp.status_code != 200:
+                print(f"    {d.date()}: HTTP {resp.status_code} — skipping")
+                d += timedelta(days=1)
+                continue
+
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                with zf.open(zf.namelist()[0]) as f:
+                    df = pd.read_csv(f)
+
+            df.columns = [c.strip().lower() for c in df.columns]
+
+            # Locate BankNifty options rows
+            sym_col = next((c for c in df.columns if "symbol" in c), None)
+            oi_col  = next((c for c in df.columns if "open_int" in c or "oi" == c), None)
+            typ_col = next((c for c in df.columns if "option_typ" in c or "optiontype" in c), None)
+            if sym_col is None or oi_col is None or typ_col is None:
+                d += timedelta(days=1)
+                continue
+
+            bn  = df[df[sym_col].str.strip() == "BANKNIFTY"].copy()
+            if bn.empty:
+                d += timedelta(days=1)
+                continue
+
+            bn[oi_col] = pd.to_numeric(bn[oi_col], errors="coerce").fillna(0)
+            puts  = bn[bn[typ_col].str.strip() == "PE"][oi_col].sum()
+            calls = bn[bn[typ_col].str.strip() == "CE"][oi_col].sum()
+
+            if calls > 0:
+                pcr_val = round(float(puts) / float(calls), 4)
+                new_rows.append({"date": pd.Timestamp(d.date()), "pcr": pcr_val})
+
+            time.sleep(0.25)    # be polite to NSE servers
+
+        except zipfile.BadZipFile:
+            pass    # some dates return HTML instead of ZIP — treat as holiday
+        except Exception as e:
+            print(f"    {d.date()}: error — {e}")
+
+        d += timedelta(days=1)
+
+    if new_rows:
+        new_df = pd.DataFrame(new_rows)
+        _merge_and_save(out_path, new_df)
+        total = len(pd.read_csv(out_path))
+        print(f"  → pcr.csv: +{len(new_rows)} new rows ({total} total)")
+    else:
+        print(f"  → pcr.csv: no new rows (all dates already present or holidays)")
+
+    return new_rows
+
+
 def fetch_nse_pcr(from_date, to_date):
     """
     Fetch BankNifty Put-Call Ratio from NSE historical data.
@@ -605,6 +713,14 @@ def main():
         df = fetch_rollingoption(FROM_DATE, TO_DATE)
         if not df.empty:
             print(f"  Done. {len(df)} new rows fetched.")
+        return
+
+    # Handle --fetch-pcr-historical flag
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-pcr-historical":
+        from_date = _sys.argv[2] if len(_sys.argv) >= 3 else "2022-01-01"
+        print(f"=== Historical BankNifty PCR from NSE bhavcopy ({from_date} → today) ===")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        fetch_pcr_historical(from_date=from_date)
         return
 
     # Handle --process-pcr flag

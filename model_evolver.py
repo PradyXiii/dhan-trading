@@ -221,7 +221,10 @@ BASE_FEATURE_COLS = [
 
 EXTENDED_FEATURE_COLS = BASE_FEATURE_COLS + [
     "gold_ret", "crude_ret", "usdinr_ret", "dxy_ret", "us10y_chg",
-    "pcr", "fii_net_fut", "bn_ret5", "bn_vol_ratio", "atr14_pct",
+    "pcr", "pcr_ma5", "pcr_chg",
+    "vix_open_chg",
+    "fii_net_cash_z", "fii_net_fut",
+    "bn_ret5", "bn_vol_ratio", "atr14_pct",
 ]
 
 

@@ -131,7 +131,9 @@ def load_all_data():
     bn  = bn [["date","open","high","low","close"]].rename(columns={
                "open":"bn_open","high":"bn_high","low":"bn_low","close":"bn_close"})
     nf  = nf [["date","close"]].rename(columns={"close":"nf_close"})
-    vix = vix[["date","close"]].rename(columns={"close":"vix_close"})
+    # Keep VIX open so we can compute vix_open_chg at 9:15 AM
+    vix_cols = ["date","close"] + (["open"] if "open" in vix.columns else [])
+    vix = vix[vix_cols].rename(columns={"open":"vix_open","close":"vix_close"})
     sp  = sp [["date","close"]].rename(columns={"close":"sp_close"})
     nk  = nk [["date","close"]].rename(columns={"close":"nk_close"})
     spf = spf[["date","open","close"]].rename(columns={"open":"spf_open","close":"spf_close"})
@@ -145,6 +147,21 @@ def load_all_data():
     df[ff_cols] = df[ff_cols].ffill(limit=3)
     df = df.dropna(subset=["bn_close","nf_close","vix_close","sp_close",
                             "nk_close","spf_open","spf_close"])
+
+    # ── FII net cash (optional) ───────────────────────────────────────────────
+    fii_path = f"{DATA_DIR}/fii_dii.csv"
+    if os.path.exists(fii_path):
+        try:
+            fii = pd.read_csv(fii_path, parse_dates=["date"])
+            if "fii_net_cash" in fii.columns:
+                df = df.merge(fii[["date","fii_net_cash"]], on="date", how="left")
+                df["fii_net_cash"] = df["fii_net_cash"].ffill(limit=3)
+            else:
+                df["fii_net_cash"] = np.nan
+        except Exception:
+            df["fii_net_cash"] = np.nan
+    else:
+        df["fii_net_cash"] = np.nan
 
     # ── PCR (optional) — merge from pcr_live.csv + pcr.csv if available ──────
     # Missing dates are filled with 0 so the model treats no-PCR days as neutral.
@@ -224,6 +241,41 @@ def compute_features(df):
     d["dte"]          = d["date"].apply(
                             lambda x: get_dte(x.date() if hasattr(x, "date") else x))
 
+    # ── NEW: VIX open direction at 9:15 AM ───────────────────────────────────
+    # vix_open_chg: how much VIX gapped at open vs yesterday's close.
+    # Positive = VIX opened higher (risk-off) → bearish for CALL.
+    # This uses today's open, which IS known at 9:15 AM when the trade is placed.
+    if "vix_open" in d.columns:
+        d["vix_open_chg"] = (d["vix_open"] - d["vix_close"].shift(1)) / \
+                             d["vix_close"].shift(1).replace(0, np.nan) * 100
+    else:
+        d["vix_open_chg"] = 0.0
+    d["vix_open_chg"] = d["vix_open_chg"].fillna(0.0)
+
+    # ── NEW: PCR momentum signals ─────────────────────────────────────────────
+    # pcr_ma5: 5-day smoothed PCR. Trend in sentiment is more reliable than
+    #          the single-day reading (option writers hedge over days).
+    # pcr_chg: day-over-day PCR change — sudden spike in put buying = bearish.
+    if "pcr" in d.columns:
+        d["pcr_ma5"] = d["pcr"].rolling(5, min_periods=2).mean().fillna(d["pcr"])
+        d["pcr_chg"] = d["pcr"].diff().fillna(0.0)
+    else:
+        d["pcr_ma5"] = 1.0
+        d["pcr_chg"] = 0.0
+
+    # ── NEW: FII net cash flow (z-scored) ────────────────────────────────────
+    # FII cash market activity is the dominant institutional flow driver.
+    # Heavy FII selling (negative) = bearish regardless of technicals.
+    # Z-scored over 60-day rolling window to normalise for changing market size.
+    # FII data is previous day's — no lookahead.
+    if "fii_net_cash" in d.columns:
+        _fii = d["fii_net_cash"].fillna(0.0)
+        _mu  = _fii.rolling(60, min_periods=10).mean()
+        _std = _fii.rolling(60, min_periods=10).std().replace(0, np.nan)
+        d["fii_net_cash_z"] = ((_fii - _mu) / _std).fillna(0.0)
+    else:
+        d["fii_net_cash_z"] = 0.0
+
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "bn_nf_div","hv20","bn_gap","vix_pct_chg","vix_hv_ratio","bn_ret20"]
     return d.dropna(subset=req)
@@ -245,8 +297,12 @@ FEATURE_COLS = [
     "bn_ret1", "bn_ret20",
     # Calendar
     "dow", "dte",
-    # Options market sentiment (0 when not available, builds over time)
-    "pcr",
+    # Options market sentiment
+    "pcr", "pcr_ma5", "pcr_chg",
+    # VIX opening direction at 9:15 AM (risk-off/on signal at trade entry)
+    "vix_open_chg",
+    # FII institutional flow (z-scored, previous day — no lookahead)
+    "fii_net_cash_z",
 ]
 
 
