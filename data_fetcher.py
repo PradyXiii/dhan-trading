@@ -467,19 +467,15 @@ def fetch_rollingoption(from_date, to_date):
     return new_df
 
 
-def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
+def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
     """
-    Download NSE F&O bhavcopy archives and compute BankNifty daily PCR.
+    Fetch BankNifty historical ATM PCR from Dhan /v2/charts/rollingoption.
 
-    Archives: https://nsearchives.nseindia.com/content/historical/DERIVATIVES/
-              YYYY/MON/foDDMONYYYYbhav.csv.zip
-
-    PCR = sum(BANKNIFTY PE open interest) / sum(BANKNIFTY CE open interest).
+    ATM PCR = ATM PUT OI / ATM CALL OI (nearest expiry, EOD value).
+    Uses 28-day chunks: ~72 API calls for 3 years. Completes in ~1 min.
     Appends new rows to data/pcr.csv. Skips dates already present.
-    Uses ThreadPoolExecutor for parallel downloads (~8x faster than sequential).
     """
-    import io, zipfile, threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import date as _dt
 
     if to_date is None:
         to_date = datetime.today().strftime("%Y-%m-%d")
@@ -487,7 +483,6 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
     out_path = f"{DATA_DIR}/pcr.csv"
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Dates already in pcr.csv — skip them
     existing_dates = set()
     if os.path.exists(out_path):
         try:
@@ -496,96 +491,97 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
         except Exception:
             pass
 
-    # Build list of all weekday dates not yet fetched
-    start = datetime.strptime(from_date, "%Y-%m-%d")
-    end   = datetime.strptime(to_date,   "%Y-%m-%d")
-    todo  = []
-    d = start
-    while d <= end:
-        if d.weekday() < 5 and d.date() not in existing_dates:
-            todo.append(d)
-        d += timedelta(days=1)
+    start    = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end      = datetime.strptime(to_date,   "%Y-%m-%d").date()
+    boundary = _WEEKLY_DISCONTINUED.date()
 
-    if not todo:
-        print(f"  → pcr.csv: no new dates to fetch (all already present)")
-        return []
+    # Count expected chunks for progress display
+    chunk_count = 0
+    cur = start
+    while cur < end:
+        chunk_count += 1
+        cur = min(cur + timedelta(days=28), end) + timedelta(days=1)
+    print(f"  Fetching BankNifty PCR via Dhan rollingoption: {from_date} → {to_date}")
+    print(f"  ↳ ~{chunk_count * 2} API calls ({chunk_count} chunks × 2 types) — should finish in <1 min")
 
-    est_min = max(1, round(len(todo) / workers * 2 / 60))  # ~2s per request per worker
-    print(f"  Fetching NSE bhavcopy PCR: {from_date} → {to_date}")
-    print(f"  ↳ {len(todo)} trading days to fetch · {workers} parallel workers · "
-          f"~{est_min} min estimated")
+    call_oi_by_date: dict = {}
+    put_oi_by_date:  dict = {}
+    chunk_num = 0
+    current   = start
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
-        "Referer":    "https://nsearchives.nseindia.com/",
-        "Accept":     "*/*",
-    }
+    while current < end:
+        chunk_num += 1
+        if current < boundary:
+            expiry_flag = "WEEK"
+            chunk_end   = min(current + timedelta(days=28),
+                              min(end, boundary - timedelta(days=1)))
+        else:
+            expiry_flag = "MONTH"
+            chunk_end   = min(current + timedelta(days=28), end)
 
-    _lock = threading.Lock()
-    found_count = 0
+        for opt_type in ["CALL", "PUT"]:
+            payload = {
+                "exchangeSegment": "NSE_FNO",
+                "interval":        60,          # hourly — take EOD (last) value per day
+                "securityId":      25,
+                "instrument":      "OPTIDX",
+                "expiryFlag":      expiry_flag,
+                "expiryCode":      1,
+                "strike":          "ATM",
+                "drvOptionType":   opt_type,
+                "requiredData":    ["oi"],
+                "fromDate":        current.strftime("%Y-%m-%d"),
+                "toDate":          chunk_end.strftime("%Y-%m-%d"),
+            }
+            try:
+                resp = requests.post(
+                    "https://api.dhan.co/v2/charts/rollingoption",
+                    headers=HEADERS,
+                    json=payload,
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    print(f"  [{chunk_num}] {opt_type} {current}→{chunk_end}: "
+                          f"HTTP {resp.status_code} — skipping chunk")
+                    time.sleep(0.4)
+                    continue
 
-    def fetch_one_day(day: datetime):
-        date_str = day.strftime("%d%b%Y").upper()   # e.g. 13APR2026
-        year_str = day.strftime("%Y")
-        mon_str  = day.strftime("%b").upper()        # e.g. APR
-        url = (f"https://nsearchives.nseindia.com/content/historical/"
-               f"DERIVATIVES/{year_str}/{mon_str}/fo{date_str}bhav.csv.zip")
+                d        = resp.json().get("data", {})
+                opt_data = (d.get("ce") if opt_type == "CALL" else d.get("pe")) or {}
 
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            if resp.status_code in (404, 403):
-                return None    # holiday / non-trading day
-            if resp.status_code != 200:
-                return None
+                if not opt_data or not opt_data.get("timestamp"):
+                    time.sleep(0.4)
+                    continue
 
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                with zf.open(zf.namelist()[0]) as f:
-                    df = pd.read_csv(f)
+                # Convert Unix epoch → IST date, take LAST OI value per day (EOD)
+                ts_ist = (pd.to_datetime(opt_data["timestamp"], unit="s")
+                          + pd.Timedelta(hours=5, minutes=30))
+                df_tmp = pd.DataFrame({"dt": ts_ist, "oi": opt_data["oi"]})
+                df_tmp["date"] = df_tmp["dt"].dt.date
+                # Skip dates we already have
+                df_tmp = df_tmp[~df_tmp["date"].isin(existing_dates)]
+                daily  = df_tmp.groupby("date")["oi"].last()
 
-            df.columns = [c.strip().lower() for c in df.columns]
+                dest = call_oi_by_date if opt_type == "CALL" else put_oi_by_date
+                for dt, oi_val in daily.items():
+                    dest[dt] = float(oi_val)
 
-            sym_col = next((c for c in df.columns if "symbol"     in c), None)
-            oi_col  = next((c for c in df.columns if "open_int"   in c or c == "oi"), None)
-            typ_col = next((c for c in df.columns if "option_typ" in c or "optiontype" in c), None)
-            if sym_col is None or oi_col is None or typ_col is None:
-                return None
+            except Exception as e:
+                print(f"  [{chunk_num}] {opt_type} {current}→{chunk_end}: error — {e}")
 
-            bn = df[df[sym_col].str.strip() == "BANKNIFTY"].copy()
-            if bn.empty:
-                return None
+            time.sleep(0.4)   # stay within Dhan data API rate limit
 
-            bn[oi_col] = pd.to_numeric(bn[oi_col], errors="coerce").fillna(0)
-            puts  = bn[bn[typ_col].str.strip() == "PE"][oi_col].sum()
-            calls = bn[bn[typ_col].str.strip() == "CE"][oi_col].sum()
+        print(f"  ↳ chunk {chunk_num}/{chunk_count}  {current} → {chunk_end}  "
+              f"(flag={expiry_flag})", flush=True)
+        current = chunk_end + timedelta(days=1)
 
-            if calls > 0:
-                pcr_val = round(float(puts) / float(calls), 4)
-                return {"date": pd.Timestamp(day.date()), "pcr": pcr_val}
-
-        except zipfile.BadZipFile:
-            pass    # NSE returns HTML for holidays — treat as non-trading
-        except Exception:
-            pass
-
-        return None
-
+    # Build PCR rows where both CALL and PUT OI are available
     new_rows = []
-    done = 0
-    total = len(todo)
-    milestones = {int(total * p / 100) for p in (10, 25, 50, 75, 90, 100)}
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(fetch_one_day, day): day for day in todo}
-        for future in as_completed(futures):
-            done += 1
-            result = future.result()
-            if result is not None:
-                with _lock:
-                    new_rows.append(result)
-                    found_count = len(new_rows)
-            if done in milestones or done == total:
-                pct = int(done / total * 100)
-                print(f"  ↳ {done}/{total} ({pct}%)  found {found_count} PCR values", flush=True)
+    for dt in sorted(set(call_oi_by_date) & set(put_oi_by_date)):
+        c_oi = call_oi_by_date[dt]
+        p_oi = put_oi_by_date[dt]
+        if c_oi > 0:
+            new_rows.append({"date": pd.Timestamp(dt), "pcr": round(p_oi / c_oi, 4)})
 
     if new_rows:
         new_df = pd.DataFrame(new_rows).sort_values("date").reset_index(drop=True)
@@ -593,7 +589,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
         total_rows = len(pd.read_csv(out_path))
         print(f"  → pcr.csv: +{len(new_rows)} new rows ({total_rows} total)")
     else:
-        print(f"  → pcr.csv: no new rows (all dates were holidays or already present)")
+        print(f"  → pcr.csv: no new rows (already up to date or no data returned)")
 
     return new_rows
 
