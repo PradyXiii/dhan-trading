@@ -86,19 +86,34 @@ def get_bn_spot() -> float | None:
 
 
 def get_option_ltp(security_id: str) -> float | None:
-    """Current LTP of our option from Dhan positions API."""
+    """Current LTP of our open BN option from Dhan positions API.
+    Matches by security_id first; falls back to first open NSE_FNO BANKNIFTY pos."""
     try:
-        r = requests.get(
-            "https://api.dhan.co/v2/positions",
-            headers=HEADERS,
-            timeout=10,
-        )
+        r = requests.get("https://api.dhan.co/v2/positions", headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            _log(f"Positions API {r.status_code}: {r.text[:80]}")
+            return None
         data  = r.json()
         items = data if isinstance(data, list) else data.get("data", [])
-        for p in items:
+        bn_positions = [
+            p for p in items
+            if int(p.get("netQty", 0)) > 0
+            and p.get("exchangeSegment", "") == "NSE_FNO"
+            and "BANKNIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
+        ]
+        # Prefer exact security_id match
+        for p in bn_positions:
             if str(p.get("securityId", p.get("security_id", ""))) == str(security_id):
                 ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
+                _log(f"Option LTP matched by security_id: ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
                 return ltp if ltp > 0 else None
+        # Fallback: any open BN position (there should only be one per day)
+        if bn_positions:
+            p   = bn_positions[0]
+            ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
+            _log(f"Option LTP (fallback match): ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
+            return ltp if ltp > 0 else None
+        _log("No open BN positions found — SL/TP may have already fired.")
     except Exception as e:
         _log(f"Option LTP unavailable: {e}")
     return None
@@ -109,28 +124,33 @@ def get_macro() -> dict:
     import yfinance as yf
     out = {}
 
-    def _fetch(ticker, key_now, key_prev, interval="5m", period="1d"):
+    def _fetch(ticker, key_now, key_prev, interval, period):
         try:
             df = yf.download(ticker, period=period, interval=interval,
                              progress=False, auto_adjust=True)
-            if df.empty:
-                return
-            close = df["Close"].dropna()
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            close = df["Close"].dropna() if "Close" in df.columns else pd.Series(dtype=float)
             if len(close) < 2:
+                _log(f"  macro {ticker}: only {len(close)} rows — skipping")
                 return
             out[key_now]  = float(close.iloc[-1])
             out[key_prev] = float(close.iloc[0])
-        except Exception:
-            pass
+            _log(f"  macro {ticker}: {float(close.iloc[0]):.2f} → {float(close.iloc[-1]):.2f}")
+        except Exception as e:
+            _log(f"  macro {ticker} error: {e}")
 
-    _fetch("ES=F",      "sp500f_now",  "sp500f_open",  interval="5m", period="1d")
-    _fetch("DX-Y.NYB",  "dxy_now",     "dxy_open",     interval="5m", period="1d")
-    _fetch("^INDIAVIX", "vix_now",     "vix_prev",     interval="1d", period="5d")
+    # SP500 futures — intraday (US markets open ~7:30 PM IST; use prior day if pre-open)
+    _fetch("ES=F",      "sp500f_now",  "sp500f_open",  "5m",  "2d")
+    # DXY — intraday
+    _fetch("DX-Y.NYB",  "dxy_now",     "dxy_open",     "5m",  "2d")
+    # India VIX — daily (no intraday available via yfinance)
+    _fetch("^INDIAVIX", "vix_now",     "vix_prev",     "1d",  "5d")
 
     # Derived
-    if "sp500f_now" in out and "sp500f_open" in out and out["sp500f_open"]:
+    if "sp500f_now" in out and "sp500f_open" in out and out.get("sp500f_open", 0):
         out["sp500f_chg_pct"] = (out["sp500f_now"] - out["sp500f_open"]) / out["sp500f_open"] * 100
-    if "dxy_now" in out and "dxy_open" in out and out["dxy_open"]:
+    if "dxy_now" in out and "dxy_open" in out and out.get("dxy_open", 0):
         out["dxy_chg_pct"] = (out["dxy_now"] - out["dxy_open"]) / out["dxy_open"] * 100
     if "vix_now" in out and "vix_prev" in out:
         out["vix_chg"] = out["vix_now"] - out["vix_prev"]
