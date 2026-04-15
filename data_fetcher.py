@@ -467,7 +467,7 @@ def fetch_rollingoption(from_date, to_date):
     return new_df
 
 
-def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=8):
+def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
     """
     Download NSE F&O bhavcopy archives and compute BankNifty daily PCR.
 
