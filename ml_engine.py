@@ -164,11 +164,18 @@ def load_all_data():
         df["fii_net_cash"] = np.nan
 
     # ── PCR (optional) — merge from pcr_live.csv + pcr.csv if available ──────
-    # Missing dates are filled with 0 so the model treats no-PCR days as neutral.
+    # pcr.csv stores EOD values for day T. At 9:15 AM on day T only day T-1's
+    # EOD PCR is known. Shift by 1 so training sees the same PCR the live system
+    # sees (previous day's close). pcr_live.csv is already correct (fetched pre-open).
     for pcr_file in [f"{DATA_DIR}/pcr.csv", f"{DATA_DIR}/pcr_live.csv"]:
         if os.path.exists(pcr_file):
             try:
                 pcr_df = pd.read_csv(pcr_file, parse_dates=["date"])[["date", "pcr"]]
+                if pcr_file.endswith("pcr.csv"):
+                    # Shift historical EOD values forward by 1 trading day
+                    pcr_df = pcr_df.sort_values("date").copy()
+                    pcr_df["date"] = pcr_df["date"].shift(-1)
+                    pcr_df = pcr_df.dropna(subset=["date"])
                 pcr_df = pcr_df.rename(columns={"pcr": "_pcr_src"})
                 df = df.merge(pcr_df, on="date", how="left")
                 if "pcr" in df.columns:
