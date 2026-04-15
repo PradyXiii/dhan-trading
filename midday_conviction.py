@@ -87,11 +87,17 @@ def get_bn_spot() -> float | None:
 
 def _get_ltp_from_option_chain(trade: dict) -> float | None:
     """Fetch current option premium from Dhan option chain at our known strike.
-    Used as fallback when positions API returns LTP=0 (common early in session)."""
+    Used as fallback when positions API returns LTP=0 (common early in session).
+
+    Strategy:
+      1. Scan entire oc dict by our security_id (most robust — works regardless of key format).
+      2. If not found by SID, try strike key lookup ("56300.000000" or "56300").
+    """
     try:
         strike      = float(trade.get("strike", 0))
         opt_type_lc = "ce" if trade.get("signal", "CALL") == "CALL" else "pe"
         opt_type_uc = opt_type_lc.upper()
+        our_sid     = str(trade.get("security_id", ""))
 
         # Use stored expiry from today_trade.json if available; else fetch nearest
         if trade.get("expiry"):
@@ -116,19 +122,46 @@ def _get_ltp_from_option_chain(trade: dict) -> float | None:
         inner = data.get("data") or {}
         oc    = (inner.get("oc") if isinstance(inner, dict) else None) or {}
 
-        # Strike keys are float-strings ("55900.000000") or int-strings ("55900")
-        key = (f"{strike:.6f}"   if f"{strike:.6f}"   in oc else
-               str(int(strike))  if str(int(strike))   in oc else None)
+        if not oc:
+            _log(f"Option chain returned empty oc (expiry {expiry}). "
+                 f"Response keys: {list(data.keys())}  inner keys: {list(inner.keys()) if isinstance(inner, dict) else type(inner)}")
+            return None
+
+        _log(f"Option chain: {len(oc)} strikes  (expiry {expiry}). "
+             f"Sample keys: {list(oc.keys())[:3]}")
+
+        # ── Strategy 1: scan by security_id (format-agnostic) ──────────────────
+        if our_sid:
+            for strike_key, opts in oc.items():
+                for otk in (opt_type_lc, opt_type_uc):
+                    sub = opts.get(otk) if isinstance(opts, dict) else None
+                    if not sub:
+                        continue
+                    sid_in_chain = str(sub.get("security_id") or sub.get("securityId") or "")
+                    if sid_in_chain == our_sid:
+                        ltp = float(sub.get("last_price") or sub.get("ltp")
+                                    or sub.get("lastPrice") or 0)
+                        _log(f"Option chain matched SID {our_sid}: "
+                             f"₹{ltp:.0f}  [{strike_key} {otk.upper()}]")
+                        if ltp > 0:
+                            return ltp
+                        _log("Option chain SID match but LTP=0")
+                        break
+
+        # ── Strategy 2: strike key lookup ─────────────────────────────────────
+        key = (f"{strike:.6f}"  if f"{strike:.6f}"  in oc else
+               str(int(strike)) if str(int(strike)) in oc else None)
         if key is None:
-            _log(f"Strike {strike:.0f} not found in option chain (expiry {expiry})")
+            _log(f"Strike {strike:.0f} not found by key. "
+                 f"oc sample keys: {list(oc.keys())[:5]}")
             return None
 
         sub = oc[key].get(opt_type_lc) or oc[key].get(opt_type_uc) or {}
         ltp = float(sub.get("last_price") or sub.get("ltp") or sub.get("lastPrice") or 0)
         if ltp > 0:
-            _log(f"Option chain LTP: ₹{ltp:.0f}  [{strike:.0f} {opt_type_uc}  expiry {expiry}]")
+            _log(f"Option chain LTP by strike: ₹{ltp:.0f}  [{strike:.0f} {opt_type_uc}]")
             return ltp
-        _log(f"Option chain also returned 0 for {strike:.0f} {opt_type_uc} (expiry {expiry})")
+        _log(f"Option chain strike key {key} also returned 0 for {opt_type_uc}")
     except Exception as e:
         _log(f"Option chain LTP fallback failed: {e}")
     return None
