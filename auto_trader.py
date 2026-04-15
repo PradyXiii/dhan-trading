@@ -85,6 +85,14 @@ ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
 RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
            # Grid result: 2.5x beats 2.0x on all metrics (+₹24L P&L, DD -8.8% vs -12.9%)
 
+# ── Adaptive opening-wait parameters ─────────────────────────────────────────
+# Root cause of bad 9:15 fills: large BN spot gap → inflated IV at open.
+# If |live_spot - yesterday_close| > ENTRY_SPOT_GAP_THRESHOLD, wait proportionally:
+#   0.5% gap → 5 min,  0.8% → 8 min,  1.0% → 10 min,  ≥1.2% → 12 min (cap)
+# After wait: re-fetch option chain so SL/TP auto-reset to actual fill price.
+ENTRY_SPOT_GAP_THRESHOLD = 0.005   # 0.5% BN spot gap (≈280 pts at 56k) triggers wait
+ENTRY_WAIT_MAX_MINS      = 12      # never wait beyond 9:15 + 12 = 9:27 AM
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1035,6 +1043,52 @@ def main():
     # Guard: lots must be at least 1 — belt-and-suspenders beyond strike selection
     if not lots or lots < 1:
         die(f"Lot sizing returned {lots} — insufficient capital or premium too high for 1 lot.")
+
+    # 4b. Adaptive opening-wait — if BN spot gapped significantly from yesterday's
+    #     close, opening IV is likely elevated. Wait proportionally, then re-fetch
+    #     so SL/TP are anchored to the actual fill price, not the inflated open.
+    sig_spot = float(sig.get("bn_close") or 0)
+    if not DRY_RUN and sig_spot > 0 and spot > 0:
+        spot_gap_pct = abs(spot - sig_spot) / sig_spot
+        if spot_gap_pct >= ENTRY_SPOT_GAP_THRESHOLD:
+            wait_mins = min(ENTRY_WAIT_MAX_MINS, round(spot_gap_pct * 1000))
+            direction_word = "up" if spot > sig_spot else "down"
+            notify.log(
+                f"Adaptive wait: BN spot gapped {direction_word} {spot_gap_pct*100:.1f}% "
+                f"(₹{sig_spot:.0f} → ₹{spot:.0f}). Option at ₹{premium:.0f}. "
+                f"Waiting {wait_mins} min for opening IV to settle..."
+            )
+            notify.send(
+                f"⏳ <b>Adaptive Entry</b>\n\n"
+                f"BN gapped {direction_word} {spot_gap_pct*100:.1f}% at open  "
+                f"(₹{sig_spot:.0f} → ₹{spot:.0f})\n"
+                f"Option currently ₹{premium:.0f}  ·  Signal: <b>{signal}</b> {score:+d}\n\n"
+                f"Waiting <b>{wait_mins} min</b> for opening IV to settle.\n"
+                f"Will enter by ~{(datetime.now() + timedelta(minutes=wait_mins)).strftime('%H:%M')} IST regardless."
+            )
+            time.sleep(wait_mins * 60)
+            # Re-fetch live prices — SL/TP will auto-recalculate from the new premium below
+            notify.log("Adaptive wait complete — re-fetching live option price...")
+            sid2, strike2, prem2, lots2, spot2, otm2 = get_affordable_option(signal, expiry, capital)
+            if sid2 and prem2 and prem2 > 0:
+                improvement = round(premium - prem2, 2)
+                notify.log(
+                    f"After wait: ₹{premium:.0f} → ₹{prem2:.0f}  "
+                    f"({'better by ₹' + str(improvement) if improvement > 0 else 'no improvement ₹' + str(-improvement)})"
+                )
+                security_id, atm_strike, premium, lots, spot, otm_distance = \
+                    sid2, strike2, prem2, lots2, spot2, otm2
+            else:
+                notify.log("Re-fetch returned no data — using original price from 9:15 open.")
+    elif DRY_RUN and sig_spot > 0 and spot > 0:
+        spot_gap_pct = abs(spot - sig_spot) / sig_spot
+        if spot_gap_pct >= ENTRY_SPOT_GAP_THRESHOLD:
+            wait_mins = min(ENTRY_WAIT_MAX_MINS, round(spot_gap_pct * 1000))
+            direction_word = "up" if spot > sig_spot else "down"
+            notify.log(
+                f"[DRY RUN] Adaptive wait WOULD trigger: {spot_gap_pct*100:.1f}% gap "
+                f"{direction_word}. Would wait {wait_mins} min before entering."
+            )
 
     # 5. Sizing — DTE + risk/reward numbers come from the real premium returned above
     dte = max(0.25, (expiry - date.today()).days + 1)
