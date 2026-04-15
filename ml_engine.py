@@ -950,7 +950,7 @@ def predict_today():
             champion_model = None
 
     # ── Slow fallback: retrain RF from scratch ────────────────────────────────
-    if champion_model is None:
+    if not ml_trained:
         print("  No champion model — retraining RandomForest from scratch...")
         X_all     = trading[FEATURE_COLS].values.astype(float)
         labels_df = compute_labels(trading)
