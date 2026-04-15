@@ -310,9 +310,9 @@ def _build_model(model_type, params):
             thread_count=-1, verbose=0)
     elif model_type == "tabpfn":
         from tabpfn import TabPFNClassifier
-        # TabPFN: pre-trained transformer. N_ensemble_configurations = accuracy vs speed.
-        n_ens = params.get("N_ensemble_configurations", 32)
-        return TabPFNClassifier(device="cpu", N_ensemble_configurations=n_ens)
+        # TabPFN v2: n_estimators = number of ensemble forward passes
+        n_ens = params.get("n_estimators", 8)
+        return TabPFNClassifier(device="cpu", n_estimators=n_ens)
     raise ValueError(f"Unknown model_type: {model_type}")
 
 
@@ -553,8 +553,7 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
         }
     elif model_type == "tabpfn":
         params = {
-            "N_ensemble_configurations": trial.suggest_categorical(
-                "N_ensemble_configurations", [8, 16, 32]),
+            "n_estimators": trial.suggest_categorical("n_estimators", [4, 8, 16]),
         }
 
     model = _build_model(model_type, params)
@@ -609,7 +608,7 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
                 _build_model(mtype, {"iterations": 10, "depth": 2, "learning_rate": 0.1,
                                      "l2_leaf_reg": 1.0, "bagging_temperature": 0.5})
             elif mtype == "tabpfn":
-                _build_model(mtype, {"N_ensemble_configurations": 4})
+                _build_model(mtype, {"n_estimators": 4})
             else:
                 _build_model(mtype, {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1,
                                      "subsample": 0.8, "colsample_bytree": 0.8,
