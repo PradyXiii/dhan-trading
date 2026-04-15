@@ -112,8 +112,13 @@ EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, closes open NRML positions before
 JOURNAL_CMD="0 10 * * 1-5 cd $SCRIPT_DIR && python3 trade_journal.py >> $LOG_DIR/journal.log 2>&1"
 JOURNAL_COMMENT="# Trade journal — 3:30 PM IST, captures live fills + oracle scorecard"
 
-# Remove old entries (auto_trader + scanner + evolver + renewer + exit + journal) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "exit_positions" | grep -v "trade_journal" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer" | grep -v "EOD squareoff" | grep -v "Trade journal")
+# Midday conviction check — 11:00 AM IST = 5:30 AM UTC, Mon–Fri
+# Re-evaluates open trade against live BN spot + macro, sends Telegram verdict
+CONVICTION_CMD="30 5 * * 1-5 cd $SCRIPT_DIR && python3 midday_conviction.py >> $LOG_DIR/conviction.log 2>&1"
+CONVICTION_COMMENT="# Midday conviction — 11:00 AM IST, live thesis reassessment"
+
+# Remove old entries (auto_trader + scanner + evolver + renewer + exit + journal + conviction) if any
+EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "exit_positions" | grep -v "trade_journal" | grep -v "midday_conviction" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer" | grep -v "EOD squareoff" | grep -v "Trade journal" | grep -v "Midday conviction")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -127,6 +132,8 @@ $EXIT_COMMENT
 $EXIT_CMD
 $JOURNAL_COMMENT
 $JOURNAL_CMD
+$CONVICTION_COMMENT
+$CONVICTION_CMD
 $SCANNER_COMMENT
 $SCANNER_CMD
 $EVOLVER_COMMENT
