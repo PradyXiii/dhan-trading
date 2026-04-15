@@ -310,10 +310,9 @@ def _build_model(model_type, params):
             thread_count=-1, verbose=0)
     elif model_type == "tabpfn":
         from tabpfn import TabPFNClassifier
-        # TabPFN: zero HPO, single forward pass, pre-trained on synthetic datasets.
-        # N_ensemble_configurations controls accuracy vs speed tradeoff (default 32).
-        # No params passed — it ignores them; included for API consistency.
-        return TabPFNClassifier(device="cpu", N_ensemble_configurations=32)
+        # TabPFN: pre-trained transformer. N_ensemble_configurations = accuracy vs speed.
+        n_ens = params.get("N_ensemble_configurations", 32)
+        return TabPFNClassifier(device="cpu", N_ensemble_configurations=n_ens)
     raise ValueError(f"Unknown model_type: {model_type}")
 
 
@@ -552,9 +551,18 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
             "l2_leaf_reg":     trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
         }
+    elif model_type == "tabpfn":
+        params = {
+            "N_ensemble_configurations": trial.suggest_categorical(
+                "N_ensemble_configurations", [8, 16, 32]),
+        }
 
     model = _build_model(model_type, params)
-    model.fit(X_tr, y_tr, sample_weight=sw_tr)
+    # TabPFN doesn't support sample_weight
+    if model_type == "tabpfn":
+        model.fit(X_tr, y_tr)
+    else:
+        model.fit(X_tr, y_tr, sample_weight=sw_tr)
     y_pred = model.predict(X_val)
     y_prob = model.predict_proba(X_val)[:, list(model.classes_).index(1)] \
              if 1 in model.classes_ else np.zeros(len(y_val))
@@ -589,18 +597,23 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
           + ("  +live-feedback" if sample_weight is not None else ""))
 
     results = []
-    for mtype in ["rf", "xgb", "lgb", "cat"]:
+    for mtype in ["rf", "xgb", "lgb", "cat", "tabpfn"]:
 
         print(f"\n  [{mtype.upper()}] Running {n_trials} Optuna trials...")
 
         try:
             # Quick import check before spinning up Optuna trials
-            _build_model(mtype, {"n_estimators": 10, "max_depth": 2} if mtype == "rf"
-                         else {"iterations": 10, "depth": 2, "learning_rate": 0.1,
-                               "l2_leaf_reg": 1.0, "bagging_temperature": 0.5} if mtype == "cat"
-                         else {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1,
-                               "subsample": 0.8, "colsample_bytree": 0.8,
-                               "scale_pos_weight": 1.0})
+            if mtype == "rf":
+                _build_model(mtype, {"n_estimators": 10, "max_depth": 2})
+            elif mtype == "cat":
+                _build_model(mtype, {"iterations": 10, "depth": 2, "learning_rate": 0.1,
+                                     "l2_leaf_reg": 1.0, "bagging_temperature": 0.5})
+            elif mtype == "tabpfn":
+                _build_model(mtype, {"N_ensemble_configurations": 4})
+            else:
+                _build_model(mtype, {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1,
+                                     "subsample": 0.8, "colsample_bytree": 0.8,
+                                     "scale_pos_weight": 1.0})
         except Exception as e:
             print(f"  [{mtype.upper()}] Not installed — skipping ({e})")
             continue
@@ -665,14 +678,20 @@ def train_champion(champion_meta, X_all, y_all, sample_weight=None):
     """
     params = dict(champion_meta["params"])
     mtype  = champion_meta["model_type"]
-    full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
-    if mtype == "cat":
-        params.pop("n_estimators", None)   # CatBoost uses 'iterations', not 'n_estimators'
+    if mtype == "tabpfn":
+        pass  # TabPFN: pre-trained, no n_estimators to scale up
+    elif mtype == "cat":
+        full_n = _CHAMPION_N_ESTIMATORS.get(mtype, 500)
+        params.pop("n_estimators", None)
         params["iterations"] = full_n
     else:
+        full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
         params["n_estimators"] = full_n
     model = _build_model(mtype, params)
-    model.fit(X_all, y_all, sample_weight=sample_weight)
+    if mtype == "tabpfn":
+        model.fit(X_all, y_all)
+    else:
+        model.fit(X_all, y_all, sample_weight=sample_weight)
     return model
 
 
@@ -957,14 +976,20 @@ def main():
     trained_at_str  = datetime.now(_IST).isoformat()
     for mtype, r in best_by_type.items():
         params = dict(r["params"])
-        full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
-        if mtype == "cat":
+        if mtype == "tabpfn":
+            pass  # pre-trained — no n_estimators to scale
+        elif mtype == "cat":
+            full_n = _CHAMPION_N_ESTIMATORS.get(mtype, 500)
             params.pop("n_estimators", None)
             params["iterations"] = full_n
         else:
+            full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
             params["n_estimators"] = full_n
         m = _build_model(mtype, params)
-        m.fit(X_aug, y_aug, sample_weight=sw)
+        if mtype == "tabpfn":
+            m.fit(X_aug, y_aug)
+        else:
+            m.fit(X_aug, y_aug, sample_weight=sw)
         ensemble_models[mtype] = m
         ensemble_metas[mtype]  = {
             "model_type":   mtype,
