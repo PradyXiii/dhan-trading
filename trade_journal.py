@@ -258,6 +258,10 @@ def main():
         notify.log(f"Could not determine entry price from tradebook (buy_price={buy_price}). Skipping.")
         return
 
+    if oracle_premium <= 0:
+        notify.log(f"oracle_premium is {oracle_premium} in today_trade.json — skipping slippage calc.")
+        return
+
     entry_slippage_pct = round((buy_price - oracle_premium) / oracle_premium * 100, 2)
 
     actual_pnl  = 0.0

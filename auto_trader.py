@@ -313,6 +313,14 @@ def get_todays_signal() -> tuple:
             if days_gap <= 4:
                 note = f"signal from {last['date'].strftime('%d %b')} {label}"
                 notify.log(f"Today's signal not in {csv_path} — using {note}")
+                if days_gap >= 2:
+                    notify.send(
+                        f"⚠️ <b>Stale signal ({days_gap}d old)</b>\n\n"
+                        f"Today's row missing from {csv_path.split('/')[-1]}.\n"
+                        f"Using signal from <b>{last['date'].strftime('%d %b')}</b> — "
+                        f"data pipeline may have failed yesterday.\n"
+                        f"<i>Check: python3 data_fetcher.py && python3 signal_engine.py</i>"
+                    )
                 return last.to_dict(), note
 
         except Exception:

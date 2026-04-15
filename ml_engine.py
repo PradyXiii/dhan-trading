@@ -850,8 +850,22 @@ def predict_today():
         out      = pd.concat([existing, new_row], ignore_index=True)
     else:
         # signals_ml.csv missing — create minimal version from signals.csv + today
+        signals_csv = f"{DATA_DIR}/signals.csv"
+        if not _os.path.exists(signals_csv):
+            print(f"  ERROR: both signals_ml.csv and signals.csv missing — cannot create base.")
+            print(f"  Run: python3 data_fetcher.py && python3 signal_engine.py")
+            try:
+                import notify as _notify
+                _notify.send(
+                    "⚠️ <b>ML Engine</b>\n"
+                    "Both signals_ml.csv and signals.csv are missing.\n"
+                    "Run <code>data_fetcher.py → signal_engine.py</code> manually."
+                )
+            except Exception:
+                pass
+            return None
         print(f"  signals_ml.csv not found — creating from signals.csv + today.")
-        base = pd.read_csv(f"{DATA_DIR}/signals.csv", parse_dates=["date"])
+        base = pd.read_csv(signals_csv, parse_dates=["date"])
         new_row = pd.DataFrame([today_row])
         out = pd.concat([base, new_row], ignore_index=True)
 

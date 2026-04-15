@@ -65,7 +65,7 @@ def load_trade() -> dict | None:
 
 
 def get_bn_spot() -> float | None:
-    """Current BankNifty spot via Dhan option chain."""
+    """Current BankNifty spot via Dhan option chain, with API structure unwrap."""
     try:
         r = requests.post(
             "https://api.dhan.co/v2/optionchain/expirylist",
@@ -73,14 +73,23 @@ def get_bn_spot() -> float | None:
             json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
             timeout=10,
         )
-        expiry = r.json()["data"][0]
+        expiries = r.json().get("data", [])
+        if not expiries:
+            _log("expirylist returned empty — market closed or API issue")
+            return None
+        expiry = expiries[0]
         r2 = requests.post(
             "https://api.dhan.co/v2/optionchain",
             headers=HEADERS,
             json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
             timeout=10,
         )
-        return float(r2.json()["data"]["last_price"])
+        inner = r2.json().get("data") or {}
+        # Dhan wraps chain in {"<id>": {"last_price": ..., "oc": {...}}}
+        if isinstance(inner, dict) and "last_price" not in inner:
+            inner = next(iter(inner.values()), {})
+        spot = float(inner.get("last_price") or inner.get("underlyingPrice") or 0)
+        return spot if spot > 0 else None
     except Exception as e:
         _log(f"BN spot unavailable: {e}")
         return None
