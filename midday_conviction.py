@@ -85,19 +85,55 @@ def get_bn_spot() -> float | None:
         return None
 
 
+def _get_ltp_from_marketfeed(security_id: str) -> float | None:
+    """Fetch current option LTP from Dhan marketfeed/ltp using our security_id.
+    This is the most direct route — no strike-key guessing needed."""
+    try:
+        sid_int = int(security_id)
+        resp = requests.post(
+            "https://api.dhan.co/v2/marketfeed/ltp",
+            headers=HEADERS,
+            json={"NSE_FNO": [sid_int]},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            _log(f"marketfeed/ltp {resp.status_code}: {resp.text[:80]}")
+            return None
+        d = resp.json()
+        # Response: {"data": {"NSE_FNO": {<sid>: {"last_price": ...}}}} or similar
+        fno_data = (d.get("data") or {}).get("NSE_FNO") or d.get("NSE_FNO") or {}
+        entry = fno_data.get(sid_int) or fno_data.get(str(sid_int)) or fno_data.get(security_id) or {}
+        ltp = float(entry.get("last_price") or entry.get("ltp") or entry.get("lastTradedPrice") or 0)
+        if ltp > 0:
+            _log(f"marketfeed/ltp: ₹{ltp:.0f}  [SID {security_id}]")
+            return ltp
+        _log(f"marketfeed/ltp returned 0 for SID {security_id}. Payload: {str(d)[:120]}")
+    except Exception as e:
+        _log(f"marketfeed/ltp failed: {e}")
+    return None
+
+
 def _get_ltp_from_option_chain(trade: dict) -> float | None:
     """Fetch current option premium from Dhan option chain at our known strike.
-    Used as fallback when positions API returns LTP=0 (common early in session).
 
     Strategy:
-      1. Scan entire oc dict by our security_id (most robust — works regardless of key format).
-      2. If not found by SID, try strike key lookup ("56300.000000" or "56300").
+      1. marketfeed/ltp by security_id — direct, reliable, no key-format guessing.
+      2. Option chain scan by security_id — handles any oc key format.
+      3. Option chain strike key lookup — last resort.
     """
+    our_sid = str(trade.get("security_id", ""))
+
+    # ── Strategy 1: marketfeed/ltp (fastest, most direct) ─────────────────────
+    if our_sid:
+        ltp = _get_ltp_from_marketfeed(our_sid)
+        if ltp:
+            return ltp
+
+    # ── Strategy 2 & 3: option chain ──────────────────────────────────────────
     try:
         strike      = float(trade.get("strike", 0))
         opt_type_lc = "ce" if trade.get("signal", "CALL") == "CALL" else "pe"
         opt_type_uc = opt_type_lc.upper()
-        our_sid     = str(trade.get("security_id", ""))
 
         # Use stored expiry from today_trade.json if available; else fetch nearest
         if trade.get("expiry"):
@@ -120,17 +156,24 @@ def _get_ltp_from_option_chain(trade: dict) -> float | None:
         )
         data  = r2.json()
         inner = data.get("data") or {}
-        oc    = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+
+        # Dhan wraps chain in a single-key dict (instrument/scrip id → actual data)
+        # e.g. {"805": {"last_price": ..., "oc": {...}}}
+        if isinstance(inner, dict) and "oc" not in inner and "last_price" not in inner:
+            inner = next(iter(inner.values()), {})
+            _log(f"Unwrapped option chain nesting → inner keys: {list(inner.keys())[:5]}")
+
+        oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
 
         if not oc:
-            _log(f"Option chain returned empty oc (expiry {expiry}). "
-                 f"Response keys: {list(data.keys())}  inner keys: {list(inner.keys()) if isinstance(inner, dict) else type(inner)}")
+            _log(f"Option chain oc still empty after unwrap (expiry {expiry}). "
+                 f"inner keys: {list(inner.keys()) if isinstance(inner, dict) else type(inner)}")
             return None
 
         _log(f"Option chain: {len(oc)} strikes  (expiry {expiry}). "
              f"Sample keys: {list(oc.keys())[:3]}")
 
-        # ── Strategy 1: scan by security_id (format-agnostic) ──────────────────
+        # Strategy 2: scan by security_id (format-agnostic)
         if our_sid:
             for strike_key, opts in oc.items():
                 for otk in (opt_type_lc, opt_type_uc):
@@ -141,27 +184,23 @@ def _get_ltp_from_option_chain(trade: dict) -> float | None:
                     if sid_in_chain == our_sid:
                         ltp = float(sub.get("last_price") or sub.get("ltp")
                                     or sub.get("lastPrice") or 0)
-                        _log(f"Option chain matched SID {our_sid}: "
-                             f"₹{ltp:.0f}  [{strike_key} {otk.upper()}]")
+                        _log(f"Option chain matched SID {our_sid}: ₹{ltp:.0f}  [{strike_key} {otk.upper()}]")
                         if ltp > 0:
                             return ltp
                         _log("Option chain SID match but LTP=0")
-                        break
 
-        # ── Strategy 2: strike key lookup ─────────────────────────────────────
+        # Strategy 3: strike key lookup
         key = (f"{strike:.6f}"  if f"{strike:.6f}"  in oc else
                str(int(strike)) if str(int(strike)) in oc else None)
         if key is None:
-            _log(f"Strike {strike:.0f} not found by key. "
-                 f"oc sample keys: {list(oc.keys())[:5]}")
+            _log(f"Strike {strike:.0f} not in oc keys. Sample: {list(oc.keys())[:5]}")
             return None
-
         sub = oc[key].get(opt_type_lc) or oc[key].get(opt_type_uc) or {}
         ltp = float(sub.get("last_price") or sub.get("ltp") or sub.get("lastPrice") or 0)
         if ltp > 0:
             _log(f"Option chain LTP by strike: ₹{ltp:.0f}  [{strike:.0f} {opt_type_uc}]")
             return ltp
-        _log(f"Option chain strike key {key} also returned 0 for {opt_type_uc}")
+        _log(f"Option chain strike key also returned 0 for {strike:.0f} {opt_type_uc}")
     except Exception as e:
         _log(f"Option chain LTP fallback failed: {e}")
     return None
