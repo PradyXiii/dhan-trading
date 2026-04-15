@@ -36,7 +36,7 @@ HOLDOUT_DAYS = 252   # ~1 year temporal holdout for champion selection
 
 # ── CLI flags ──────────────────────────────────────────────────────────────────
 SKIP_DATA_REFRESH = "--no-data" in sys.argv
-N_TRIALS = 20   # 20 trials: ~55% faster vs 40; TPE finds 90%+ of the optimum by trial 20
+N_TRIALS = 10   # 10 trials: TPE finds ~90% of optimum; halves competition time vs 20
 for _i, _a in enumerate(sys.argv):
     if _a == "--trials" and _i + 1 < len(sys.argv):
         try:
@@ -545,7 +545,7 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
         }
     elif model_type == "cat":
         params = {
-            "iterations":      trial.suggest_int("iterations", 100, 400),
+            "iterations":      trial.suggest_int("iterations", 30, 150),  # HPO speed; champion refit uses 500
             "depth":           trial.suggest_int("depth", 4, 8),
             "learning_rate":   trial.suggest_float("learning_rate", 0.02, 0.2, log=True),
             "l2_leaf_reg":     trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
@@ -617,31 +617,55 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
             print(f"  [{mtype.upper()}] Not installed — skipping ({e})")
             continue
 
-        # MedianPruner: prune trials scoring below median of first 5 after trial 3
-        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=0)
-        study  = optuna.create_study(direction="maximize",
-                                     sampler=optuna.samplers.TPESampler(seed=42),
-                                     pruner=pruner)
-        # TabPFN: only 3 distinct options and very slow on CPU — cap at 3 trials
-        # with a 3-minute wall-clock timeout so it can't block the whole evolver.
-        _tabpfn_trials   = 3 if mtype == "tabpfn" else n_trials
-        _tabpfn_timeout  = 180 if mtype == "tabpfn" else None
-        try:
-            study.optimize(
-                lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val, sw_tr),
-                n_trials=_tabpfn_trials,
-                timeout=_tabpfn_timeout,
-                show_progress_bar=False,
-            )
-        except Exception as e:
-            print(f"  [{mtype.upper()}] Optimization error — skipping ({e})")
-            continue
-        if not study.trials or study.best_trial.state.name != "COMPLETE":
-            print(f"  [{mtype.upper()}] No completed trials (timed out?) — skipping")
-            continue
+        if mtype == "tabpfn":
+            # TabPFN: only 3 options — brute-force eval with a 90s SIGALRM hard kill per trial
+            import signal as _signal
+            class _TabPFNTimeout(Exception):
+                pass
+            def _sigalrm(s, f):
+                raise _TabPFNTimeout()
+            best_params = None
+            best_score  = -1.0
+            for _n_ens in [4, 8, 16]:
+                _signal.signal(_signal.SIGALRM, _sigalrm)
+                _signal.alarm(90)
+                try:
+                    _s = _optuna_objective(
+                        type("T", (), {"suggest_categorical": lambda self, k, v: _n_ens,
+                                       "suggest_int": lambda self, k, lo, hi: _n_ens,
+                                       "suggest_float": lambda self, k, lo, hi, **kw: lo})(),
+                        mtype, X_tr, y_tr, X_val, y_val, sw_tr)
+                    if _s > best_score:
+                        best_score  = _s
+                        best_params = {"n_estimators": _n_ens}
+                    print(f"  [TABPFN] n_estimators={_n_ens}  score={_s:.4f}")
+                except _TabPFNTimeout:
+                    print(f"  [TABPFN] n_estimators={_n_ens}  timed out (>90s) — skipping")
+                except Exception as _e:
+                    print(f"  [TABPFN] n_estimators={_n_ens}  error: {_e}")
+                finally:
+                    _signal.alarm(0)
+            if best_params is None:
+                print("  [TABPFN] All trials timed out — skipping")
+                continue
+        else:
+            # Standard Optuna HPO for RF / XGB / LGB / CAT
+            pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=0)
+            study  = optuna.create_study(direction="maximize",
+                                         sampler=optuna.samplers.TPESampler(seed=42),
+                                         pruner=pruner)
+            try:
+                study.optimize(
+                    lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val, sw_tr),
+                    n_trials=n_trials,
+                    show_progress_bar=False,
+                )
+            except Exception as e:
+                print(f"  [{mtype.upper()}] Optimization error — skipping ({e})")
+                continue
 
-        best_params  = study.best_params
-        best_score   = study.best_value
+            best_params = study.best_params
+            best_score  = study.best_value
 
         # Full eval on holdout with best params
         model = _build_model(mtype, best_params)
