@@ -589,40 +589,7 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
           + ("  +live-feedback" if sample_weight is not None else ""))
 
     results = []
-    for mtype in ["rf", "xgb", "lgb", "cat", "tabpfn"]:
-
-        # ── TabPFN: no HPO needed — single forward pass, pre-trained weights ──
-        if mtype == "tabpfn":
-            print(f"\n  [TABPFN] Zero-shot inference (no HPO)...")
-            try:
-                model = _build_model("tabpfn", {})
-                model.fit(X_tr, y_tr)
-                y_pred  = model.predict(X_val)
-                classes = list(model.classes_)
-                y_prob  = model.predict_proba(X_val)[:, classes.index(1)] \
-                          if 1 in classes else np.zeros(len(y_val))
-                from sklearn.metrics import accuracy_score, recall_score
-                acc      = accuracy_score(y_val, y_pred)
-                rec_call = recall_score(y_val, y_pred, pos_label=1, zero_division=0)
-                rec_put  = recall_score(y_val, y_pred, pos_label=0, zero_division=0)
-                score    = _score(y_val, y_pred, y_prob)
-                brier    = float(np.mean((y_prob - y_val) ** 2))
-                print(f"  [TABPFN] Acc={acc:.1%}  "
-                      f"RecCALL={rec_call:.1%}  RecPUT={rec_put:.1%}  "
-                      f"Composite={score:.4f}")
-                results.append({
-                    "model_type":  "tabpfn",
-                    "params":      {},
-                    "score":       score,
-                    "accuracy":    acc,
-                    "recall_call": rec_call,
-                    "recall_put":  rec_put,
-                    "brier":       brier,
-                    "val_len":     len(X_val),
-                })
-            except Exception as e:
-                print(f"  [TABPFN] Failed — {e}  (skipping)")
-            continue
+    for mtype in ["rf", "xgb", "lgb", "cat"]:
 
         print(f"\n  [{mtype.upper()}] Running {n_trials} Optuna trials...")
 
