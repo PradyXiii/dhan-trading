@@ -428,7 +428,7 @@ def fetch_rollingoption(from_date, to_date):
             except Exception as e:
                 print(f"  rollingoption {opt_type} [{current}→{chunk_end}]: error — {e}")
 
-            time.sleep(0.4)   # stay within data API rate limit (5/sec)
+            time.sleep(0.5)   # 2 req/s — Data API limit is 10 req/s (5x headroom)
 
         # Merge CALL + PUT for this chunk
         all_dates = sorted(set(list(chunk_calls.keys()) + list(chunk_puts.keys())))
@@ -569,7 +569,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
             except Exception as e:
                 print(f"  [{chunk_num}] {opt_type} {current}→{chunk_end}: error — {e}")
 
-            time.sleep(0.4)   # stay within Dhan data API rate limit
+            time.sleep(0.5)   # 2 req/s — Data API limit is 10 req/s (5x headroom)
 
         print(f"  ↳ chunk {chunk_num}/{chunk_count}  {current} → {chunk_end}  "
               f"(flag={expiry_flag})", flush=True)
