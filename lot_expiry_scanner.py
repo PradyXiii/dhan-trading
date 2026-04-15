@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
 lot_expiry_scanner.py — Monthly NSE/Dhan scanner for BankNifty contract changes.
 

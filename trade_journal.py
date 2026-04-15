@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
 trade_journal.py — EOD live trade capture + oracle scorecard
 =============================================================

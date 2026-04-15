@@ -1,3 +1,4 @@
+# DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 import requests
 import pandas as pd
 import numpy as np

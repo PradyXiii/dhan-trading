@@ -4,6 +4,23 @@ Quick reference for Claude Code. Read this before touching any file.
 
 ---
 
+## ⚠️ DHAN API RULE — READ THIS FIRST, EVERY SESSION
+
+**Before writing, debugging, or modifying ANY Dhan API call — read the docs first:**
+
+```
+docs/DHAN_API_V2_REFERENCE.md
+```
+
+This file contains the complete, word-for-word Dhan HQ API v2 reference (compiled April 2026).
+Endpoint signatures, request payloads, response schemas, error codes — all in there.
+
+**Why this matters:** Dhan's response structures are non-obvious (nested instrument IDs,
+float-string strike keys, segment-specific field names). Guessing wastes hours.
+The docs have the exact answer. Read them first, always.
+
+---
+
 ## What This System Does
 
 Fully automated BankNifty options trading. Cron fires at 9:15 AM IST on trading days:

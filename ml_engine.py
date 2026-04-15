@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
 ml_engine.py — Walk-forward ML direction engine for BankNifty options.
 

@@ -1,3 +1,4 @@
+# DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
 notify.py — Telegram notification helper
 Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from .env
