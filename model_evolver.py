@@ -36,7 +36,7 @@ HOLDOUT_DAYS = 252   # ~1 year temporal holdout for champion selection
 
 # ── CLI flags ──────────────────────────────────────────────────────────────────
 SKIP_DATA_REFRESH = "--no-data" in sys.argv
-N_TRIALS = 50   # 50 trials: thorough HPO; TPE converges well within this budget
+N_TRIALS = 30   # 30 trials: good balance of HPO quality vs run time
 for _i, _a in enumerate(sys.argv):
     if _a == "--trials" and _i + 1 < len(sys.argv):
         try:
