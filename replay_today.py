@@ -16,11 +16,14 @@ Shows:
 
 Usage:
   python3 replay_today.py
+  python3 replay_today.py --manual-bn 56400,56800,55900,56100
+      # provide actual BN open,high,low,close when CSV hasn't updated yet
 """
 
 import os
 import sys
 import json
+import argparse
 import numpy as np
 import pandas as pd
 from datetime import date, datetime
@@ -126,6 +129,14 @@ def simulate_trade(signal, entry_premium, bn_open, bn_high, bn_low, bn_close, lo
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser(description="Ensemble replay for today's trade")
+    parser.add_argument(
+        "--manual-bn", "--manual_bn", metavar="O,H,L,C",
+        help="Override BN OHLC from CSV with actual values: open,high,low,close "
+             "e.g. --manual-bn 56400,56800,55900,56100"
+    )
+    args = parser.parse_args()
+
     today_dt = date.today()
     print(f"\n{'═'*60}")
     print(f"  ENSEMBLE REPLAY  —  {today_dt.strftime('%A %d %b %Y')}")
@@ -162,31 +173,49 @@ def main():
         print(f"  ⚠  today_trade.json not found — was a trade placed today?")
 
     # ── 2. Load today's BankNifty OHLCV ──────────────────────────────────────
-    bn_path = f"{DATA_DIR}/banknifty.csv"
-    if not os.path.exists(bn_path):
-        print(f"\n  ❌ {bn_path} not found — cannot simulate P&L")
-        return
+    today_ts  = pd.Timestamp(today_dt)
+    using_date = today_dt
+    manual_override = False
 
-    bn_df    = pd.read_csv(bn_path, parse_dates=["date"])
-    today_ts = pd.Timestamp(today_dt)
-    row      = bn_df[bn_df["date"] == today_ts]
-
-    if row.empty:
-        # Use most recent row available
-        row = bn_df.iloc[[-1]]
-        using_date = bn_df.iloc[-1]["date"].date()
-        print(f"\n  ⚠  No BN row for today — using {using_date} (latest available)")
+    if args.manual_bn:
+        # User-supplied actual OHLC — highest priority
+        try:
+            parts = [float(x.strip()) for x in args.manual_bn.split(",")]
+            if len(parts) != 4:
+                raise ValueError("need exactly 4 values")
+            bn_open, bn_high, bn_low, bn_close = parts
+            manual_override = True
+        except ValueError as e:
+            print(f"\n  ❌ --manual-bn parse error: {e}  (expected O,H,L,C e.g. 56400,56800,55900,56100)")
+            return
     else:
-        using_date = today_dt
+        bn_path = f"{DATA_DIR}/banknifty.csv"
+        if not os.path.exists(bn_path):
+            print(f"\n  ❌ {bn_path} not found — cannot simulate P&L")
+            print(f"     Pass --manual-bn O,H,L,C to simulate with known prices")
+            return
 
-    bn_open  = float(row.iloc[0]["open"])
-    bn_high  = float(row.iloc[0]["high"])
-    bn_low   = float(row.iloc[0]["low"])
-    bn_close = float(row.iloc[0]["close"])
-    day_move = (bn_close - bn_open) / bn_open * 100
+        bn_df = pd.read_csv(bn_path, parse_dates=["date"])
+        row   = bn_df[bn_df["date"] == today_ts]
+
+        if row.empty:
+            row = bn_df.iloc[[-1]]
+            using_date = bn_df.iloc[-1]["date"].date()
+            print(f"\n  ⚠  No BN row for today — using {using_date} (latest in CSV)")
+            print(f"     For today's real P&L run:  python3 replay_today.py --manual-bn O,H,L,C")
+        else:
+            using_date = today_dt
+
+        bn_open  = float(row.iloc[0]["open"])
+        bn_high  = float(row.iloc[0]["high"])
+        bn_low   = float(row.iloc[0]["low"])
+        bn_close = float(row.iloc[0]["close"])
+
+    day_move  = (bn_close - bn_open) / bn_open * 100
     day_range = bn_high - bn_low
 
-    print(f"\n  BANKNIFTY  {using_date}")
+    data_label = f"BANKNIFTY  {using_date}" + ("  [MANUAL OVERRIDE]" if manual_override else "")
+    print(f"\n  {data_label}")
     print(f"  ─────────────────────────────────────")
     print(f"  Open  : {bn_open:>8,.0f}")
     print(f"  High  : {bn_high:>8,.0f}  (+{bn_high - bn_open:,.0f} pts)")
