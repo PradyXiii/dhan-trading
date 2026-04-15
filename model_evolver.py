@@ -957,7 +957,12 @@ def main():
     trained_at_str  = datetime.now(_IST).isoformat()
     for mtype, r in best_by_type.items():
         params = dict(r["params"])
-        params["n_estimators"] = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
+        full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
+        if mtype == "cat":
+            params.pop("n_estimators", None)
+            params["iterations"] = full_n
+        else:
+            params["n_estimators"] = full_n
         m = _build_model(mtype, params)
         m.fit(X_aug, y_aug, sample_weight=sw)
         ensemble_models[mtype] = m
