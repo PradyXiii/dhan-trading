@@ -46,6 +46,15 @@ _lock_fh   = None
 
 def _acquire_lock():
     global _lock_fh
+    # Warn if lock file is very old — fcntl locks auto-release on process death so
+    # this won't block the trade, but it indicates the previous run was slow/crashed.
+    if os.path.exists(_LOCK_FILE):
+        age_secs = time.time() - os.path.getmtime(_LOCK_FILE)
+        if age_secs > 3600:
+            notify.log(
+                f"⚠️ Lock file is {age_secs/60:.0f} min old — previous run may have been "
+                f"slow or crashed. fcntl lock auto-released by OS; proceeding."
+            )
     _lock_fh = open(_LOCK_FILE, "w")
     try:
         fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -63,6 +72,143 @@ def _release_lock():
 
 atexit.register(_release_lock)
 _acquire_lock()
+
+# ── Pre-flight safety helpers (called from main before any trade) ─────────────
+
+def _check_exit_marker():
+    """
+    Verify that exit_positions.py ran successfully yesterday.
+    If marker is missing AND a BN position is still open → CRITICAL alert + exit.
+    Skips check when yesterday was a weekend or NSE holiday (no trading, no exit needed).
+    Called early in main() before any market data or order work.
+    """
+    yesterday = date.today() - timedelta(days=1)
+    # No exit runs on weekends — skip
+    if yesterday.weekday() >= 5:
+        return
+    # No exit needed on holidays — skip (NSE_HOLIDAYS_2026 defined later in file)
+    # We check this lazily: if marker exists we skip fast before NSE_HOLIDAYS_2026 is needed
+    marker = os.path.join(DATA_DIR, f"exit_completed_{yesterday.isoformat()}.marker")
+    if os.path.exists(marker):
+        return  # All good
+
+    # Marker missing — check positions API before raising alarm
+    # (may be a holiday, or no trade was placed yesterday → marker simply not written)
+    notify.log(f"Exit marker for {yesterday} not found — checking positions API...")
+    try:
+        resp = requests.get("https://api.dhan.co/v2/positions",
+                            headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            positions = data if isinstance(data, list) else data.get("data", [])
+            bn_open = [
+                p for p in positions
+                if int(p.get("netQty", 0)) > 0
+                and p.get("exchangeSegment", "") == "NSE_FNO"
+                and "BANKNIFTY" in str(
+                    p.get("tradingSymbol", p.get("securityId", ""))
+                ).upper()
+            ]
+            if bn_open:
+                syms = ", ".join(
+                    p.get("tradingSymbol", str(p.get("securityId", "?")))
+                    for p in bn_open
+                )
+                notify.send(
+                    f"🚨 <b>CRITICAL: Open Position from Yesterday!</b>\n\n"
+                    f"exit_positions.py did NOT run successfully on {yesterday}.\n"
+                    f"Position still open: <code>{syms}</code>\n\n"
+                    f"Close manually on Dhan app <b>IMMEDIATELY</b>.\n"
+                    f"Today's trade is BLOCKED until you resolve this."
+                )
+                sys.exit(1)
+            else:
+                notify.log(
+                    f"Exit marker missing for {yesterday} but no open BN position "
+                    f"found — likely no trade yesterday. Proceeding."
+                )
+        else:
+            notify.log(
+                f"Exit marker check: positions API returned {resp.status_code} "
+                f"— cannot confirm. Proceeding with caution."
+            )
+    except Exception as e:
+        notify.log(f"Exit marker check: positions API failed ({e}) — proceeding.")
+
+
+def _check_no_existing_position() -> bool:
+    """
+    Return True if a BankNifty FNO position (netQty > 0) already exists.
+    Prevents placing a duplicate order if auto_trader.py is invoked twice.
+    Fails OPEN (returns False) on connectivity issues — don't block the trade
+    just because the API is temporarily unreachable.
+    """
+    try:
+        resp = requests.get("https://api.dhan.co/v2/positions",
+                            headers=HEADERS, timeout=10)
+    except Exception as e:
+        notify.log(f"Double-position check: positions API unreachable ({e}) — assuming no open position.")
+        return False
+
+    if resp.status_code != 200:
+        notify.log(f"Double-position check: positions API returned {resp.status_code} — assuming none.")
+        return False
+
+    data = resp.json()
+    positions = data if isinstance(data, list) else data.get("data", [])
+    bn_open = [
+        p for p in positions
+        if int(p.get("netQty", 0)) > 0
+        and p.get("exchangeSegment", "") == "NSE_FNO"
+        and "BANKNIFTY" in str(
+            p.get("tradingSymbol", p.get("securityId", ""))
+        ).upper()
+    ]
+    return len(bn_open) > 0
+
+
+def _verify_order_status(order_id: str, symbol: str):
+    """
+    Check order status ~30s after placement. Alert if REJECTED or CANCELLED.
+    Dhan GET /v2/orders/{order_id} returns the order object.
+    """
+    try:
+        resp = requests.get(f"https://api.dhan.co/v2/orders/{order_id}",
+                            headers=HEADERS, timeout=10)
+    except Exception as e:
+        notify.log(f"Order status check failed ({e}) — verify manually on Dhan app.")
+        return
+
+    if resp.status_code != 200:
+        notify.log(f"Order status API returned {resp.status_code} — verify on Dhan app.")
+        return
+
+    order = resp.json()
+    # Some endpoints return a list, some return a single object
+    if isinstance(order, list):
+        order = next((o for o in order if str(o.get("orderId")) == str(order_id)), {})
+
+    status = str(order.get("orderStatus", "")).upper()
+    if status in ("REJECTED", "CANCELLED"):
+        reason = (order.get("omsErrorDescription")
+                  or order.get("rejectionReason")
+                  or order.get("errorMessage")
+                  or "unknown reason")
+        notify.send(
+            f"🚨 <b>CRITICAL: Order {status}!</b>\n\n"
+            f"Order ID: <code>{order_id}</code>\n"
+            f"Symbol:   <code>{symbol}</code>\n"
+            f"Reason:   {reason}\n\n"
+            f"No position was opened. Act immediately on Dhan app."
+        )
+    elif status in ("TRADED", "PART_TRADED"):
+        notify.log(f"Order status verified: {status} — position opened successfully.")
+    elif status in ("PENDING", "TRANSIT", ""):
+        notify.log(f"Order status: {status or 'not yet updated'} — still settling 30s out. Monitor on Dhan app.")
+    else:
+        notify.log(f"Order status: {status} — check Dhan app if concerned.")
+
+
 TOKEN     = os.getenv("DHAN_ACCESS_TOKEN", "")
 CLIENT_ID = os.getenv("DHAN_CLIENT_ID",    "")
 
@@ -937,6 +1083,10 @@ def main():
     check_credentials()
     _check_lot_size()
 
+    # 0b. Verify yesterday's exit ran — catch open overnight positions before trading
+    if not DRY_RUN:
+        _check_exit_marker()
+
     # 1. Refresh data + signal
     refresh_data_and_signal()
 
@@ -1153,6 +1303,17 @@ def main():
         f"{stale_line}"
     )
 
+    # 6b. Double-position guard — abort if a BN position already exists
+    #     (protects against cron double-fire or manual re-run on same day)
+    if not DRY_RUN and _check_no_existing_position():
+        notify.send(
+            f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+            f"An open BankNifty position already exists on your account.\n"
+            f"Skipping new order to avoid double exposure.\n\n"
+            f"<i>Close the existing position on Dhan app if this is unexpected.</i>"
+        )
+        return
+
     # 7. Place order
     notify.log("Placing order...")
     result = place_super_order(security_id, signal, lots, spot, premium, rr)
@@ -1250,6 +1411,13 @@ def main():
             f"Response: {str(result)[:300]}\n\n"
             f"Check Dhan app → Orders to confirm."
         )
+
+    # 9. Order status verification — wait 30s then confirm not REJECTED
+    #    Skip for AMO (status stays PENDING until market opens) and error modes
+    if oid and mode not in ("AMO", "FAILED", "FALLBACK_NO_SL"):
+        notify.log("Waiting 30s to verify order status is not REJECTED...")
+        time.sleep(30)
+        _verify_order_status(oid, opt_sym)
 
 
 if __name__ == "__main__":

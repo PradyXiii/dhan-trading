@@ -16,7 +16,7 @@ import os
 import sys
 import requests
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from dotenv import load_dotenv
 
 import notify
@@ -33,6 +33,24 @@ HEADERS = {
 }
 
 DATA_DIR = "data"
+
+
+def _write_exit_marker():
+    """
+    Write data/exit_completed_YYYY-MM-DD.marker so tomorrow's auto_trader.py
+    can verify that today's exit script ran successfully.
+    Written for both 'positions closed' and 'nothing to close' outcomes —
+    what matters is the script ran, not that it had anything to do.
+    """
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        marker = os.path.join(DATA_DIR, f"exit_completed_{date.today().isoformat()}.marker")
+        with open(marker, "w") as f:
+            f.write(f"exit_positions.py completed at "
+                    f"{datetime.now().strftime('%H:%M:%S IST')}\n")
+        notify.log(f"Exit marker written: {marker}")
+    except Exception as e:
+        notify.log(f"Could not write exit marker: {e}")
 
 
 # NSE Trading Holidays 2026 — update each December from NSE's annual circular.
@@ -142,6 +160,7 @@ def main():
     positions = get_open_bn_positions()
     if not positions:
         notify.log("No open BankNifty positions — nothing to square off. SL/TP already hit.")
+        _write_exit_marker()
         return
 
     mode      = "  [DRY RUN]" if DRY_RUN else ""
@@ -200,6 +219,7 @@ def main():
         "<i>Position closed to prevent overnight carry on NRML.</i>",
     ]
     notify.send("\n".join(lines))
+    _write_exit_marker()
 
 
 if __name__ == "__main__":

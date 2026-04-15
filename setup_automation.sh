@@ -117,8 +117,38 @@ JOURNAL_COMMENT="# Trade journal — 3:30 PM IST, captures live fills + oracle s
 CONVICTION_CMD="30 5 * * 1-5 cd $SCRIPT_DIR && python3 midday_conviction.py >> $LOG_DIR/conviction.log 2>&1"
 CONVICTION_COMMENT="# Midday conviction — 11:00 AM IST, live thesis reassessment"
 
-# Remove old entries (auto_trader + scanner + evolver + renewer + exit + journal + conviction) if any
-EXISTING=$(crontab -l 2>/dev/null | grep -v "auto_trader" | grep -v "lot_expiry_scanner" | grep -v "model_evolver" | grep -v "renew_token" | grep -v "refresh_token" | grep -v "token_refresh" | grep -v "exit_positions" | grep -v "trade_journal" | grep -v "midday_conviction" | grep -v "BankNifty Auto Trader" | grep -v "BankNifty lot/expiry" | grep -v "ML Model Evolver" | grep -v "Token renewer" | grep -v "EOD squareoff" | grep -v "Trade journal" | grep -v "Midday conviction")
+# Pre-market health ping — 8:50 AM IST = 3:20 AM UTC, Mon–Fri
+# Fires 25 min before trade: checks token, signal freshness, capital, lock file → Telegram all-clear or alert
+HEALTH_CMD="20 3 * * 1-5 cd $SCRIPT_DIR && python3 health_ping.py >> $LOG_DIR/health_ping.log 2>&1"
+HEALTH_COMMENT="# Pre-market health ping — 8:50 AM IST, system checks before trade"
+
+# Weekly log rotation — Sunday 2 AM IST (8:30 PM Sat UTC)
+# Truncates each log to its last 1000 lines if > 10 MB to prevent disk fill
+LOG_ROTATE_CMD="30 20 * * 0 for f in $LOG_DIR/*.log; do [ -f \"\$f\" ] && [ \$(stat -c%s \"\$f\" 2>/dev/null || echo 0) -gt 10485760 ] && tail -n 1000 \"\$f\" > \"\$f.tmp\" && mv \"\$f.tmp\" \"\$f\" && echo \"Rotated \$f\"; done"
+LOG_ROTATE_COMMENT="# Weekly log rotation — Sun 2 AM IST, truncate logs > 10 MB to last 1000 lines"
+
+# Remove old entries (all scripts) if any
+EXISTING=$(crontab -l 2>/dev/null \
+  | grep -v "auto_trader" \
+  | grep -v "lot_expiry_scanner" \
+  | grep -v "model_evolver" \
+  | grep -v "renew_token" \
+  | grep -v "refresh_token" \
+  | grep -v "token_refresh" \
+  | grep -v "exit_positions" \
+  | grep -v "trade_journal" \
+  | grep -v "midday_conviction" \
+  | grep -v "health_ping" \
+  | grep -v "log rotation" \
+  | grep -v "BankNifty Auto Trader" \
+  | grep -v "BankNifty lot/expiry" \
+  | grep -v "ML Model Evolver" \
+  | grep -v "Token renewer" \
+  | grep -v "EOD squareoff" \
+  | grep -v "Trade journal" \
+  | grep -v "Midday conviction" \
+  | grep -v "Pre-market health" \
+  | grep -v "Weekly log rotation")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -126,6 +156,8 @@ $RENEWER_COMMENT
 $RENEWER_CMD_MORNING
 $RENEWER_CMD_EVENING
 $RENEWER_CMD_REBOOT
+$HEALTH_COMMENT
+$HEALTH_CMD
 $CRON_COMMENT
 $CRON_CMD
 $EXIT_COMMENT
@@ -137,7 +169,9 @@ $CONVICTION_CMD
 $SCANNER_COMMENT
 $SCANNER_CMD
 $EVOLVER_COMMENT
-$EVOLVER_CMD"
+$EVOLVER_CMD
+$LOG_ROTATE_COMMENT
+$LOG_ROTATE_CMD"
 
 echo "$NEW_CRON" | crontab -
 
@@ -161,6 +195,9 @@ echo ""
 echo "  Token renewer  : twice daily 7:55 AM IST + 11:00 PM IST + @reboot"
 echo "  Renewer log    : $LOG_DIR/renew_token.log"
 echo ""
+echo "  Health ping    : 8:50 AM IST every weekday (Mon–Fri)"
+echo "  Ping log       : $LOG_DIR/health_ping.log"
+echo ""
 echo "  Auto trader    : 9:15 AM IST every weekday (Mon–Fri)"
 echo "  Trader log     : $LOG_DIR/auto_trader.log"
 echo ""
@@ -172,6 +209,8 @@ echo "  Journal log    : $LOG_DIR/journal.log"
 echo ""
 echo "  ML Evolver     : 11:00 PM IST every weekday (Mon–Fri)"
 echo "  Evolver log    : $LOG_DIR/evolver.log"
+echo ""
+echo "  Log rotation   : Sunday 2:00 AM IST weekly (truncates logs > 10 MB)"
 echo ""
 echo "  To watch the log live:     tail -f $LOG_DIR/auto_trader.log"
 echo "  To test manually now:      python3 auto_trader.py --dry-run"
