@@ -34,14 +34,37 @@ HEADERS = {
 DATA_DIR = "data"
 
 
+# NSE Trading Holidays 2026 — update each December from NSE's annual circular.
+# Tentative moon-based dates marked; verify vs official circular for accuracy.
+NSE_HOLIDAYS_2026 = {
+    date(2026, 1, 26),   # Republic Day
+    date(2026, 2, 19),   # Chhatrapati Shivaji Maharaj Jayanti
+    date(2026, 3, 20),   # Holi
+    date(2026, 4,  3),   # Good Friday
+    date(2026, 4,  6),   # Ram Navami
+    date(2026, 4, 14),   # Dr. B.R. Ambedkar Jayanti
+    date(2026, 5,  1),   # Maharashtra Day
+    date(2026, 6, 27),   # Bakri Id (tentative)
+    date(2026, 8, 15),   # Independence Day
+    date(2026, 8, 27),   # Ganesh Chaturthi
+    date(2026, 10, 2),   # Gandhi Jayanti
+    date(2026, 10, 21),  # Dussehra (tentative)
+    date(2026, 11,  1),  # Diwali Laxmi Pujan (tentative)
+    date(2026, 11,  2),  # Diwali Balipratipada (tentative)
+    date(2026, 11, 24),  # Guru Nanak Jayanti (tentative)
+    date(2026, 12, 25),  # Christmas
+}
+
+
 def _is_trading_day() -> bool:
-    """Return True only if today's date appears in banknifty.csv (NSE trading day)."""
+    """Return True if today is an NSE trading day (weekday + not in holiday list).
+    CSV-presence check removed — Dhan historical API never returns today's candle
+    pre-market or pre-close, causing real trading days to be skipped.
+    """
     today = date.today()
-    try:
-        bn = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
-        return pd.Timestamp(today) in bn["date"].values
-    except Exception:
-        return True   # if CSV unreadable, attempt squareoff anyway
+    if today.weekday() >= 5:
+        return False
+    return today not in NSE_HOLIDAYS_2026
 
 
 def get_open_bn_positions():

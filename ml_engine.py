@@ -691,7 +691,12 @@ def get_today_features(feature_cols):
     today_ts   = pd.Timestamp(pd.Timestamp.now().date())
     today_rows = df[df["date"] == today_ts]
     if today_rows.empty:
-        return None
+        # Pre-market: banknifty.csv has no today row yet (Dhan historical API
+        # only returns closed candles). Use the latest available row's features
+        # — those ARE today's entry conditions (based on yesterday's close).
+        if df.empty:
+            return None
+        today_rows = df.iloc[[-1]]
 
     # Fill any missing feature columns with 0
     for col in feature_cols:
@@ -735,13 +740,21 @@ def predict_today():
 
     today_rows = trading[trading["date"] == today_ts]
     if today_rows.empty:
-        print(f"  {today_dt} is not a Mon/Tue/Thu/Fri — no ML prediction needed.")
-        return
+        # Pre-market: banknifty.csv doesn't have today's candle yet.
+        # Use the latest available trading day's features — those represent
+        # current market conditions (yesterday's close + macro data).
+        if trading.empty:
+            print("  No trading data available — cannot predict.")
+            return
+        today_idx = len(trading) - 1
+        feat_date = trading.iloc[-1]["date"].date()
+        print(f"  Pre-market: using {feat_date} features for {today_dt} prediction")
+    else:
+        today_idx = today_rows.index[0]
 
-    today_idx  = today_rows.index[0]
     rule_row   = trading.iloc[today_idx]
-    rule_sig   = rule_row.get("rule_signal", "NONE")
-    rule_score = rule_row.get("rule_score", 0)
+    rule_sig   = str(rule_row.get("rule_signal", "NONE"))
+    rule_score = int(rule_row.get("rule_score", 0))
 
     ml_trained = False
 
