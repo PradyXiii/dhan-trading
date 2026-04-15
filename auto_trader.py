@@ -231,6 +231,13 @@ ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
 RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
            # Grid result: 2.5x beats 2.0x on all metrics (+₹24L P&L, DD -8.8% vs -12.9%)
 
+# ── ML confidence gate ────────────────────────────────────────────────────────
+# Skip trade when ML model probability is below this threshold.
+# Default 0.55: skip coin-flip days where max(P_CALL, P_PUT) < 55%.
+# Raise to 0.60 for more aggressive filtering (fewer but higher-WR trades).
+# Set to 0.0 to disable and trade every signal like before.
+ML_CONF_THRESHOLD = 0.55
+
 # ── Adaptive opening-wait parameters ─────────────────────────────────────────
 # Root cause of bad 9:15 fills: large BN spot gap → inflated IV at open.
 # If |live_spot - yesterday_close| > ENTRY_SPOT_GAP_THRESHOLD, wait proportionally:
@@ -361,7 +368,7 @@ def refresh_data_and_signal():
 
 def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
                        sl_price, tp_price, security_id, score, iv=0.0,
-                       expiry=None):
+                       expiry=None, ml_conf=0.0):
     """
     Write oracle intent to data/today_trade.json so trade_journal.py can
     compare it against actual fills at EOD.  Overwrites any previous file.
@@ -381,6 +388,7 @@ def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
         "security_id":    str(security_id),
         "signal_score":   int(score),
         "iv_at_entry":    float(iv),
+        "ml_conf":        round(float(ml_conf), 4),
     }
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -1109,8 +1117,10 @@ def main():
 
     # Guard: signal CSV row may have unexpected/missing fields
     try:
-        signal = str(sig.get("signal", "")).upper()
-        score  = int(sig.get("score", 0))
+        signal     = str(sig.get("signal", "")).upper()
+        score      = int(sig.get("score", 0))
+        ml_conf    = float(sig.get("ml_conf", 0.5))
+        ml_trained = bool(sig.get("ml_trained", False))
     except (ValueError, TypeError) as e:
         die(f"Signal CSV row has unexpected format: {e}\nRow: {sig}")
     today_wd     = date.today().strftime("%A")
@@ -1132,6 +1142,21 @@ def main():
         )
         return
 
+    # ML confidence gate — skip coin-flip days
+    # ml_trained=False means pre-warmup fallback (no model); skip gate on those days.
+    score_max = 4
+    if ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:
+        notify.send(
+            f"⏸  <b>No Trade — Low ML Confidence</b>\n"
+            f"─────────────────────\n"
+            f"{today_wd}  ·  {today_label}\n\n"
+            f"Signal     <b>{signal}</b>  (score {score:+d}/{score_max})\n"
+            f"ML conf    <b>{ml_conf:.0%}</b>  (need ≥{ML_CONF_THRESHOLD:.0%})\n\n"
+            f"<i>Model sees no clear directional edge today.\n"
+            f"Waiting for a higher-conviction setup.</i>"
+        )
+        return
+
     # 3. Capital
     capital = get_capital()
     if capital <= 0 and not DRY_RUN:
@@ -1145,8 +1170,6 @@ def main():
     if capital <= 0 and DRY_RUN:
         notify.log("DRY RUN: capital ₹0 → using ₹1,00,000 for simulation")
         capital = 100_000.0
-
-    score_max = 4  # active indicators (used in skip-trade messages too)
 
     # 4. Expiry + find affordable strike (walks ATM → OTM if needed)
     expiry = get_expiry()
@@ -1289,6 +1312,7 @@ def main():
         f"{opt_emoji}  <b>BUY {signal}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Score      {score:+d} / {score_max}{score_desc}\n"
+        f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else '  (gate off)' if not ml_trained else ''}\n"
         f"Capital    {cap_label}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Option     <code>{opt_sym}</code>{otm_label}\n"
@@ -1343,7 +1367,7 @@ def main():
                        oracle_premium=premium,
                        sl_price=sl_price, tp_price=tp_price,
                        security_id=security_id, score=score, iv=iv_val,
-                       expiry=expiry)
+                       expiry=expiry, ml_conf=ml_conf)
 
     # Live result
     mode = result.get("mode", "SUPER_ORDER")
