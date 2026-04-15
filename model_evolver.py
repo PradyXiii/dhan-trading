@@ -1001,9 +1001,20 @@ def main():
     save_ensemble(ensemble_models, ensemble_metas)
 
     # ── 8. Predict tomorrow using ensemble vote ───────────────────────────────
-    # Use trading_full (includes today's unlabelled row) for the prediction step
+    # Always predict from the most recent row in trading_full. If today's data
+    # isn't available yet (late fetch, holiday, weekend), falls back to the
+    # most recent trading day automatically.
     today_ts = pd.Timestamp(datetime.now(_IST).date())
-    today_rows = trading_full[trading_full["date"] == today_ts]
+    exact_match = trading_full[trading_full["date"] == today_ts]
+    if not exact_match.empty:
+        today_rows = exact_match
+        print(f"  Prediction basis: today ({today_ts.date()})")
+    elif not trading_full.empty:
+        today_rows = trading_full.iloc[[-1]]
+        last_date = trading_full.iloc[-1]["date"]
+        print(f"  Prediction basis: most recent available ({pd.Timestamp(last_date).date()}) — today's row not in data")
+    else:
+        today_rows = trading_full.iloc[0:0]  # empty
 
     if not today_rows.empty:
         votes  = []
