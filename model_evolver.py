@@ -918,15 +918,15 @@ def main():
         notify.send(f"Model Evolver failed — feature engineering error: {e}")
         sys.exit(1)
 
-    # Keep only Mon/Tue/Thu/Fri
-    trading = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
+    # Keep only Mon–Fri; preserve full weekday df for today's prediction row
+    trading_full = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
 
     # Labels (binary: 1=CALL, 0=PUT)
-    labels_df = compute_labels(trading)
+    labels_df = compute_labels(trading_full)
     y_all = np.array([1 if l == "CALL" else 0 for l in labels_df["label"].values])
 
-    # Filter to rows that have labels
-    trading = trading.iloc[:len(y_all)].copy()
+    # Filter to rows that have labels (today's row has no next-day label yet)
+    trading = trading_full.iloc[:len(y_all)].copy()
     print(f"  Total trading days with labels: {len(trading)}")
 
     # ── 3. Feature selection ──────────────────────────────────────────────────
@@ -1034,8 +1034,9 @@ def main():
     save_ensemble(ensemble_models, ensemble_metas)
 
     # ── 8. Predict tomorrow using ensemble vote ───────────────────────────────
+    # Use trading_full (includes today's unlabelled row) for the prediction step
     today_ts = pd.Timestamp(datetime.now(_IST).date())
-    today_rows = trading[trading["date"] == today_ts]
+    today_rows = trading_full[trading_full["date"] == today_ts]
 
     if not today_rows.empty:
         votes  = []
