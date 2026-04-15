@@ -36,7 +36,7 @@ HOLDOUT_DAYS = 252   # ~1 year temporal holdout for champion selection
 
 # ── CLI flags ──────────────────────────────────────────────────────────────────
 SKIP_DATA_REFRESH = "--no-data" in sys.argv
-N_TRIALS = 10   # 10 trials: TPE finds ~90% of optimum; halves competition time vs 20
+N_TRIALS = 50   # 50 trials: thorough HPO; TPE converges well within this budget
 for _i, _a in enumerate(sys.argv):
     if _a == "--trials" and _i + 1 < len(sys.argv):
         try:
@@ -308,11 +308,6 @@ def _build_model(model_type, params):
         return CatBoostClassifier(
             **params, auto_class_weights="Balanced", random_seed=42,
             thread_count=-1, verbose=0)
-    elif model_type == "tabpfn":
-        from tabpfn import TabPFNClassifier
-        # TabPFN v2: n_estimators = number of ensemble forward passes
-        n_ens = params.get("n_estimators", 8)
-        return TabPFNClassifier(device="cpu", n_estimators=n_ens)
     raise ValueError(f"Unknown model_type: {model_type}")
 
 
@@ -589,7 +584,6 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
 
     results = []
     for mtype in ["rf", "xgb", "lgb", "cat"]:
-        # TabPFN removed: each CPU inference >90s even at n_estimators=4 — not viable
 
         print(f"\n  [{mtype.upper()}] Running {n_trials} Optuna trials...")
 
@@ -600,8 +594,6 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
             elif mtype == "cat":
                 _build_model(mtype, {"iterations": 10, "depth": 2, "learning_rate": 0.1,
                                      "l2_leaf_reg": 1.0, "bagging_temperature": 0.5})
-            elif mtype == "tabpfn":
-                _build_model(mtype, {"n_estimators": 4})
             else:
                 _build_model(mtype, {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1,
                                      "subsample": 0.8, "colsample_bytree": 0.8,
@@ -674,9 +666,7 @@ def train_champion(champion_meta, X_all, y_all, sample_weight=None):
     """
     params = dict(champion_meta["params"])
     mtype  = champion_meta["model_type"]
-    if mtype == "tabpfn":
-        pass  # TabPFN: pre-trained, no n_estimators to scale up
-    elif mtype == "cat":
+    if mtype == "cat":
         full_n = _CHAMPION_N_ESTIMATORS.get(mtype, 500)
         params.pop("n_estimators", None)
         params["iterations"] = full_n
@@ -684,10 +674,7 @@ def train_champion(champion_meta, X_all, y_all, sample_weight=None):
         full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
         params["n_estimators"] = full_n
     model = _build_model(mtype, params)
-    if mtype == "tabpfn":
-        model.fit(X_all, y_all)
-    else:
-        model.fit(X_all, y_all, sample_weight=sample_weight)
+    model.fit(X_all, y_all, sample_weight=sample_weight)
     return model
 
 
@@ -766,7 +753,7 @@ _FEATURE_LABELS = {
     "ema20_pct":    "Distance from 20-day moving average",
 }
 
-_MODEL_NAMES = {"rf": "Random Forest", "xgb": "XGBoost", "lgb": "LightGBM", "cat": "CatBoost", "tabpfn": "TabPFN"}
+_MODEL_NAMES = {"rf": "Random Forest", "xgb": "XGBoost", "lgb": "LightGBM", "cat": "CatBoost"}
 
 
 def send_telegram_report(results, champion_meta, today_signal, today_conf,
@@ -972,9 +959,7 @@ def main():
     trained_at_str  = datetime.now(_IST).isoformat()
     for mtype, r in best_by_type.items():
         params = dict(r["params"])
-        if mtype == "tabpfn":
-            pass  # pre-trained — no n_estimators to scale
-        elif mtype == "cat":
+        if mtype == "cat":
             full_n = _CHAMPION_N_ESTIMATORS.get(mtype, 500)
             params.pop("n_estimators", None)
             params["iterations"] = full_n
@@ -982,10 +967,7 @@ def main():
             full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
             params["n_estimators"] = full_n
         m = _build_model(mtype, params)
-        if mtype == "tabpfn":
-            m.fit(X_aug, y_aug)
-        else:
-            m.fit(X_aug, y_aug, sample_weight=sw)
+        m.fit(X_aug, y_aug, sample_weight=sw)
         ensemble_models[mtype] = m
         ensemble_metas[mtype]  = {
             "model_type":   mtype,
