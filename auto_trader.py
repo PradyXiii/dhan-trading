@@ -234,21 +234,46 @@ def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
         notify.log(f"Could not write today_trade.json: {e}")
 
 
+# ── NSE Trading Holidays 2026 ─────────────────────────────────────────────────
+# Source: NSE circular (verify + update annually each December).
+# nseindia.com → About NSE → NSE Holidays
+# IMPORTANT: check tentative moon-based dates (Eid, Diwali, Holi) against the
+# official NSE circular for the year — they shift by 1-2 days.
+NSE_HOLIDAYS_2026 = {
+    date(2026, 1, 26),   # Republic Day
+    date(2026, 2, 19),   # Chhatrapati Shivaji Maharaj Jayanti
+    date(2026, 3, 20),   # Holi
+    date(2026, 4, 3),    # Good Friday
+    date(2026, 4, 6),    # Ram Navami
+    date(2026, 4, 14),   # Dr. B.R. Ambedkar Jayanti
+    date(2026, 5, 1),    # Maharashtra Day
+    date(2026, 6, 27),   # Bakri Id (tentative — moon-based)
+    date(2026, 8, 15),   # Independence Day
+    date(2026, 8, 27),   # Ganesh Chaturthi
+    date(2026, 10, 2),   # Gandhi Jayanti
+    date(2026, 10, 21),  # Dussehra (tentative)
+    date(2026, 11, 1),   # Diwali Laxmi Pujan (tentative)
+    date(2026, 11, 2),   # Diwali Balipratipada (tentative)
+    date(2026, 11, 24),  # Guru Nanak Jayanti (tentative)
+    date(2026, 12, 25),  # Christmas
+}
+
+
 def _is_trading_day() -> bool:
     """
-    Return True only if today's date appears in banknifty.csv.
-    data_fetcher populates that file from Dhan — it will have today's row only
-    on actual NSE trading days. Holidays (Diwali, Holi, Republic Day, etc.)
-    produce no row, so this reliably detects non-trading days without needing
-    a manual holiday list.
-    Must be called AFTER refresh_data_and_signal() has run.
+    Return True if today is an NSE trading day (weekday + not in holiday list).
+
+    REPLACES the old CSV-presence check which was broken: Dhan's historical
+    API never returns today's candle at 9:15 AM (daily bar not closed yet),
+    so the old check always returned False, firing the holiday guard on every
+    real trading day (missed Apr 15 2026 trade).
+
+    Update NSE_HOLIDAYS_2026 each December from the official NSE circular.
     """
     today = date.today()
-    try:
-        bn = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
-        return pd.Timestamp(today) in bn["date"].values
-    except Exception:
-        return True   # if CSV unreadable, proceed and let Dhan reject if needed
+    if today.weekday() >= 5:            # Saturday / Sunday
+        return False
+    return today not in NSE_HOLIDAYS_2026
 
 
 def get_todays_signal() -> tuple:
