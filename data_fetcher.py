@@ -572,6 +572,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
     new_rows = []
     done = 0
     total = len(todo)
+    milestones = {int(total * p / 100) for p in (10, 25, 50, 75, 90, 100)}
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(fetch_one_day, day): day for day in todo}
@@ -582,13 +583,9 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=50):
                 with _lock:
                     new_rows.append(result)
                     found_count = len(new_rows)
-            # Print in-place progress every 10 completions or at end
-            if done % 10 == 0 or done == total:
+            if done in milestones or done == total:
                 pct = int(done / total * 100)
-                print(f"  ↳ {done}/{total} ({pct}%)  found {found_count} PCR values",
-                      end="\r", flush=True)
-
-    print()   # newline after final \r progress
+                print(f"  ↳ {done}/{total} ({pct}%)  found {found_count} PCR values", flush=True)
 
     if new_rows:
         new_df = pd.DataFrame(new_rows).sort_values("date").reset_index(drop=True)
