@@ -510,7 +510,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None, workers=8):
         print(f"  → pcr.csv: no new dates to fetch (all already present)")
         return []
 
-    est_min = max(1, round(len(todo) / workers / 4))   # ~4 req/s per worker
+    est_min = max(1, round(len(todo) / workers * 2 / 60))  # ~2s per request per worker
     print(f"  Fetching NSE bhavcopy PCR: {from_date} → {to_date}")
     print(f"  ↳ {len(todo)} trading days to fetch · {workers} parallel workers · "
           f"~{est_min} min estimated")
