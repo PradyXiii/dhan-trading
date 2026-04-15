@@ -162,31 +162,55 @@ def main():
         print(f"  ⚠  today_trade.json not found — was a trade placed today?")
 
     # ── 2. Load today's BankNifty OHLCV ──────────────────────────────────────
+    today_ts  = pd.Timestamp(today_dt)
+    bn_open = bn_high = bn_low = bn_close = None
+    using_date = today_dt
+    data_source = "CSV"
+
     bn_path = f"{DATA_DIR}/banknifty.csv"
-    if not os.path.exists(bn_path):
-        print(f"\n  ❌ {bn_path} not found — cannot simulate P&L")
+    if os.path.exists(bn_path):
+        bn_df = pd.read_csv(bn_path, parse_dates=["date"])
+        row   = bn_df[bn_df["date"] == today_ts]
+        if not row.empty:
+            bn_open  = float(row.iloc[0]["open"])
+            bn_high  = float(row.iloc[0]["high"])
+            bn_low   = float(row.iloc[0]["low"])
+            bn_close = float(row.iloc[0]["close"])
+
+    if bn_open is None:
+        # CSV stale (e.g. post-holiday, market still open) — auto-fetch from yfinance
+        print(f"\n  ⏳  Today's BN row not in CSV — fetching from yfinance (^NSEBANK)...")
+        try:
+            import yfinance as yf
+            from datetime import timedelta
+            yf_end = today_dt + timedelta(days=1)
+            yf_df  = yf.download("^NSEBANK", start=str(today_dt), end=str(yf_end),
+                                 progress=False, auto_adjust=True)
+            if not yf_df.empty:
+                yf_df = yf_df.reset_index()
+                if isinstance(yf_df.columns, pd.MultiIndex):
+                    yf_df.columns = yf_df.columns.get_level_values(0)
+                yf_df.columns = [c.lower() for c in yf_df.columns]
+                r = yf_df.iloc[0]
+                bn_open  = float(r["open"])
+                bn_high  = float(r["high"])
+                bn_low   = float(r["low"])
+                bn_close = float(r["close"])
+                data_source = "yfinance ^NSEBANK"
+                print(f"  ✓  Live data fetched from yfinance")
+            else:
+                print(f"  ⚠  yfinance returned no data — market may still be open or holiday")
+        except Exception as e:
+            print(f"  ⚠  yfinance fetch failed: {e}")
+
+    if bn_open is None:
+        print(f"\n  ❌  No BN OHLCV available for today — run after market close")
         return
 
-    bn_df    = pd.read_csv(bn_path, parse_dates=["date"])
-    today_ts = pd.Timestamp(today_dt)
-    row      = bn_df[bn_df["date"] == today_ts]
-
-    if row.empty:
-        # Use most recent row available
-        row = bn_df.iloc[[-1]]
-        using_date = bn_df.iloc[-1]["date"].date()
-        print(f"\n  ⚠  No BN row for today — using {using_date} (latest available)")
-    else:
-        using_date = today_dt
-
-    bn_open  = float(row.iloc[0]["open"])
-    bn_high  = float(row.iloc[0]["high"])
-    bn_low   = float(row.iloc[0]["low"])
-    bn_close = float(row.iloc[0]["close"])
-    day_move = (bn_close - bn_open) / bn_open * 100
+    day_move  = (bn_close - bn_open) / bn_open * 100
     day_range = bn_high - bn_low
 
-    print(f"\n  BANKNIFTY  {using_date}")
+    print(f"\n  BANKNIFTY  {using_date}  [{data_source}]")
     print(f"  ─────────────────────────────────────")
     print(f"  Open  : {bn_open:>8,.0f}")
     print(f"  High  : {bn_high:>8,.0f}  (+{bn_high - bn_open:,.0f} pts)")
