@@ -635,6 +635,10 @@ def run_analysis():
 #  CHAMPION MODEL — helpers for fast morning prediction
 # ─────────────────────────────────────────────────────────────────────────────
 
+ENSEMBLE_DIR  = f"{MODELS_DIR}/ensemble"
+ENSEMBLE_META = f"{MODELS_DIR}/ensemble_meta.json"
+
+
 def load_champion():
     """
     Load saved champion model from models/champion.pkl.
@@ -666,6 +670,58 @@ def load_champion():
     except Exception as e:
         print(f"  Could not load champion model: {e}")
         return None, None
+
+
+def load_ensemble():
+    """
+    Load the per-type ensemble from models/ensemble/ (rf.pkl, xgb.pkl, lgb.pkl).
+    Returns ([(model, meta), ...], trained_at) or ([], None) if unavailable / stale.
+
+    Freshness check uses the same CHAMPION_MAX_AGE_DAYS as the single champion.
+    Falls back gracefully — if only 2 of 3 files exist, those 2 are used.
+    """
+    import json as _json
+    import joblib
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    if not os.path.exists(ENSEMBLE_META):
+        return [], None
+
+    try:
+        with open(ENSEMBLE_META) as f:
+            metas = _json.load(f)   # dict: {mtype: meta_dict}
+    except Exception as e:
+        print(f"  Could not read ensemble_meta.json: {e}")
+        return [], None
+
+    # Freshness: check first model's trained_at
+    first_meta = next(iter(metas.values()), {})
+    trained_at_str = first_meta.get("trained_at", "")
+    try:
+        trained_at = _dt.fromisoformat(trained_at_str)
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=_tz(_td(hours=5, minutes=30)))
+        age_days = (_dt.now(trained_at.tzinfo) - trained_at).days
+        if age_days > CHAMPION_MAX_AGE_DAYS:
+            print(f"  Ensemble is {age_days} days old (max {CHAMPION_MAX_AGE_DAYS}) — will retrain.")
+            return [], None
+    except Exception:
+        pass   # Can't parse date → proceed anyway
+
+    loaded = []
+    for mtype in ["rf", "xgb", "lgb"]:
+        pkl_path = f"{ENSEMBLE_DIR}/{mtype}.pkl"
+        if not os.path.exists(pkl_path):
+            continue
+        if mtype not in metas:
+            continue
+        try:
+            model = joblib.load(pkl_path)
+            loaded.append((model, metas[mtype]))
+        except Exception as e:
+            print(f"  Could not load ensemble[{mtype}]: {e}")
+
+    return loaded, trained_at_str if loaded else None
 
 
 def get_today_features(feature_cols):
@@ -758,9 +814,55 @@ def predict_today():
     rule_score = int(rule_row.get("rule_score", 0))
 
     ml_trained = False
+    p_call = p_put = 0.5
 
-    # ── Fast path: load champion model ────────────────────────────────────────
-    champion_model, champion_meta = load_champion()
+    # ── Fast path A: ensemble vote (RF + XGB + LGB majority) ─────────────────
+    # Preferred over single champion — reduces per-model variance significantly.
+    # All 3 models predict independently; majority direction wins.
+    # ml_conf = average probability of the models that voted for the winning direction.
+    ensemble_members, ensemble_trained_at = load_ensemble()
+
+    if ensemble_members:
+        votes  = []   # direction per model
+        confs  = []   # max(p_call, p_put) per model
+        pcalls = []
+
+        for model, meta in ensemble_members:
+            fc     = meta["feature_cols"]
+            X_t    = get_today_features(fc)
+            if X_t is None or len(X_t) == 0:
+                continue
+            proba   = model.predict_proba(X_t)[0]
+            classes = list(model.classes_)
+            pc = float(proba[classes.index(1)]) if 1 in classes else 0.5
+            pp = float(proba[classes.index(0)]) if 0 in classes else 0.5
+            votes.append("CALL" if pc >= pp else "PUT")
+            confs.append(max(pc, pp))
+            pcalls.append(pc)
+
+        if votes:
+            call_v = votes.count("CALL")
+            put_v  = votes.count("PUT")
+            ml_signal = "CALL" if call_v >= put_v else "PUT"
+            # Confidence = average prob from models that agreed with winner
+            agreed_confs = [c for v, c in zip(votes, confs) if v == ml_signal]
+            ml_conf   = sum(agreed_confs) / len(agreed_confs)
+            p_call    = sum(pcalls) / len(pcalls)   # avg across ensemble
+            p_put     = 1.0 - p_call
+            ml_trained = True
+            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB"}
+            vote_str = "  ".join(
+                f"{names.get(m[1]['model_type'], '?')}:{v}"
+                for m, v in zip(ensemble_members, votes)
+            )
+            print(f"  Ensemble ({len(votes)} models, trained {(ensemble_trained_at or '')[:10]}):")
+            print(f"  {vote_str}  →  {call_v}/3 CALL  {put_v}/3 PUT")
+            print(f"  → {ml_signal}  (avg agreed conf {ml_conf:.1%})")
+
+    # ── Fast path B: single champion model (fallback if ensemble not ready) ───
+    champion_model = None
+    if not ensemble_members:
+        champion_model, champion_meta = load_champion()
 
     if champion_model is not None:
         feature_cols = champion_meta["feature_cols"]

@@ -654,6 +654,23 @@ def save_champion(model, meta):
     print(f"  Saved: {CHAMPION_META}")
 
 
+ENSEMBLE_DIR  = f"{MODELS_DIR}/ensemble"
+ENSEMBLE_META = f"{MODELS_DIR}/ensemble_meta.json"
+
+
+def save_ensemble(models_dict, metas_dict):
+    """Save one trained model per type (rf/xgb/lgb) for ensemble prediction."""
+    import joblib
+    os.makedirs(ENSEMBLE_DIR, exist_ok=True)
+    for mtype, model in models_dict.items():
+        path = f"{ENSEMBLE_DIR}/{mtype}.pkl"
+        joblib.dump(model, path)
+        print(f"  Saved ensemble[{mtype}]: {path}")
+    with open(ENSEMBLE_META, "w") as f:
+        json.dump(metas_dict, f, indent=2)
+    print(f"  Saved: {ENSEMBLE_META}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  STEP 8 — TELEGRAM REPORT (plain English)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -878,15 +895,46 @@ def main():
 
     champion = results[0]
 
-    # ── 5+6. Final training on all data ──────────────────────────────────────
-    print(f"\n[5/6] Final training: {_MODEL_NAMES[champion['model_type']]} on all {len(X_aug)} rows"
-          f"{'  (+live feedback)' if has_feedback else ''}...")
-    final_model = train_champion(
-        champion, X_aug, y_aug,
-        sample_weight=sample_weights if has_feedback else None,
-    )
+    # ── 5+6. Final training: champion + full ensemble (one per model type) ────
+    # Champion: overall best — used as single-model fallback (backwards compatible).
+    # Ensemble: best RF + best XGB + best LGB trained individually on full data.
+    # At prediction time, ensemble majority vote is used instead of single champion.
+    print(f"\n[5/6] Final training: champion + ensemble (RF + XGB + LGB)...")
+    sw = sample_weights if has_feedback else None
 
-    # ── 7. Save champion ──────────────────────────────────────────────────────
+    final_model = train_champion(champion, X_aug, y_aug, sample_weight=sw)
+
+    # Train the best model of each type for ensemble
+    # results may have fewer than 3 types if a type failed — build a dict keyed by type
+    best_by_type = {}
+    for r in results:
+        t = r["model_type"]
+        if t not in best_by_type:
+            best_by_type[t] = r   # results are sorted best-first per overall score
+
+    ensemble_models = {}
+    ensemble_metas  = {}
+    trained_at_str  = datetime.now(_IST).isoformat()
+    for mtype, r in best_by_type.items():
+        params = dict(r["params"])
+        params["n_estimators"] = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
+        m = _build_model(mtype, params)
+        m.fit(X_aug, y_aug, sample_weight=sw)
+        ensemble_models[mtype] = m
+        ensemble_metas[mtype]  = {
+            "model_type":   mtype,
+            "params":       params,
+            "accuracy":     r["accuracy"],
+            "recall_call":  r["recall_call"],
+            "recall_put":   r["recall_put"],
+            "score":        r["score"],
+            "feature_cols": selected_cols,
+            "train_rows":   len(X_all),
+            "trained_at":   trained_at_str,
+        }
+        print(f"  Trained ensemble [{mtype.upper()}]: acc={r['accuracy']:.1%}  score={r['score']:.4f}")
+
+    # ── 7. Save champion + ensemble ───────────────────────────────────────────
     meta = {
         "model_type":  champion["model_type"],
         "params":      champion["params"],
@@ -899,23 +947,39 @@ def main():
         "feature_cols":selected_cols,
         "n_features":  len(selected_cols),
         "train_rows":  len(X_all),
-        "trained_at":  datetime.now(_IST).isoformat(),
+        "trained_at":  trained_at_str,
     }
     save_champion(final_model, meta)
+    save_ensemble(ensemble_models, ensemble_metas)
 
-    # ── 8. Predict tomorrow using the just-trained champion ───────────────────
+    # ── 8. Predict tomorrow using ensemble vote ───────────────────────────────
     today_ts = pd.Timestamp(datetime.now(_IST).date())
     today_rows = trading[trading["date"] == today_ts]
 
     if not today_rows.empty:
-        X_today = today_rows[selected_cols].fillna(0).values.astype(float)
-        proba   = final_model.predict_proba(X_today)[0]
-        classes = list(final_model.classes_)
-        p_call  = proba[classes.index(1)] if 1 in classes else 0.5
-        p_put   = proba[classes.index(0)] if 0 in classes else 0.5
-        today_signal = "CALL" if p_call >= p_put else "PUT"
-        today_conf   = max(p_call, p_put)
+        votes  = []
+        confs  = []
+        for mtype, m in ensemble_models.items():
+            X_t    = today_rows[selected_cols].fillna(0).values.astype(float)
+            proba  = m.predict_proba(X_t)[0]
+            clses  = list(m.classes_)
+            pc     = proba[clses.index(1)] if 1 in clses else 0.5
+            pp     = proba[clses.index(0)] if 0 in clses else 0.5
+            votes.append("CALL" if pc >= pp else "PUT")
+            confs.append(max(pc, pp))
+        call_v = votes.count("CALL")
+        put_v  = votes.count("PUT")
+        today_signal = "CALL" if call_v >= put_v else "PUT"
+        agreed_confs = [c for v, c in zip(votes, confs) if v == today_signal]
+        today_conf   = sum(agreed_confs) / len(agreed_confs) if agreed_confs else 0.5
+        print(f"  Ensemble tomorrow: {call_v}/3 CALL  {put_v}/3 PUT → {today_signal}  "
+              f"(avg conf {today_conf:.1%})")
     else:
+        # Fallback to single champion for tomorrow preview
+        X_today = None
+        for mtype, m in ensemble_models.items():
+            X_today = m  # just get any model
+            break
         today_signal = "NONE"
         today_conf   = 0.5
 
