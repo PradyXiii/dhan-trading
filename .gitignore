@@ -21,3 +21,6 @@ models/
 
 # GAS morning brief scripts — never committed (contain private prompts/logic)
 *.gs
+
+# MCX commodity extension lives on branch claude/mcx-commodity-trading — never on BN
+commodity/

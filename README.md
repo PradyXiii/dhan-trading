@@ -16,6 +16,12 @@ Every 5 minutes (all 7 days)
   └── renew_token.py         — checks if token is 23h50m old, renews if so
                                (never lets it expire, no manual action needed)
 
+8:50 AM IST, Mon–Fri
+  └── health_ping.py
+        — Pre-market heartbeat: Dhan token, signal freshness, capital,
+          stale lock-file, critical alert log
+        — Sends a single "all clear" (or alarm) to Telegram
+
 9:15 AM IST, Mon–Fri
   └── auto_trader.py
         1. Pull latest market data
@@ -24,6 +30,11 @@ Every 5 minutes (all 7 days)
         4. Size the position (lots)      →  5% of capital at risk, min 1 lot
         5. Place Dhan Super Order        →  entry + SL + target in one call
         6. Send Telegram alert
+
+11:00 AM IST, Mon–Fri
+  └── midday_conviction.py
+        — Reassesses the morning thesis using intraday BN spot, option LTP,
+          and macro tape. Sends a Telegram conviction summary.
 
 3:15 PM IST, Mon–Fri
   └── exit_positions.py
@@ -40,16 +51,20 @@ Every 5 minutes (all 7 days)
 
 11:00 PM IST, Mon–Fri
   └── model_evolver.py
-        — Retrains the ML brain: Optuna HPO across RF + XGBoost + LightGBM
+        — Retrains the ML brain: Optuna HPO across RF + XGBoost + LightGBM + CatBoost
         — Injects live trade outcomes as real-label training signal (10× weight)
         — Boosts historical rows matching miss-day patterns to reduce repeat errors
         — Picks the best model, saves it as models/champion.pkl
+        — Also saves 4-model ensemble at models/ensemble/*.pkl
         — Sends a plain-English brain-training report to Telegram
 
 1st of every month, 10:00 AM IST
   └── lot_expiry_scanner.py
         — Checks if NSE has changed BankNifty lot size or expiry structure
         — Alerts via Telegram if anything has changed
+
+Weekly, Sunday 2:00 AM IST
+  └── Log rotation — trims any logs over 10 MB to the last 1000 lines
 ```
 
 ---
@@ -88,7 +103,7 @@ Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT
 
 **Step 2 — ML override:**
 
-A walk-forward model (champion selected nightly from RF / XGBoost / LightGBM) overrides the rule direction. It is a direction oracle — always outputs CALL or PUT, never skips a trade day.
+An ensemble of walk-forward models (RF / XGBoost / LightGBM / CatBoost) votes on direction. The champion is the single best model; the full ensemble is used for live prediction agreement. It is a direction oracle — always outputs CALL or PUT, never skips a trade day.
 
 **Step 3 — Live feedback loop:**
 
@@ -99,19 +114,23 @@ After each live trade, `trade_journal.py` records the actual outcome. Every nigh
 ## Architecture
 
 ```
-auto_trader.py         Morning runner — orchestrates everything, places the order
-signal_engine.py       Rule-based indicators → data/signals.csv
-ml_engine.py           Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast predict
-model_evolver.py       Nightly 11 PM — Optuna HPO (RF/XGB/LGB) → models/champion.pkl
-backtest_engine.py     Historical P&L simulation with full cost model
-data_fetcher.py        Downloads OHLCV + global data → data/  (incremental, parallel)
-exit_positions.py      EOD 3:15 PM — closes any open NRML positions before market close
-trade_journal.py       EOD 3:30 PM — captures actual fills vs oracle, builds live_trades.csv
-lot_expiry_scanner.py  Monthly check: BankNifty lot size / expiry day changes
-renew_token.py         Dynamic token renewal — 23h50m interval, 7 days a week
-notify.py              Telegram send helper
-dhan_mcp.py            MCP server — query live Dhan positions/P&L from Claude Code
-setup_automation.sh    One-shot VM setup: install deps, set up all cron jobs, dry-run test
+auto_trader.py           Morning runner — orchestrates everything, places the order
+signal_engine.py         Rule-based indicators → data/signals.csv
+ml_engine.py             Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast predict
+model_evolver.py         Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → models/champion.pkl + ensemble/
+backtest_engine.py       Historical P&L simulation with full cost model
+backtest_live_context.py Research backtest — tests intraday live-context overrides
+data_fetcher.py          Downloads OHLCV + global data → data/ (incremental, parallel)
+health_ping.py           Pre-market (8:50 AM) heartbeat: token + capital + freshness checks
+midday_conviction.py     Midday (11 AM) thesis reassessment + Telegram update
+exit_positions.py        EOD 3:15 PM — closes any open NRML positions before market close
+trade_journal.py         EOD 3:30 PM — captures actual fills vs oracle, builds live_trades.csv
+lot_expiry_scanner.py    Monthly check: BankNifty lot size / expiry day changes
+replay_today.py          Post-mortem tool — runs after evolver to replay today with new ensemble
+renew_token.py           Dynamic token renewal — 23h50m interval, 7 days a week
+notify.py                Telegram send helper
+dhan_mcp.py              MCP server — query live Dhan positions/P&L from Claude Code
+setup_automation.sh      One-shot VM setup: install deps, set up all cron jobs, dry-run test
 ```
 
 ---
@@ -130,7 +149,7 @@ setup_automation.sh    One-shot VM setup: install deps, set up all cron jobs, dr
 git clone <your-repo-url>
 cd dhan-trading
 pip3 install pandas numpy yfinance requests python-dotenv scikit-learn \
-             optuna xgboost lightgbm joblib mcp --break-system-packages
+             optuna xgboost lightgbm catboost joblib mcp --break-system-packages
 ```
 
 ### 2. Set up credentials
@@ -154,7 +173,7 @@ TELEGRAM_CHAT_ID=your_chat_id
 python3 data_fetcher.py       # downloads all market data → data/
 python3 signal_engine.py      # generates data/signals.csv
 python3 ml_engine.py          # walk-forward training (~2 min) → data/signals_ml.csv
-python3 model_evolver.py      # first HPO run — takes 5–10 min, saves models/champion.pkl
+python3 model_evolver.py      # first HPO run — takes 8–12 min, saves models/champion.pkl
 ```
 
 ### 4. Install cron and test
@@ -163,7 +182,7 @@ python3 model_evolver.py      # first HPO run — takes 5–10 min, saves models
 bash setup_automation.sh      # sets up all cron jobs, tests API, runs dry-run
 ```
 
-This installs six cron jobs: token renewer (every 5 min), auto trader (9:15 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), lot scanner (1st of month).
+This installs seven scheduled jobs plus weekly log rotation: token renewer (every 5 min), health ping (8:50 AM), auto trader (9:15 AM), midday conviction (11 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), lot scanner (1st of month), log rotation (Sunday 2 AM).
 
 ### 5. Verify
 
@@ -188,6 +207,7 @@ python3 ml_engine.py --analyze               # feature importance report
 python3 backtest_engine.py                   # rule-based backtest
 python3 backtest_engine.py --real-premium    # use real historical premiums
 python3 backtest_engine.py --real-premium-ml # ML backtest with real premiums
+python3 backtest_live_context.py             # explore intraday-context overrides
 
 # Live test
 python3 auto_trader.py --dry-run             # see exactly what would trade today
@@ -195,6 +215,14 @@ python3 auto_trader.py --dry-run             # see exactly what would trade toda
 # Model evolver
 python3 model_evolver.py                     # run nightly HPO manually
 python3 model_evolver.py --no-data           # HPO only, skip data fetch
+python3 model_evolver.py --trials 30         # override trial count (default 30)
+
+# Post-mortem replay
+python3 replay_today.py                      # replay today with current ensemble, vs actual
+
+# Pre-market checks
+python3 health_ping.py                       # manual pre-market heartbeat
+python3 midday_conviction.py --dry-run       # midday thesis check without Telegram
 
 # EOD scripts (run manually if needed)
 python3 exit_positions.py --dry-run          # check open positions without closing
@@ -246,7 +274,20 @@ Add to `~/.claude/settings.json`:
 
 **1-lot minimum** — The 5% risk rule sizes positions (more capital → more lots), not a gate. If you can physically afford 1 lot, the system trades it.
 
-**Nightly model competition** — RF, XGBoost, and LightGBM compete every night via Optuna HPO (120 trials total). The winner is saved as champion.pkl and loaded in under 5 seconds the next morning.
+**Nightly model competition** — RF, XGBoost, LightGBM, and CatBoost compete every night via Optuna HPO (30 trials per model = 120 trials total). The winner is saved as champion.pkl and the full 4-model ensemble is saved to models/ensemble/ for live agreement voting.
+
+---
+
+## What is NOT in this repo
+
+Gitignored for safety — these live only on the VM, never in version control:
+
+- `.env` — Dhan token, client ID, Telegram bot token, chat ID
+- `data/` — all fetched OHLCV, signal CSVs, live trade journal, today_trade.json
+- `models/` — trained champion.pkl, champion_meta.json, ensemble/*.pkl
+- `logs/` — cron log output for every scheduled job
+- `__pycache__/`, `*.pyc` — Python bytecode
+- `token_meta.json` — token renewal state
 
 ---
 

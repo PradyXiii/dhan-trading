@@ -34,13 +34,19 @@ No human input needed during market hours.
 | File | Purpose |
 |---|---|
 | `auto_trader.py` | Morning runner — orchestrates all steps, places Dhan order |
-| `signal_engine.py` | Rule-based indicators → `data/signals.csv` |
-| `ml_engine.py` | Walk-forward RF → `data/signals_ml.csv`; fast predict via champion.pkl |
-| `model_evolver.py` | Nightly 11 PM — Optuna HPO (RF/XGB/LGB) → `models/champion.pkl` |
+| `signal_engine.py` | Rule-based signal scorer (4 active indicators) → `data/signals.csv` |
+| `ml_engine.py` | Walk-forward training → `data/signals_ml.csv`; fast predict via champion.pkl + ensemble |
+| `model_evolver.py` | Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → `models/champion.pkl` + ensemble |
 | `backtest_engine.py` | Historical P&L simulation with cost model + lot-size timeline |
+| `backtest_live_context.py` | Research tool — tests intraday live-context override rules |
 | `data_fetcher.py` | Downloads OHLCV + global market data → `data/*.csv` |
+| `health_ping.py` | Pre-market heartbeat (8:50 AM) — token/capital/freshness checks |
+| `midday_conviction.py` | Midday thesis reassessment (11 AM) → Telegram summary |
+| `exit_positions.py` | EOD 3:15 PM — closes open NRML positions |
+| `trade_journal.py` | EOD 3:30 PM — logs actual fills vs oracle to `live_trades.csv` |
 | `lot_expiry_scanner.py` | Monthly cron — detects BankNifty lot size / expiry day changes |
-| `signal_engine.py` | Rule-based signal scorer; 4 active indicators |
+| `replay_today.py` | Post-mortem tool — ensemble replay of today after evolver |
+| `renew_token.py` | Every-5-min token renewer (23h50m interval) |
 | `notify.py` | Telegram send/log helper (2 functions) |
 | `dhan_mcp.py` | MCP server — exposes live Dhan positions/orders/P&L to Claude Code |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
@@ -90,20 +96,24 @@ RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 1. Fetch all data sources (Dhan + yfinance + NSE FII + PCR)
 2. compute_features() from ml_engine + extended features (gold, crude, PCR, FII)
 3. Feature selection via RF importance (keep > 1%)
-4. Optuna HPO: 40 trials × RF + XGB + LGB = 120 trials (~5-8 min)
+4. Optuna HPO: 30 trials × RF + XGB + LGB + CAT = 120 trials (~8-12 min)
 5. Champion = best on 252-day temporal holdout (accuracy + recall blend)
-6. Retrain champion on full data
-7. Save: models/champion.pkl + models/champion_meta.json
-8. Telegram: evolver report (plain-language summary)
+6. Retrain champion on full data; train full 4-model ensemble
+7. Save: models/champion.pkl + models/champion_meta.json + models/ensemble/*.pkl
+8. Predict tomorrow using ensemble vote (falls back to most recent trading day if today's row missing)
+9. Telegram: evolver report (plain-language summary)
 ```
+
+Live feedback: the evolver reads `data/live_trades.csv` and injects real outcomes with 10× weight; historical rows matching miss-day patterns get 3× weight boost.
 
 ---
 
 ## ML Fast Path (ml_engine.py --predict-today)
 
 ```python
-# Fast path (< 5 sec): loads models/champion.pkl if trained within 2 days
-# Slow fallback (30 sec): retrains RF from scratch (used when no champion exists)
+# Fast path (< 5 sec): loads models/ensemble/*.pkl if trained within 2 days;
+#                      falls back to models/champion.pkl if no ensemble
+# Slow fallback (30 sec): retrains RF from scratch (only if no saved models exist)
 ```
 
 ---
@@ -159,21 +169,38 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/sp500.csv` | ^GSPC from yfinance |
 | `data/nikkei.csv` | ^N225 from yfinance |
 | `data/sp500_futures.csv` | ES=F from yfinance |
+| `data/gold.csv`, `crude.csv`, `usdinr.csv`, `dxy.csv`, `us10y.csv` | Macro series from yfinance |
+| `data/pcr.csv`, `data/pcr_live.csv` | Historical + live Put/Call Ratio from Dhan |
+| `data/fii_dii.csv` | FII/DII net activity |
 | `data/signals.csv` | Rule-based signals (signal_engine.py output) |
 | `data/signals_ml.csv` | ML-overridden signals (ml_engine.py output) |
 | `data/options_atm_daily.csv` | Real ATM option opens from Dhan rollingoption (date, call_premium, put_premium) |
+| `data/live_trades.csv` | Daily live-trade outcomes (written by trade_journal.py) |
+| `data/today_trade.json` | What auto_trader placed today (read by trade_journal) |
 | `models/champion.pkl` | Best HPO model from last evolver run |
 | `models/champion_meta.json` | Model type, accuracy, feature list, trained_at |
+| `models/ensemble/*.pkl` | 4-model ensemble (rf/xgb/lgb/cat) for live voting |
+| `models/ensemble_meta.json` | Per-model meta for each ensemble member |
 
 ---
 
 ## Cron Schedule (GCP VM)
 
+Installed by `setup_automation.sh`:
+
 ```
-45 3  * * 1-5   auto_trader.py          # 9:15 AM IST (3:45 AM UTC)
-30 17 * * 1-5   model_evolver.py        # 11 PM IST (17:30 UTC)
-30 4  1  * *    lot_expiry_scanner.py   # 1st of month 10 AM IST
+*/5 *  * * *    renew_token.py          # every 5 min, all 7 days
+20 3   * * 1-5  health_ping.py          # 8:50 AM IST
+45 3   * * 1-5  auto_trader.py          # 9:15 AM IST
+30 5   * * 1-5  midday_conviction.py    # 11:00 AM IST
+45 9   * * 1-5  exit_positions.py       # 3:15 PM IST
+0  10  * * 1-5  trade_journal.py        # 3:30 PM IST
+30 17  * * 1-5  model_evolver.py        # 11:00 PM IST
+30 4   1 * *    lot_expiry_scanner.py   # 1st of month, 10:00 AM IST
+30 20  * * 0    log rotation            # Sunday 2:00 AM IST (trim logs > 10 MB)
 ```
+
+(Times in UTC cron; comments show the IST equivalent.)
 
 ---
 
@@ -197,6 +224,7 @@ python3 backtest_engine.py                   # rule-based backtest (uses real pr
 python3 backtest_engine.py --real-premium    # explicitly real-premium backtest (rule signals)
 python3 backtest_engine.py --real-premium-ml # real-premium ML backtest
 python3 backtest_engine.py --ml              # ML backtest (formula premium)
+python3 backtest_live_context.py             # research: intraday live-context rules
 
 # Fetch historical ATM option premiums (one-time, then incremental)
 python3 data_fetcher.py --fetch-options
@@ -205,7 +233,16 @@ python3 data_fetcher.py --fetch-options
 python3 auto_trader.py --dry-run
 
 # Nightly evolver (manually)
-python3 model_evolver.py
+python3 model_evolver.py                 # full run (data + HPO + train + telegram)
+python3 model_evolver.py --no-data       # skip data refresh
+python3 model_evolver.py --trials 30     # override trial count per model
+
+# Post-mortem replay
+python3 replay_today.py                  # rerun today's prediction with current ensemble
+
+# Pre-market / mid-day
+python3 health_ping.py                   # manual 8:50 AM checks
+python3 midday_conviction.py --dry-run   # midday thesis check, no Telegram
 
 # Lot/expiry scanner
 python3 lot_expiry_scanner.py --show   # print current override state
@@ -225,14 +262,17 @@ python3 lot_expiry_scanner.py          # run scan + Telegram alert if change
 | Change lot size | `backtest_engine.py` `get_lot_size()` + `auto_trader.py` `LOT_SIZE` |
 | Run new backtest | `backtest_engine.py` — standalone, reads `data/signals.csv` |
 | Add data source | `data_fetcher.py` + `model_evolver.py` feature list |
+| Change HPO trials | `model_evolver.py` top — `N_TRIALS = 30` |
+| Add a new model | `model_evolver.py` `_build_model()` + competition loop |
 | Check live P&L | `dhan_mcp.py` (MCP) or ask Claude "show positions" |
 
 ---
 
 ## Dhan API Notes
 
-- **Token**: expires every 24h. Renew at dhan.co → API settings, update `.env`.
+- **Token**: expires every 24h; auto-renewed by `renew_token.py` every 5 min at T+23h50m. `.env` is rewritten in place.
 - **DH-906**: "Market closed" OR "weekend AMO block". Not an account issue.
 - **AMO window**: Mon–Fri after 3:30 PM IST. Weekends reject all `afterMarketOrder: true`.
 - **Super Order**: `/v2/super/orders` — single call for entry + SL + TP.
 - **BankNifty scrip**: `UnderlyingScrip: 25`, `UnderlyingSeg: "IDX_I"`.
+- **Rate limit**: Data API = 10 req/s. Long fetches (historical PCR) pace at 2 req/s for 5× headroom.
