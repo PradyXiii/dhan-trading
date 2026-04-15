@@ -660,12 +660,17 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
 
 def train_champion(champion_meta, X_all, y_all, sample_weight=None):
     """Retrain champion model with best params on ALL data.
-    Overrides n_estimators to the full-strength value — HPO used smaller forests
-    for speed; the deployed champion always uses a full model.
+    Overrides n_estimators (or iterations for CatBoost) to the full-strength
+    value — HPO used smaller forests for speed; deployed champion uses full model.
     """
     params = dict(champion_meta["params"])
     mtype  = champion_meta["model_type"]
-    params["n_estimators"] = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
+    full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
+    if mtype == "cat":
+        params.pop("n_estimators", None)   # CatBoost uses 'iterations', not 'n_estimators'
+        params["iterations"] = full_n
+    else:
+        params["n_estimators"] = full_n
     model = _build_model(mtype, params)
     model.fit(X_all, y_all, sample_weight=sample_weight)
     return model
