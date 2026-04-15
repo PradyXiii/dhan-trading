@@ -1118,7 +1118,9 @@ def main():
     # Guard: signal CSV row may have unexpected/missing fields
     try:
         signal     = str(sig.get("signal", "")).upper()
-        score      = int(sig.get("score", 0))
+        # rule_score (from ml_engine compute_features) is authoritative;
+        # fallback to score (from signals.csv) which may be stale if evolver hasn't run yet
+        score      = int(sig.get("rule_score") or sig.get("score", 0))
         ml_conf    = float(sig.get("ml_conf", 0.5))
         ml_trained = bool(sig.get("ml_trained", False))
     except (ValueError, TypeError) as e:
