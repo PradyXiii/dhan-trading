@@ -622,11 +622,23 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
         study  = optuna.create_study(direction="maximize",
                                      sampler=optuna.samplers.TPESampler(seed=42),
                                      pruner=pruner)
-        study.optimize(
-            lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val, sw_tr),
-            n_trials=n_trials,
-            show_progress_bar=False,
-        )
+        # TabPFN: only 3 distinct options and very slow on CPU — cap at 3 trials
+        # with a 3-minute wall-clock timeout so it can't block the whole evolver.
+        _tabpfn_trials   = 3 if mtype == "tabpfn" else n_trials
+        _tabpfn_timeout  = 180 if mtype == "tabpfn" else None
+        try:
+            study.optimize(
+                lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val, sw_tr),
+                n_trials=_tabpfn_trials,
+                timeout=_tabpfn_timeout,
+                show_progress_bar=False,
+            )
+        except Exception as e:
+            print(f"  [{mtype.upper()}] Optimization error — skipping ({e})")
+            continue
+        if not study.trials or study.best_trial.state.name != "COMPLETE":
+            print(f"  [{mtype.upper()}] No completed trials (timed out?) — skipping")
+            continue
 
         best_params  = study.best_params
         best_score   = study.best_value
