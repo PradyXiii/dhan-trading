@@ -205,7 +205,8 @@ def refresh_data_and_signal():
 
 
 def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
-                       sl_price, tp_price, security_id, score, iv=0.0):
+                       sl_price, tp_price, security_id, score, iv=0.0,
+                       expiry=None):
     """
     Write oracle intent to data/today_trade.json so trade_journal.py can
     compare it against actual fills at EOD.  Overwrites any previous file.
@@ -217,6 +218,7 @@ def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
         "strike":         float(strike),
         "lots":           int(lots),
         "dte":            float(dte),
+        "expiry":         expiry.isoformat() if expiry else None,
         "spot_at_signal": float(spot),
         "oracle_premium": float(oracle_premium),
         "sl_price":       round(float(sl_price), 2),
@@ -1116,7 +1118,8 @@ def main():
     _write_today_trade(signal, atm_strike, lots, dte, spot,
                        oracle_premium=premium,
                        sl_price=sl_price, tp_price=tp_price,
-                       security_id=security_id, score=score, iv=iv_val)
+                       security_id=security_id, score=score, iv=iv_val,
+                       expiry=expiry)
 
     # Live result
     mode = result.get("mode", "SUPER_ORDER")

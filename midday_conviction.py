@@ -85,37 +85,99 @@ def get_bn_spot() -> float | None:
         return None
 
 
-def get_option_ltp(security_id: str) -> float | None:
-    """Current LTP of our open BN option from Dhan positions API.
-    Matches by security_id first; falls back to first open NSE_FNO BANKNIFTY pos."""
+def _get_ltp_from_option_chain(trade: dict) -> float | None:
+    """Fetch current option premium from Dhan option chain at our known strike.
+    Used as fallback when positions API returns LTP=0 (common early in session)."""
+    try:
+        strike      = float(trade.get("strike", 0))
+        opt_type_lc = "ce" if trade.get("signal", "CALL") == "CALL" else "pe"
+        opt_type_uc = opt_type_lc.upper()
+
+        # Use stored expiry from today_trade.json if available; else fetch nearest
+        if trade.get("expiry"):
+            expiry = trade["expiry"]   # already a string "YYYY-MM-DD"
+        else:
+            r = requests.post(
+                "https://api.dhan.co/v2/optionchain/expirylist",
+                headers=HEADERS,
+                json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+                timeout=10,
+            )
+            expiry = r.json()["data"][0]
+
+        # Fetch option chain
+        r2 = requests.post(
+            "https://api.dhan.co/v2/optionchain",
+            headers=HEADERS,
+            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
+            timeout=15,
+        )
+        data  = r2.json()
+        inner = data.get("data") or {}
+        oc    = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+
+        # Strike keys are float-strings ("55900.000000") or int-strings ("55900")
+        key = (f"{strike:.6f}"   if f"{strike:.6f}"   in oc else
+               str(int(strike))  if str(int(strike))   in oc else None)
+        if key is None:
+            _log(f"Strike {strike:.0f} not found in option chain (expiry {expiry})")
+            return None
+
+        sub = oc[key].get(opt_type_lc) or oc[key].get(opt_type_uc) or {}
+        ltp = float(sub.get("last_price") or sub.get("ltp") or sub.get("lastPrice") or 0)
+        if ltp > 0:
+            _log(f"Option chain LTP: ₹{ltp:.0f}  [{strike:.0f} {opt_type_uc}  expiry {expiry}]")
+            return ltp
+        _log(f"Option chain also returned 0 for {strike:.0f} {opt_type_uc} (expiry {expiry})")
+    except Exception as e:
+        _log(f"Option chain LTP fallback failed: {e}")
+    return None
+
+
+def get_option_ltp(security_id: str, trade: dict | None = None) -> float | None:
+    """Current LTP of our open BN option.
+    1. Tries positions API (fastest, matches by security_id then any open BN pos).
+    2. If LTP=0, falls back to option chain at our known strike (most accurate).
+    """
     try:
         r = requests.get("https://api.dhan.co/v2/positions", headers=HEADERS, timeout=10)
         if r.status_code != 200:
             _log(f"Positions API {r.status_code}: {r.text[:80]}")
-            return None
-        data  = r.json()
-        items = data if isinstance(data, list) else data.get("data", [])
-        bn_positions = [
-            p for p in items
-            if int(p.get("netQty", 0)) > 0
-            and p.get("exchangeSegment", "") == "NSE_FNO"
-            and "BANKNIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
-        ]
-        # Prefer exact security_id match
-        for p in bn_positions:
-            if str(p.get("securityId", p.get("security_id", ""))) == str(security_id):
+        else:
+            data  = r.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            bn_positions = [
+                p for p in items
+                if int(p.get("netQty", 0)) > 0
+                and p.get("exchangeSegment", "") == "NSE_FNO"
+                and "BANKNIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
+            ]
+            # Prefer exact security_id match
+            ltp_from_pos = None
+            for p in bn_positions:
+                if str(p.get("securityId", p.get("security_id", ""))) == str(security_id):
+                    ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
+                    _log(f"Positions matched security_id: ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
+                    ltp_from_pos = ltp
+                    break
+            # Fallback: any open BN position
+            if ltp_from_pos is None and bn_positions:
+                p   = bn_positions[0]
                 ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
-                _log(f"Option LTP matched by security_id: ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
-                return ltp if ltp > 0 else None
-        # Fallback: any open BN position (there should only be one per day)
-        if bn_positions:
-            p   = bn_positions[0]
-            ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
-            _log(f"Option LTP (fallback match): ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
-            return ltp if ltp > 0 else None
-        _log("No open BN positions found — SL/TP may have already fired.")
+                _log(f"Positions fallback match: ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
+                ltp_from_pos = ltp
+            if ltp_from_pos and ltp_from_pos > 0:
+                return ltp_from_pos
+            if bn_positions:
+                _log("LTP=0 from positions — trying option chain...")
+            else:
+                _log("No open BN positions found — trying option chain...")
     except Exception as e:
-        _log(f"Option LTP unavailable: {e}")
+        _log(f"Positions API error: {e}")
+
+    # Option chain fallback — uses known strike+type from trade dict
+    if trade:
+        return _get_ltp_from_option_chain(trade)
     return None
 
 
@@ -300,7 +362,7 @@ def main():
 
     # Fetch live data
     bn_spot    = get_bn_spot()
-    option_ltp = get_option_ltp(security_id)
+    option_ltp = get_option_ltp(security_id, trade)
     macro      = get_macro()
 
     _log(f"BN spot: {bn_spot}  |  Option LTP: {option_ltp}  |  Macro keys: {list(macro.keys())}")
