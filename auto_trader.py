@@ -1142,20 +1142,30 @@ def main():
         )
         return
 
-    # ML confidence gate — skip coin-flip days
-    # ml_trained=False means pre-warmup fallback (no model); skip gate on those days.
+    # ML confidence check — on uncertain days, defer to rule-based direction.
+    # Trade count stays the SAME. Accuracy improves because rule signals are
+    # simpler and more reliable than a coin-flip ML on ambiguous days.
+    # ml_trained=False means pre-warmup; skip check on those days.
     score_max = 4
     if ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:
-        notify.send(
-            f"⏸  <b>No Trade — Low ML Confidence</b>\n"
-            f"─────────────────────\n"
-            f"{today_wd}  ·  {today_label}\n\n"
-            f"Signal     <b>{signal}</b>  (score {score:+d}/{score_max})\n"
-            f"ML conf    <b>{ml_conf:.0%}</b>  (need ≥{ML_CONF_THRESHOLD:.0%})\n\n"
-            f"<i>Model sees no clear directional edge today.\n"
-            f"Waiting for a higher-conviction setup.</i>"
-        )
-        return
+        rule_signal = str(sig.get("rule_signal", "NONE")).upper()
+        if rule_signal in ("CALL", "PUT") and rule_signal != signal:
+            notify.log(
+                f"ML conf {ml_conf:.0%} < {ML_CONF_THRESHOLD:.0%} AND rule disagrees "
+                f"({signal} vs {rule_signal}) → DIRECTION CHANGED to rule: {rule_signal}"
+            )
+            signal = rule_signal   # use the cleaner, rule-based direction
+        elif rule_signal in ("CALL", "PUT") and rule_signal == signal:
+            notify.log(
+                f"ML conf {ml_conf:.0%} < {ML_CONF_THRESHOLD:.0%} but rule agrees "
+                f"({rule_signal}) — proceeding with {signal}"
+            )
+        else:
+            # Rule is NONE (score=0, tied indicators) — ML direction stands
+            notify.log(
+                f"ML conf {ml_conf:.0%} < {ML_CONF_THRESHOLD:.0%} but rule is NONE "
+                f"— keeping ML direction {signal} (no stronger signal available)"
+            )
 
     # 3. Capital
     capital = get_capital()
@@ -1312,7 +1322,7 @@ def main():
         f"{opt_emoji}  <b>BUY {signal}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Score      {score:+d} / {score_max}{score_desc}\n"
-        f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else '  (gate off)' if not ml_trained else ''}\n"
+        f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else '  → rule fallback' if (ml_trained and ml_conf < ML_CONF_THRESHOLD) else ''}\n"
         f"Capital    {cap_label}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Option     <code>{opt_sym}</code>{otm_label}\n"
