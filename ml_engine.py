@@ -772,7 +772,7 @@ def load_ensemble():
         pass   # Can't parse date → proceed anyway
 
     loaded = []
-    for mtype in ["rf", "xgb", "lgb"]:
+    for mtype in ["rf", "xgb", "lgb", "cat"]:
         pkl_path = f"{ENSEMBLE_DIR}/{mtype}.pkl"
         if not os.path.exists(pkl_path):
             continue

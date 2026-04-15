@@ -303,6 +303,11 @@ def _build_model(model_type, params):
         return lgb.LGBMClassifier(
             **params, class_weight="balanced", random_state=42, n_jobs=-1,
             verbose=-1)
+    elif model_type == "cat":
+        from catboost import CatBoostClassifier
+        return CatBoostClassifier(
+            **params, auto_class_weights="Balanced", random_seed=42,
+            thread_count=-1, verbose=0)
     raise ValueError(f"Unknown model_type: {model_type}")
 
 
@@ -533,6 +538,14 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
             "num_leaves":      trial.suggest_int("num_leaves", 15, 63),
             "min_child_samples":trial.suggest_int("min_child_samples", 10, 30),
         }
+    elif model_type == "cat":
+        params = {
+            "iterations":      trial.suggest_int("iterations", 100, 400),
+            "depth":           trial.suggest_int("depth", 4, 8),
+            "learning_rate":   trial.suggest_float("learning_rate", 0.02, 0.2, log=True),
+            "l2_leaf_reg":     trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
+        }
 
     model = _build_model(model_type, params)
     model.fit(X_tr, y_tr, sample_weight=sw_tr)
@@ -543,7 +556,7 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
 
 
 # Final champion refit uses these full n_estimators (only ONE fit, not N_TRIALS)
-_CHAMPION_N_ESTIMATORS = {"rf": 400, "xgb": 300, "lgb": 300}
+_CHAMPION_N_ESTIMATORS = {"rf": 400, "xgb": 300, "lgb": 300, "cat": 500}
 
 
 def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
@@ -570,7 +583,7 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
           + ("  +live-feedback" if sample_weight is not None else ""))
 
     results = []
-    for mtype in ["rf", "xgb", "lgb"]:
+    for mtype in ["rf", "xgb", "lgb", "cat"]:
         print(f"\n  [{mtype.upper()}] Running {n_trials} Optuna trials...")
 
         # MedianPruner: prune trials scoring below median of first 5 after trial 3
@@ -714,7 +727,7 @@ _FEATURE_LABELS = {
     "ema20_pct":    "Distance from 20-day moving average",
 }
 
-_MODEL_NAMES = {"rf": "Random Forest", "xgb": "XGBoost", "lgb": "LightGBM"}
+_MODEL_NAMES = {"rf": "Random Forest", "xgb": "XGBoost", "lgb": "LightGBM", "cat": "CatBoost"}
 
 
 def send_telegram_report(results, champion_meta, today_signal, today_conf,
