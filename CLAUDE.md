@@ -49,8 +49,11 @@ No human input needed during market hours.
 | `renew_token.py` | Every-5-min token renewer (23h50m interval) |
 | `notify.py` | Telegram send/log helper (2 functions) |
 | `dhan_mcp.py` | MCP server — exposes live Dhan positions/orders/P&L to Claude Code |
-| `autoloop_bn.py` | Saturday autoresearch — Claude API proposes feature/signal changes, keep/revert via git |
-| `autoexperiment_bn.py` | Fast 252-day holdout evaluator used by autoloop (outputs JSON composite score) |
+| `autoloop_bn.py` | Daily midnight autoresearch — paper-trades ML changes, auto-promotes after 3 nights of outperformance |
+| `ml_engine_paper.py` | Paper copy of ml_engine.py — autoresearcher tests here first before promoting to live |
+| `autoexperiment_bn.py` | Fast 252-day holdout evaluator; `--module ml_engine_paper` to eval paper model |
+| `autoexperiment_backtest.py` | Backtest evaluator for auto_trader.py constant changes |
+| `backfill_live_trades.py` | One-time / periodic utility — imports Dhan trade history into live_trades.csv |
 | `research_program_bn.md` | Autoresearch brief — defines what the AI agent may and may not change |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
 
@@ -178,8 +181,11 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/signals.csv` | Rule-based signals (signal_engine.py output) |
 | `data/signals_ml.csv` | ML-overridden signals (ml_engine.py output) |
 | `data/options_atm_daily.csv` | Real ATM option opens from Dhan rollingoption (date, call_premium, put_premium) |
-| `data/live_trades.csv` | Daily live-trade outcomes (written by trade_journal.py) |
+| `data/live_trades.csv` | Daily live-trade outcomes (written by trade_journal.py + backfill_live_trades.py) |
 | `data/today_trade.json` | What auto_trader placed today (read by trade_journal) |
+| `data/midday_checkpoints.csv` | Midday conviction snapshots — reversal detection, fed to model_evolver + autoloop |
+| `data/paper_performance.csv` | Daily live vs paper model scores — combined_advantage drives promotion streak |
+| `data/paper_changes.json` | Accumulated plain-English log of paper model improvements (reset on promotion) |
 | `models/champion.pkl` | Best HPO model from last evolver run |
 | `models/champion_meta.json` | Model type, accuracy, feature list, trained_at |
 | `models/ensemble/*.pkl` | 4-model ensemble (rf/xgb/lgb/cat) for live voting |
@@ -290,7 +296,7 @@ The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this lis
 | Change SL % or RR | `auto_trader.py` constants (top of file) |
 | Add a new indicator | `signal_engine.py` `score_row()` + `compute_indicators()` |
 | Understand ML features | `ml_engine.py` `FEATURE_COLS` + `compute_features()` — see ML Feature Set below |
-| Run/debug autoresearch | `autoloop_bn.py` + `autoexperiment_bn.py` + `research_program_bn.md` |
+| Run/debug autoresearch | `autoloop_bn.py` + `autoexperiment_bn.py` + `ml_engine_paper.py` + `research_program_bn.md` |
 | Change lot size | `backtest_engine.py` `get_lot_size()` + `auto_trader.py` `LOT_SIZE` |
 | Run new backtest | `backtest_engine.py` — standalone, reads `data/signals.csv` |
 | Add data source | `data_fetcher.py` + `model_evolver.py` feature list |
