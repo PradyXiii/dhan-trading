@@ -364,6 +364,14 @@ def _promote_paper_to_live(streak: int, avg_advantage: float) -> None:
     if not committed:
         print("[Promote] Warning: git commit failed.")
 
+    # Push to remote so GitHub stays in sync
+    branch = _current_branch()
+    rc, out = _git("push", "origin", branch)
+    if rc == 0:
+        print(f"[Promote] Pushed to origin/{branch}.")
+    else:
+        print(f"[Promote] Warning: git push failed: {out}")
+
     # Build Telegram message
     if changes:
         change_lines = "\n".join(f"  {j+1}. {c['plain_english']}" for j, c in enumerate(changes))
