@@ -51,6 +51,7 @@ ema20_pct, vix_level, vix_pct_chg, vix_hv_ratio
 bn_ret1, bn_ret20, dow, dte
 vix_open_chg, pcr_ma5, pcr_chg, fii_net_cash_z
 crude_ret, dxy_ret, us10y_chg, usdinr_ret
+bn_dist_high20                          (% below 20-day rolling high; negative = in correction)
 ```
 
 ### signal_engine.py — score_row()

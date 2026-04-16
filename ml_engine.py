@@ -261,8 +261,9 @@ def compute_features(df):
     d["vix_level"]    = d["vix_close"]
     d["vix_pct_chg"]  = d["vix_dir"] / d["vix_close"].shift(1) * 100
     d["vix_hv_ratio"] = d["vix_close"] / d["hv20"].replace(0, np.nan)
-    d["bn_ret1"]      = (d["bn_close"] / d["bn_close"].shift(1) - 1) * 100
-    d["bn_ret20"]     = (d["bn_close"] / d["bn_close"].shift(20) - 1) * 100
+    d["bn_ret1"]       = (d["bn_close"] / d["bn_close"].shift(1) - 1) * 100
+    d["bn_ret20"]      = (d["bn_close"] / d["bn_close"].shift(20) - 1) * 100
+    d["bn_dist_high20"] = (d["bn_close"] / d["bn_close"].rolling(20).max() - 1) * 100
     d["dow"]          = d["date"].dt.weekday
     d["dte"]          = d["date"].apply(
                             lambda x: get_dte(x.date() if hasattr(x, "date") else x))
@@ -342,8 +343,8 @@ FEATURE_COLS = [
     "crude_ret", "dxy_ret", "us10y_chg", "usdinr_ret",
     # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
-    # Momentum
-    "bn_ret1", "bn_ret20",
+    # Momentum & drawdown
+    "bn_ret1", "bn_ret20", "bn_dist_high20",
     # Calendar
     "dow", "dte",
     # Options market sentiment
