@@ -128,6 +128,12 @@ HEALTH_COMMENT="# Pre-market health ping — 8:50 AM IST, system checks before t
 LOG_ROTATE_CMD="30 20 * * 0 for f in $LOG_DIR/*.log; do [ -f \"\$f\" ] && [ \$(stat -c%s \"\$f\" 2>/dev/null || echo 0) -gt 10485760 ] && tail -n 1000 \"\$f\" > \"\$f.tmp\" && mv \"\$f.tmp\" \"\$f\" && echo \"Rotated \$f\"; done"
 LOG_ROTATE_COMMENT="# Weekly log rotation — Sun 2 AM IST, truncate logs > 10 MB to last 1000 lines"
 
+# Weekly autoresearch — Saturday 11:30 PM IST = 18:00 UTC
+# Claude AI proposes feature/signal improvements, keeps what helps, reverts what doesn't,
+# then retrains the 4 models on the improved code. Sends Telegram updates throughout.
+AUTOLOOP_CMD="0 18 * * 6 cd $SCRIPT_DIR && python3 autoloop_bn.py >> $LOG_DIR/autoloop_bn.log 2>&1"
+AUTOLOOP_COMMENT="# Autoresearch — Saturday 11:30 PM IST, AI-driven model improvement loop"
+
 # Remove old entries (all scripts) if any
 EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "auto_trader" \
@@ -140,6 +146,7 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "trade_journal" \
   | grep -v "midday_conviction" \
   | grep -v "health_ping" \
+  | grep -v "autoloop_bn" \
   | grep -v "log rotation" \
   | grep -v "BankNifty Auto Trader" \
   | grep -v "BankNifty lot/expiry" \
@@ -149,6 +156,7 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "Trade journal" \
   | grep -v "Midday conviction" \
   | grep -v "Pre-market health" \
+  | grep -v "Autoresearch" \
   | grep -v "Weekly log rotation")
 
 # Add fresh entries
@@ -171,6 +179,8 @@ $SCANNER_COMMENT
 $SCANNER_CMD
 $EVOLVER_COMMENT
 $EVOLVER_CMD
+$AUTOLOOP_COMMENT
+$AUTOLOOP_CMD
 $LOG_ROTATE_COMMENT
 $LOG_ROTATE_CMD"
 
@@ -210,6 +220,9 @@ echo "  Journal log    : $LOG_DIR/journal.log"
 echo ""
 echo "  ML Evolver     : 11:00 PM IST every weekday (Mon–Fri)"
 echo "  Evolver log    : $LOG_DIR/evolver.log"
+echo ""
+echo "  Autoresearch   : Saturday 11:30 PM IST weekly (AI model improvement loop)"
+echo "  Autoloop log   : $LOG_DIR/autoloop_bn.log"
 echo ""
 echo "  Log rotation   : Sunday 2:00 AM IST weekly (truncates logs > 10 MB)"
 echo ""
