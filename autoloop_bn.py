@@ -446,31 +446,39 @@ def main():
               f"pnl: {best_pnl:.4f} → {new_pnl:.4f}  ({elapsed:.0f}s)")
 
         # Accept / reject
+        prev_composite = best_composite
         if new_composite >= best_composite and new_pnl >= pnl_floor:
-            # KEEP
+            # Attempt to commit — if git fails, treat as discard
             commit_msg = (
                 f"autoloop exp {i}: {description} "
                 f"({best_composite:.4f}→{new_composite:.4f})"
             )
             committed = _commit(commit_msg)
-            if not committed:
-                print("  git commit failed — reverting anyway")
+            if committed:
+                experiment_log.append({
+                    "n": i, "description": description,
+                    "before": prev_composite, "after": new_composite, "kept": True,
+                })
+                best_composite = new_composite
+                best_pnl       = new_pnl
+                kept_count    += 1
+                _send(
+                    f"✅ Exp {i}/{n_experiments}: {description}\n"
+                    f"   Score: {prev_composite:.4f} → {new_composite:.4f}  KEPT"
+                )
+                print(f"  ✅ KEPT")
+            else:
+                print("  git commit failed — reverting, counting as DISCARDED")
                 _revert_files()
-
-            experiment_log.append({
-                "n": i, "description": description,
-                "before": best_composite, "after": new_composite, "kept": True,
-            })
-            best_composite = new_composite
-            best_pnl       = new_pnl
-            kept_count    += 1
-
-            _send(
-                f"✅ Exp {i}/{n_experiments}: {description}\n"
-                f"   Score: {result.get('before_composite', experiment_log[-1]['before']):.4f}"
-                f" → {new_composite:.4f}  KEPT"
-            )
-            print(f"  ✅ KEPT")
+                experiment_log.append({
+                    "n": i, "description": description + " [git commit failed]",
+                    "before": prev_composite, "after": new_composite, "kept": False,
+                })
+                _send(
+                    f"⚠️ Exp {i}/{n_experiments}: {description}\n"
+                    f"   Score: {prev_composite:.4f} → {new_composite:.4f}  "
+                    f"DISCARDED (git commit failed — check git config)"
+                )
         else:
             # DISCARD
             _revert_files()
