@@ -151,9 +151,10 @@ def load_all_data():
     # ── Global macro: crude oil, dollar index, US 10Y yield (optional) ─────────
     # All three are fetched daily by data_fetcher.py. They are the primary
     # drivers of FII behaviour and banking-sector risk-off moves.
-    for _col, _file in [("crude_close", "crude.csv"),
-                         ("dxy_close",   "dxy.csv"),
-                         ("us10y_close", "us10y.csv")]:
+    for _col, _file in [("crude_close",  "crude.csv"),
+                         ("dxy_close",    "dxy.csv"),
+                         ("us10y_close",  "us10y.csv"),
+                         ("usdinr_close", "usdinr.csv")]:
         _path = f"{DATA_DIR}/{_file}"
         if os.path.exists(_path):
             try:
@@ -295,9 +296,10 @@ def compute_features(df):
     #            from India → BN selling pressure.
     # us10y_chg: US 10Y yield change (bps-like). Rising yields → banks' cost
     #            of funds rises → HDFC/Kotak/SBI under pressure → BN PUT signal.
-    for _feat, _src, _mode in [("crude_ret",  "crude_close", "pct"),
-                                ("dxy_ret",    "dxy_close",   "pct"),
-                                ("us10y_chg",  "us10y_close", "diff")]:
+    for _feat, _src, _mode in [("crude_ret",   "crude_close",  "pct"),
+                                ("dxy_ret",     "dxy_close",    "pct"),
+                                ("us10y_chg",   "us10y_close",  "diff"),
+                                ("usdinr_ret",  "usdinr_close", "pct")]:
         if _src in d.columns:
             if _mode == "pct":
                 d[_feat] = (d[_src] / d[_src].shift(1) - 1) * 100
@@ -336,7 +338,8 @@ FEATURE_COLS = [
     # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
     # Macro drivers (crude → inflation risk; DXY → FII outflows; US10Y → bank cost of funds)
-    "crude_ret", "dxy_ret", "us10y_chg",
+    # usdinr_ret: rupee weakness directly triggers FII outflows from India
+    "crude_ret", "dxy_ret", "us10y_chg", "usdinr_ret",
     # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
     # Momentum
