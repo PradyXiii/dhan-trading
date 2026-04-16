@@ -103,15 +103,19 @@ def _commit(message: str, files: list[str]) -> bool:
 
 # ── Paper tracking helpers ────────────────────────────────────────────────────
 
-def _ensure_paper_file() -> None:
-    """Create ml_engine_paper.py from ml_engine.py if missing."""
+def _ensure_paper_file(commit: bool = True) -> None:
+    """Create ml_engine_paper.py from ml_engine.py if missing.
+    commit=False skips the git commit (used during --dry-run)."""
     if _PAPER_FILE.exists():
         return
     print("[Paper] ml_engine_paper.py not found — creating...")
     shutil.copy(_HERE / "ml_engine.py", _PAPER_FILE)
-    committed = _commit("autoloop: create ml_engine_paper.py (paper trading copy)", ["ml_engine_paper.py"])
-    if committed:
-        print("[Paper] ml_engine_paper.py created and committed.")
+    if commit:
+        committed = _commit("autoloop: create ml_engine_paper.py (paper trading copy)", ["ml_engine_paper.py"])
+        if committed:
+            print("[Paper] ml_engine_paper.py created and committed.")
+    else:
+        print("[Paper] ml_engine_paper.py created (dry-run — not committed).")
 
 
 def _log_paper_performance(date_str: str, live_score: float, paper_score: float,
@@ -197,7 +201,7 @@ def _score_paper_on_live_trades() -> dict:
     live_csv = _HERE / "data" / "live_trades.csv"
     empty = {"paper_acc": 0.0, "live_acc": 0.0, "n_trades": 0}
 
-    if not live_csv.exists() or not _PAPER_FILE.exists():
+    if not live_csv.exists():
         return empty
 
     import csv as _csv
@@ -655,9 +659,8 @@ def main():
     print(f"  Experiments: {n_experiments} | Dry-run: {args.dry_run}")
     print(f"{'='*60}\n")
 
-    # ── Step 1: Ensure paper file exists ──────────────────────────────────────
-    if not args.dry_run:
-        _ensure_paper_file()
+    # ── Step 1: Ensure paper file exists (always — live-eval needs it even in dry-run)
+    _ensure_paper_file(commit=not args.dry_run)
 
     # ── Step 2: Baselines ─────────────────────────────────────────────────────
     print("[Baseline] Running live ML evaluator...")

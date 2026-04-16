@@ -263,8 +263,16 @@ def build_rows(trades: list[dict], existing_dates: set[str]) -> list[dict]:
 
     for t in trades:
         opt_type = str(t.get("drvOptionType", "")).upper()  # CALL or PUT
+
+        # Live tradebook may return null drvOptionType — infer from tradingSymbol
         if opt_type not in ("CALL", "PUT"):
-            continue
+            sym = str(t.get("tradingSymbol", t.get("customSymbol", ""))).upper()
+            if sym.endswith("CE"):
+                opt_type = "CALL"
+            elif sym.endswith("PE"):
+                opt_type = "PUT"
+            else:
+                continue  # can't determine option type
 
         tx = str(t.get("transactionType", "")).upper()
         strike = float(t.get("drvStrikePrice", 0))
