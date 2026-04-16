@@ -29,7 +29,8 @@ python3 -c "import sklearn"   2>/dev/null && echo "    scikit-learn  ✓" || { e
 python3 -c "import optuna"    2>/dev/null && echo "    optuna        ✓" || { echo "    optuna        ✗  (run: pip3 install optuna --break-system-packages)"; }
 python3 -c "import xgboost"   2>/dev/null && echo "    xgboost       ✓" || { echo "    xgboost       ✗  (run: pip3 install xgboost --break-system-packages)"; }
 python3 -c "import lightgbm"  2>/dev/null && echo "    lightgbm      ✓" || { echo "    lightgbm      ✗  (run: pip3 install lightgbm --break-system-packages)"; }
-python3 -c "import joblib"    2>/dev/null && echo "    joblib        ✓" || { echo "    joblib        ✗  (run: pip3 install joblib --break-system-packages)"; }
+python3 -c "import joblib"      2>/dev/null && echo "    joblib        ✓" || { echo "    joblib        ✗  (run: pip3 install joblib --break-system-packages)"; }
+python3 -c "import anthropic"  2>/dev/null && echo "    anthropic     ✓" || { echo "    anthropic     ✗  (run: pip3 install anthropic --break-system-packages)"; }
 
 # ── 3. Check .env has required keys ──────────────────────────────────────────
 echo ""
