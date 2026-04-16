@@ -199,7 +199,7 @@ Installed by `setup_automation.sh`:
 45 9   * * 1-5  exit_positions.py       # 3:15 PM IST
 0  10  * * 1-5  trade_journal.py        # 3:30 PM IST
 30 17  * * 1-5  model_evolver.py        # 11:00 PM IST
-0  18  * * 6    autoloop_bn.py          # Saturday 11:30 PM IST (autoresearch)
+30 18  * * 1-5  autoloop_bn.py          # Mon–Fri midnight IST (autoresearch, after evolver)
 30 4   1 * *    lot_expiry_scanner.py   # 1st of month, 10:00 AM IST
 30 20  * * 0    log rotation            # Sunday 2:00 AM IST (trim logs > 10 MB)
 ```
@@ -254,9 +254,10 @@ python3 lot_expiry_scanner.py          # run scan + Telegram alert if change
 
 # Autoresearch
 python3 autoexperiment_bn.py                 # baseline composite score (JSON output)
+python3 autoexperiment_bn.py --module ml_engine_paper  # evaluate paper model
 python3 autoloop_bn.py --dry-run             # test loop without calling Claude API
 python3 autoloop_bn.py --experiments 3       # run 3 live experiments
-python3 autoloop_bn.py                       # full 20-experiment overnight run
+python3 autoloop_bn.py                       # full 5-experiment nightly run
 ```
 
 ---

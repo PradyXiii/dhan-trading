@@ -15,6 +15,8 @@ Usage:
 Used by: autoloop_bn.py (reads stdout, parses JSON)
 """
 
+import argparse
+import importlib
 import json
 import sys
 import os
@@ -39,8 +41,13 @@ def _composite(y_true, y_pred) -> float:
 
 
 def run():
-    # Import ml_engine fresh — code changes take effect since each run is a new process
-    import ml_engine as mle
+    # Parse --module arg to allow testing different versions (ml_engine_paper, etc.)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--module", default="ml_engine", help="ML engine module to use")
+    args = parser.parse_args()
+
+    # Import ml_engine or ml_engine_paper fresh — code changes take effect since each run is a new process
+    mle = importlib.import_module(args.module)
 
     # ── Load data + compute features ─────────────────────────────────────────
     try:

@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """
-autoloop_bn.py — Overnight autoresearch loop for BankNifty ML system.
+autoloop_bn.py — Daily midnight autoresearch loop for BankNifty ML system.
 
-Karpathy-style: Claude API proposes ONE code change per experiment →
-autoexperiment_bn.py evaluates it → improvement is kept (git commit) or
-reverted → Telegram notification per experiment → summary at end.
+Paper-trading mode for ml_engine.py changes:
+  - ml_engine.py proposals go to ml_engine_paper.py (not live)
+  - Paper model beats live by ≥1.5% for 3 consecutive nights → auto-promote
+  - signal_engine.py / auto_trader.py changes apply immediately
 
 Usage:
-    python3 autoloop_bn.py                   # 20 experiments, full run
-    python3 autoloop_bn.py --experiments 5   # quick 5-experiment run
+    python3 autoloop_bn.py                   # 5 experiments, full run
+    python3 autoloop_bn.py --experiments 3   # quick 3-experiment run
     python3 autoloop_bn.py --dry-run         # baseline only, no Claude API calls
     python3 autoloop_bn.py --no-evolver      # skip model_evolver.py at end
 
-Cron (Saturday 11:30 PM IST = 18:00 UTC):
-    0 18 * * 6  cd /path/to/dhan-trading && python3 autoloop_bn.py >> logs/autoloop_bn.log 2>&1
+Cron (Mon–Fri midnight IST = 18:30 UTC):
+    30 18 * * 1-5  cd /path && python3 autoloop_bn.py >> logs/autoloop_bn.log 2>&1
 """
 
 import argparse
+import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,25 +32,30 @@ from pathlib import Path
 warnings.filterwarnings("ignore")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-N_EXPERIMENTS = 20
-MODEL         = "claude-sonnet-4-6"
-MAX_TOKENS    = 2048
-PNL_GUARD     = 0.90       # pnl_proxy must not fall below 90% of baseline
-_IST          = timezone(timedelta(hours=5, minutes=30))
-_HERE         = Path(__file__).parent.resolve()
+N_EXPERIMENTS    = 5
+MODEL            = "claude-opus-4-6"
+MAX_TOKENS       = 2048
+PNL_GUARD        = 0.90
+PAPER_ADVANTAGE  = 0.015    # paper must beat live by ≥1.5%
+PAPER_WIN_STREAK = 3        # consecutive nights needed
+PAPER_MIN_DAYS   = 3        # minimum days before eligible
 
-# Files the agent is allowed to modify.
-# ML files → evaluated by autoexperiment_bn.py (ML holdout composite score).
-# auto_trader.py → evaluated by autoexperiment_backtest.py (backtest win_rate + drawdown).
-_ALLOWED_FILES  = {"ml_engine.py", "signal_engine.py", "auto_trader.py"}
-_ML_FILES       = {"ml_engine.py", "signal_engine.py"}
-_BACKTEST_FILES = {"auto_trader.py"}
+_IST             = timezone(timedelta(hours=5, minutes=30))
+_HERE            = Path(__file__).parent.resolve()
+
+_PAPER_FILES     = {"ml_engine.py"}
+_IMMEDIATE_FILES = {"signal_engine.py", "auto_trader.py"}
+_BACKTEST_FILES  = {"auto_trader.py"}
+_ALLOWED_FILES   = _PAPER_FILES | _IMMEDIATE_FILES
+
+_PAPER_FILE      = _HERE / "ml_engine_paper.py"
+_PAPER_PERF_CSV  = _HERE / "data" / "paper_performance.csv"
+_PAPER_CHANGES   = _HERE / "data" / "paper_changes.json"
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
 
 def _send(message: str) -> bool:
-    """Send to Telegram using notify.py's send()."""
     try:
         sys.path.insert(0, str(_HERE))
         import notify
@@ -60,7 +68,6 @@ def _send(message: str) -> bool:
 # ── Git helpers ───────────────────────────────────────────────────────────────
 
 def _git(*args: str) -> tuple[int, str]:
-    """Run a git command; return (returncode, stdout+stderr)."""
     result = subprocess.run(
         ["git", *args],
         cwd=str(_HERE),
@@ -70,16 +77,17 @@ def _git(*args: str) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
-def _revert_files(files: list[str] | None = None) -> None:
-    """Discard uncommitted changes. Defaults to all ML editable files."""
-    targets = files if files else ["ml_engine.py", "signal_engine.py"]
-    _git("checkout", "--", *targets)
+def _current_branch() -> str:
+    rc, out = _git("rev-parse", "--abbrev-ref", "HEAD")
+    return out.strip() if rc == 0 else "main"
 
 
-def _commit(message: str, files: list[str] | None = None) -> bool:
-    """Stage specified files and create a commit. Returns True on success."""
-    targets = files if files else ["ml_engine.py", "signal_engine.py"]
-    rc, out = _git("add", *targets)
+def _revert_files(files: list[str]) -> None:
+    _git("checkout", "--", *files)
+
+
+def _commit(message: str, files: list[str]) -> bool:
+    rc, out = _git("add", *files)
     if rc != 0:
         print(f"  git add failed: {out}")
         return False
@@ -90,29 +98,175 @@ def _commit(message: str, files: list[str] | None = None) -> bool:
     return True
 
 
+# ── Paper tracking helpers ────────────────────────────────────────────────────
+
+def _ensure_paper_file() -> None:
+    """Create ml_engine_paper.py from ml_engine.py if missing."""
+    if _PAPER_FILE.exists():
+        return
+    print("[Paper] ml_engine_paper.py not found — creating...")
+    shutil.copy(_HERE / "ml_engine.py", _PAPER_FILE)
+    committed = _commit("autoloop: create ml_engine_paper.py (paper trading copy)", ["ml_engine_paper.py"])
+    if committed:
+        print("[Paper] ml_engine_paper.py created and committed.")
+
+
+def _log_paper_performance(date_str: str, live_score: float, paper_score: float) -> None:
+    """Append one row to paper_performance.csv."""
+    _PAPER_PERF_CSV.parent.mkdir(exist_ok=True)
+    header_needed = not _PAPER_PERF_CSV.exists()
+    with open(_PAPER_PERF_CSV, "a", newline="") as f:
+        w = csv.writer(f)
+        if header_needed:
+            w.writerow(["date", "live_score", "paper_score", "advantage"])
+        w.writerow([date_str, f"{live_score:.4f}", f"{paper_score:.4f}", f"{paper_score - live_score:.4f}"])
+
+
+def _check_paper_promotion() -> tuple[bool, int, float]:
+    """Check if paper model should be promoted to live."""
+    if not _PAPER_PERF_CSV.exists():
+        return False, 0, 0.0
+    rows = []
+    try:
+        with open(_PAPER_PERF_CSV, newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return False, 0, 0.0
+
+    if len(rows) < PAPER_MIN_DAYS:
+        return False, 0, 0.0
+
+    # Count consecutive wins from the end
+    streak = 0
+    latest_adv = 0.0
+    for row in reversed(rows):
+        try:
+            adv = float(row["advantage"])
+        except (KeyError, ValueError):
+            break
+        if adv >= PAPER_ADVANTAGE:
+            streak += 1
+            if streak == 1:
+                latest_adv = adv
+        else:
+            break
+
+    return streak >= PAPER_WIN_STREAK, streak, latest_adv
+
+
+def _load_paper_changes() -> list[dict]:
+    """Load accumulated paper changes from JSON."""
+    if not _PAPER_CHANGES.exists():
+        return []
+    try:
+        return json.loads(_PAPER_CHANGES.read_text())
+    except Exception:
+        return []
+
+
+def _log_paper_change(description: str, plain_english: str, score_before: float, score_after: float) -> None:
+    """Append a change entry to paper_changes.json."""
+    _PAPER_CHANGES.parent.mkdir(exist_ok=True)
+    changes = _load_paper_changes()
+    changes.append({
+        "date": datetime.now(_IST).strftime("%Y-%m-%d"),
+        "description": description,
+        "plain_english": plain_english,
+        "score_before": round(score_before, 4),
+        "score_after": round(score_after, 4),
+    })
+    _PAPER_CHANGES.write_text(json.dumps(changes, indent=2))
+
+
+def _clear_paper_changes() -> None:
+    """Reset paper changes after promotion."""
+    _PAPER_CHANGES.write_text("[]")
+
+
+def _promote_paper_to_live(streak: int, avg_advantage: float) -> None:
+    """Copy ml_engine_paper.py → ml_engine.py, commit, send Telegram."""
+    changes = _load_paper_changes()
+    print(f"[Promote] Paper model outperformed for {streak} nights (+{avg_advantage:.2%} avg). Promoting...")
+
+    # Copy paper → live
+    shutil.copy(_PAPER_FILE, _HERE / "ml_engine.py")
+
+    # Commit both files
+    commit_msg = f"autoloop PROMOTE: paper→live after {streak} nights of +{avg_advantage:.1%} advantage"
+    committed = _commit(commit_msg, ["ml_engine.py"])
+    if not committed:
+        print("[Promote] Warning: git commit failed.")
+
+    # Build Telegram message
+    if changes:
+        change_lines = "\n".join(f"  {j+1}. {c['plain_english']}" for j, c in enumerate(changes))
+        changes_block = f"\n\n<b>What changed (accumulated over {len(changes)} nights):</b>\n{change_lines}"
+    else:
+        changes_block = ""
+
+    _send(
+        f"🚀 <b>PAPER MODEL GOES LIVE!</b>\n\n"
+        f"The paper (test) model outperformed the live model for <b>{streak} nights in a row</b> "
+        f"by an average of <b>{avg_advantage:.1%}</b>.\n\n"
+        f"It has been automatically promoted to live."
+        + changes_block +
+        f"\n\n✅ Live model updated. Used for tomorrow's trade."
+    )
+
+    _clear_paper_changes()
+    print("[Promote] Paper changes log reset.")
+
+
+# ── Claude API cost helper ────────────────────────────────────────────────────
+
+def _get_claude_cost_yesterday() -> str:
+    """Return yesterday's Claude API spend."""
+    try:
+        import requests
+    except ImportError:
+        return "N/A"
+
+    admin_key = os.getenv("ANTHROPIC_ADMIN_API_KEY", "")
+    if not admin_key:
+        return "N/A"
+
+    today_ist = datetime.now(_IST).date()
+    yesterday_ist = today_ist - timedelta(days=1)
+
+    try:
+        r = requests.get(
+            "https://api.anthropic.com/v1/organizations/cost_report",
+            headers={"X-Api-Key": admin_key, "anthropic-version": "2023-06-01"},
+            params={"start_date": str(yesterday_ist), "end_date": str(today_ist)},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            entries = data.get("data", [data])
+            total_cents = sum(int(item.get("total_cost_cents", item.get("amount_cents", 0))) for item in entries)
+            usd = total_cents / 100.0
+            return f"${usd:.2f}"
+        else:
+            return f"N/A"
+    except Exception:
+        return "N/A"
+
+
 # ── Experiment runners ────────────────────────────────────────────────────────
 
-def _run_subprocess(script: str, timeout: int = 300) -> dict:
-    """
-    Run a script in a subprocess and return the last JSON line from stdout.
-    Returns {"composite": 0.0, "error": "..."} on failure.
-    """
+def _run_subprocess_with_args(script: str, extra_args: list[str] = None, timeout: int = 300) -> dict:
+    """Run a script with optional args and return the last JSON line from stdout."""
+    cmd = [sys.executable, script] + (extra_args or [])
     try:
-        result = subprocess.run(
-            [sys.executable, script],
-            cwd=str(_HERE),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        result = subprocess.run(cmd, cwd=str(_HERE), capture_output=True, text=True, timeout=timeout)
         stdout = result.stdout.strip()
         if not stdout:
-            return {"composite": 0.0, "error": f"empty stdout (stderr: {result.stderr[:200]})"}
+            return {"composite": 0.0, "error": f"empty stdout"}
         for line in reversed(stdout.splitlines()):
             line = line.strip()
             if line.startswith("{"):
                 return json.loads(line)
-        return {"composite": 0.0, "error": f"no JSON in stdout: {stdout[:200]}"}
+        return {"composite": 0.0, "error": f"no JSON in stdout"}
     except subprocess.TimeoutExpired:
         return {"composite": 0.0, "error": f"timeout after {timeout}s"}
     except json.JSONDecodeError as e:
@@ -121,39 +275,32 @@ def _run_subprocess(script: str, timeout: int = 300) -> dict:
         return {"composite": 0.0, "error": str(e)}
 
 
-def _run_ml_experiment() -> dict:
-    """ML holdout evaluator — for ml_engine.py / signal_engine.py changes."""
-    return _run_subprocess("autoexperiment_bn.py", timeout=300)
+def _run_ml_experiment(module: str = "ml_engine") -> dict:
+    return _run_subprocess_with_args("autoexperiment_bn.py", ["--module", module], timeout=300)
 
 
 def _run_backtest_experiment() -> dict:
-    """Backtest evaluator — for auto_trader.py constant changes. Slower (~2 min)."""
-    return _run_subprocess("autoexperiment_backtest.py", timeout=600)
-
-
-# Keep backward-compatible alias
-def _run_experiment() -> dict:
-    return _run_ml_experiment()
+    return _run_subprocess_with_args("autoexperiment_backtest.py", timeout=600)
 
 
 # ── File content helpers ──────────────────────────────────────────────────────
 
 def _reversal_summary() -> str:
-    """Summarise recent intraday reversals from midday_checkpoints.csv (last 30 days).
-    Returns empty string if no data available."""
+    """Summarise recent intraday reversals from midday_checkpoints.csv."""
     import pandas as pd
     from collections import Counter
+
     path = _HERE / "data" / "midday_checkpoints.csv"
     if not path.exists():
         return ""
     try:
-        df      = pd.read_csv(path, parse_dates=["date"])
-        cutoff  = pd.Timestamp.now() - pd.Timedelta(days=30)
-        df      = df[df["date"] >= cutoff]
-        revs    = df[df["reversal_detected"].astype(str).str.lower() == "true"]
+        df = pd.read_csv(path, parse_dates=["date"])
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+        df = df[df["date"] >= cutoff]
+        revs = df[df["reversal_detected"].astype(str).str.lower() == "true"]
         if revs.empty:
             return ""
-        codes   = Counter()
+        codes = Counter()
         for rc in revs["reason_codes"].dropna():
             for c in str(rc).split("|"):
                 c = c.strip()
@@ -162,9 +309,9 @@ def _reversal_summary() -> str:
         lines = [f"  {code}: {n}×" for code, n in codes.most_common(5)]
         return (
             f"\n\n### Recent intraday reversals (last 30 days)\n"
-            f"{len(revs)} reversal(s) out of {len(df)} midday checks.\n"
-            f"Top reversal drivers:\n" + "\n".join(lines) + "\n"
-            "Prefer features that would have predicted or guarded against these patterns."
+            f"{len(revs)} reversal(s) out of {len(df)} checks.\n"
+            f"Top drivers:\n" + "\n".join(lines) + "\n"
+            "Prefer features that guard against these patterns."
         )
     except Exception:
         return ""
@@ -179,43 +326,40 @@ def _read_file(filename: str) -> str:
 
 
 def _extract_section(content: str, section: str, lines_after: int = 80) -> str:
-    """
-    Extract a function/section from a file by finding 'section' and
-    returning that line + lines_after lines.
-    """
     lines = content.splitlines()
     for i, line in enumerate(lines):
         if section in line:
             end = min(i + lines_after, len(lines))
             return "\n".join(lines[i:end])
-    return content[:3000]   # fallback: first 3000 chars
+    return content[:3000]
 
 
-def _build_context_snippet() -> str:
-    """
-    Build the relevant code snippets to send to Claude per experiment.
-    Keeps the user message small (dynamic content) — the research brief
-    is in the (cached) system prompt.
-    """
-    ml  = _read_file("ml_engine.py")
+def _build_context_snippet(use_paper: bool = False) -> str:
+    """Build code snippets for Claude. use_paper=True shows paper model state."""
+    ml_source = "ml_engine_paper.py" if (use_paper and _PAPER_FILE.exists()) else "ml_engine.py"
+    ml = _read_file(ml_source)
     sig = _read_file("signal_engine.py")
-    at  = _read_file("auto_trader.py")
+    at = _read_file("auto_trader.py")
 
-    # Extract FEATURE_COLS list
-    feat_section    = _extract_section(ml,  "FEATURE_COLS",       lines_after=40)
-    # Extract compute_features() function header + first ~60 lines
-    compute_section = _extract_section(ml,  "def compute_features", lines_after=70)
-    # Extract score_row() from signal_engine
-    score_section   = _extract_section(sig, "def score_row",       lines_after=60)
-    # Extract trading constants block from auto_trader.py
-    at_section      = _extract_section(at,  "LOT_SIZE",            lines_after=14)
+    paper_note = (
+        f"### Note: Showing PAPER model ({ml_source})\n"
+        "Propose 'file': 'ml_engine.py' — changes go to paper model.\n\n"
+        if use_paper
+        else ""
+    )
+
+    feat_section = _extract_section(ml, "FEATURE_COLS", lines_after=40)
+    compute_section = _extract_section(ml, "def compute_features", lines_after=70)
+    score_section = _extract_section(sig, "def score_row", lines_after=60)
+    at_section = _extract_section(at, "LOT_SIZE", lines_after=14)
 
     return (
-        "### ml_engine.py — FEATURE_COLS\n```python\n"
+        paper_note
+        + "### ml_engine.py — FEATURE_COLS\n```python\n"
         + feat_section
-        + "\n```\n\n### ml_engine.py — compute_features() (first 70 lines)\n```python\n"
+        + "\n```\n\n### ml_engine.py — compute_features()\n```python\n"
         + compute_section
-        + "\n```\n\n### signal_engine.py — score_row() (first 60 lines)\n```python\n"
+        + "\n```\n\n### signal_engine.py — score_row()\n```python\n"
         + score_section
         + "\n```\n\n### auto_trader.py — trading constants\n```python\n"
         + at_section
@@ -226,23 +370,19 @@ def _build_context_snippet() -> str:
 # ── Claude API ────────────────────────────────────────────────────────────────
 
 def _make_client():
-    """Create Anthropic client; raises if API key missing."""
     try:
         import anthropic
     except ImportError:
-        print("ERROR: 'anthropic' package not installed. Run: pip3 install anthropic")
+        print("ERROR: 'anthropic' package not installed.")
         sys.exit(1)
-
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         print("ERROR: ANTHROPIC_API_KEY not set in .env")
         sys.exit(1)
-
     return anthropic.Anthropic(api_key=api_key)
 
 
 def _build_system_prompt() -> str:
-    """Load research_program_bn.md as the (cacheable) system prompt."""
     path = _HERE / "research_program_bn.md"
     try:
         brief = path.read_text(encoding="utf-8")
@@ -252,7 +392,10 @@ def _build_system_prompt() -> str:
     return (
         "You are an expert ML feature engineer specialising in Indian equity derivatives.\n\n"
         "Your job: propose ONE targeted code change to improve the BankNifty ML model composite score.\n\n"
-        "Here is the complete research program that defines your scope:\n\n"
+        "IMPORTANT: ml_engine.py changes go into a paper (test) model first. "
+        "After 3 nights of outperforming the live model by ≥1.5%, they automatically go live. "
+        "So be bold — paper experiments have no risk.\n\n"
+        "Here is the complete research program:\n\n"
         + brief
     )
 
@@ -265,22 +408,17 @@ def _call_claude(
     experiment_number: int,
     total_experiments: int,
 ) -> dict | None:
-    """
-    Call Claude API. Returns parsed JSON dict or None on error.
-    Uses prompt caching on the system prompt (static content).
-    """
     import anthropic
 
-    # Build experiment log summary (compact)
     if experiment_log:
         log_lines = [
             f"  Exp {e['n']}: {e['description']}  |  {e['before']:.4f} → {e['after']:.4f}  "
             f"{'KEPT' if e['kept'] else 'DISCARDED'}"
-            for e in experiment_log[-10:]   # last 10 to fit context
+            for e in experiment_log[-10:]
         ]
         log_str = "### Experiments so far (last 10)\n" + "\n".join(log_lines)
     else:
-        log_str = "### Experiments so far\n(none yet — this is the first experiment)"
+        log_str = "### Experiments so far\n(none yet — this is the first)"
 
     user_message = (
         f"### Current code snippets (experiment {experiment_number}/{total_experiments})\n\n"
@@ -291,12 +429,13 @@ def _call_claude(
         + "\n\n"
         "### Your task\n"
         "Propose ONE small, targeted change. Return ONLY a valid JSON object with these keys:\n"
-        '  "file": "ml_engine.py" or "signal_engine.py"\n'
-        '  "description": "short one-line description"\n'
+        '  "file": "ml_engine.py" or "signal_engine.py" or "auto_trader.py"\n'
+        '  "description": "short one-line technical description"\n'
+        '  "plain_english": "one sentence a non-technical trader can understand"\n'
         '  "old_code": "exact unique substring to find and replace"\n'
         '  "new_code": "replacement string"\n\n'
         "Rules:\n"
-        "- old_code must be a UNIQUE substring of the file (include 2-3 lines of context).\n"
+        "- old_code must be a UNIQUE substring of the file (include context lines).\n"
         "- Do NOT repeat a change already tried (see experiment log).\n"
         "- ONE change only. No markdown fences. No explanation. JSON only.\n"
     )
@@ -305,28 +444,17 @@ def _call_claude(
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},  # cache the static brief
-                }
-            ],
+            system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_message}],
         )
         raw = response.content[0].text.strip()
 
-        # Strip markdown fences if Claude disobeyed the instruction
         if raw.startswith("```"):
-            raw = "\n".join(
-                line for line in raw.splitlines()
-                if not line.strip().startswith("```")
-            ).strip()
+            raw = "\n".join(line for line in raw.splitlines() if not line.strip().startswith("```")).strip()
 
         return json.loads(raw)
-
     except json.JSONDecodeError as e:
-        print(f"  Claude returned invalid JSON: {e}\n  Raw: {raw[:300]}")
+        print(f"  Claude returned invalid JSON: {e}")
         return None
     except Exception as e:
         print(f"  Claude API error: {e}")
@@ -335,369 +463,440 @@ def _call_claude(
 
 # ── Change applicator ─────────────────────────────────────────────────────────
 
-def _apply_change(proposal: dict) -> tuple[bool, str]:
-    """
-    Apply old_code → new_code replacement to the specified file.
-    Returns (success, reason).
-    """
+def _apply_change(proposal: dict) -> tuple[bool, str, str]:
+    """Apply change. Routes ml_engine.py changes to ml_engine_paper.py."""
     filename = proposal.get("file", "")
     if filename not in _ALLOWED_FILES:
-        return False, f"file '{filename}' not in allowed list {_ALLOWED_FILES}"
+        return False, f"file '{filename}' not in allowed list", filename
+
+    # Route paper files
+    actual_file = "ml_engine_paper.py" if filename in _PAPER_FILES else filename
 
     old_code = proposal.get("old_code", "")
     new_code = proposal.get("new_code", "")
 
     if not old_code:
-        return False, "old_code is empty"
+        return False, "old_code is empty", filename
     if old_code == new_code:
-        return False, "old_code == new_code (no change)"
+        return False, "old_code == new_code", filename
 
-    path = _HERE / filename
+    path = _HERE / actual_file
+    if not path.exists():
+        return False, f"{actual_file} not found", actual_file
+
     content = path.read_text(encoding="utf-8")
 
     if old_code not in content:
-        return False, f"old_code not found in {filename}"
+        return False, f"old_code not found in {actual_file}", actual_file
 
     if content.count(old_code) > 1:
-        return False, f"old_code is not unique in {filename} ({content.count(old_code)} matches)"
+        return False, f"old_code not unique in {actual_file}", actual_file
 
-    new_content = content.replace(old_code, new_code, 1)
-    path.write_text(new_content, encoding="utf-8")
-    return True, "ok"
+    path.write_text(content.replace(old_code, new_code, 1), encoding="utf-8")
+    return True, "ok", actual_file
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    # Load .env
     try:
         from dotenv import load_dotenv
         load_dotenv(_HERE / ".env")
     except ImportError:
         pass
 
-    parser = argparse.ArgumentParser(description="BankNifty autoresearch overnight loop")
-    parser.add_argument("--experiments", type=int, default=N_EXPERIMENTS,
-                        help=f"Number of experiments to run (default: {N_EXPERIMENTS})")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Compute baseline only; do not call Claude or modify files")
-    parser.add_argument("--no-evolver", action="store_true",
-                        help="Skip model_evolver.py at the end")
+    parser = argparse.ArgumentParser(description="BankNifty autoresearch daily midnight loop")
+    parser.add_argument("--experiments", type=int, default=N_EXPERIMENTS, help=f"Number of experiments (default: {N_EXPERIMENTS})")
+    parser.add_argument("--dry-run", action="store_true", help="Compute baselines only; no Claude API calls")
+    parser.add_argument("--no-evolver", action="store_true", help="Skip model_evolver.py after promotion")
     args = parser.parse_args()
 
     n_experiments = args.experiments
     ist_now = datetime.now(_IST)
-    date_str = ist_now.strftime("%d %b %Y, %I:%M %p IST")
+    date_str = ist_now.strftime("%Y-%m-%d")
+    date_display = ist_now.strftime("%d %b %Y, %I:%M %p IST")
 
     print(f"\n{'='*60}")
-    print(f"  BankNifty Autoresearch — {date_str}")
+    print(f"  BankNifty Autoresearch — {date_display}")
     print(f"  Experiments: {n_experiments} | Dry-run: {args.dry_run}")
     print(f"{'='*60}\n")
 
-    # ── Step 1: Baseline — two evaluators run once to establish starting scores ──
-    print("[Baseline ML] Running autoexperiment_bn.py...")
-    baseline = _run_ml_experiment()
-    if "error" in baseline:
-        msg = (
-            f"❌ <b>Autoresearch couldn't start</b>\n"
-            f"Something went wrong before any experiments ran.\n\n"
-            f"Error: <code>{baseline['error']}</code>\n\n"
-            f"Check the logs on the VM."
-        )
+    # ── Step 1: Ensure paper file exists ──────────────────────────────────────
+    if not args.dry_run:
+        _ensure_paper_file()
+
+    # ── Step 2: Baselines ─────────────────────────────────────────────────────
+    print("[Baseline] Running live ML evaluator...")
+    baseline_live = _run_ml_experiment(module="ml_engine")
+    if "error" in baseline_live:
+        msg = f"❌ <b>Autoresearch couldn't start</b>\n\nError: <code>{baseline_live['error']}</code>\n\nCheck the logs."
         print(msg)
         _send(msg)
         sys.exit(1)
 
-    b_composite = baseline["composite"]
-    b_pnl       = baseline.get("pnl_proxy", 0.0)
-    n_train     = baseline.get("n_train", "?")
-    n_val       = baseline.get("n_val", "?")
-    print(f"  [ML]  Baseline composite: {b_composite:.4f}  pnl_proxy: {b_pnl:.4f}")
-    print(f"  [ML]  Train rows: {n_train}  Val rows: {n_val}")
+    b_live = baseline_live["composite"]
+    b_pnl_live = baseline_live.get("pnl_proxy", 0.0)
+    n_train = baseline_live.get("n_train", "?")
+    n_val = baseline_live.get("n_val", "?")
+    print(f"  [Live]  composite: {b_live:.4f}  pnl_proxy: {b_pnl_live:.4f}")
 
-    print("[Baseline BT] Running autoexperiment_backtest.py...")
-    baseline_bt = _run_backtest_experiment()
-    if "error" in baseline_bt:
-        print(f"  [BT]  Warning: backtest baseline failed: {baseline_bt['error']}")
-        print(f"  [BT]  auto_trader.py experiments will be skipped this run.")
-        b_composite_bt = 0.0
-        b_pnl_bt       = 0.0
+    print("[Baseline] Running paper ML evaluator...")
+    baseline_paper = _run_ml_experiment(module="ml_engine_paper") if _PAPER_FILE.exists() else {"composite": b_live, "pnl_proxy": b_pnl_live}
+    if "error" in baseline_paper:
+        print(f"  [Paper] error: {baseline_paper['error']} — using live score")
+        b_paper = b_live
+        b_pnl_paper = b_pnl_live
     else:
-        b_composite_bt = baseline_bt["composite"]
-        b_pnl_bt       = baseline_bt.get("pnl_proxy", 0.0)
-        print(f"  [BT]  Baseline composite: {b_composite_bt:.4f}  pnl_proxy: {b_pnl_bt:.4f}")
+        b_paper = baseline_paper.get("composite", b_live)
+        b_pnl_paper = baseline_paper.get("pnl_proxy", b_pnl_live)
+        print(f"  [Paper] composite: {b_paper:.4f}  pnl_proxy: {b_pnl_paper:.4f}")
 
-    # ── Dry-run exits here ────────────────────────────────────────────────────
+    # Log today's performance
+    if not args.dry_run:
+        _log_paper_performance(date_str, b_live, b_paper)
+
+    # ── Step 3: Check paper promotion ─────────────────────────────────────────
+    should_promote, streak, latest_adv = _check_paper_promotion()
+    print(f"[Paper] Streak: {streak}/{PAPER_WIN_STREAK}  Latest advantage: {latest_adv:+.4f}")
+
+    if should_promote and not args.dry_run:
+        _promote_paper_to_live(streak, latest_adv)
+        b_live = b_paper  # after promotion live = paper
+        # Run evolver to retrain models on promoted code
+        if not args.no_evolver:
+            print("[Evolver] Running model_evolver.py after promotion...")
+            try:
+                subprocess.run([sys.executable, "model_evolver.py"], cwd=str(_HERE), timeout=3600)
+                print("[Evolver] Done.")
+            except subprocess.TimeoutExpired:
+                print("[Evolver] Timed out after 1 hour.")
+                _send("⚠️ <b>Model retraining timed out</b>\nRun <code>python3 model_evolver.py</code> manually.")
+            except Exception as e:
+                print(f"[Evolver] Error: {e}")
+        return  # Done for tonight — promotion was the main event
+
+    # ── Step 4: Dry-run exits here ────────────────────────────────────────────
     if args.dry_run:
-        print("\n[Dry-run] Baseline complete. Exiting (no experiments).")
+        paper_vs_live = b_paper - b_live
+        streak_str = f"{streak}/{PAPER_WIN_STREAK} nights ahead" if streak > 0 else "not ahead yet"
         _send(
-            f"🔬 <b>Autoresearch — Test Check</b>  ·  {date_str}\n\n"
-            f"Just measuring where the model stands today.\n\n"
-            f"📊 <b>Current model score:</b> {b_composite:.2%}  (higher = better)\n"
-            f"🎯 <b>Direction accuracy:</b>   {b_pnl:.2%}\n"
-            f"📅 <b>Data:</b> {n_train} days training · {n_val} days testing\n\n"
-            f"✅ System looks healthy. Ready for a real overnight run."
+            f"🔬 <b>Autoresearch — Daily Check</b>  ·  {date_display}\n\n"
+            f"📊 <b>Live model:</b>  {b_live:.2%}\n"
+            f"📄 <b>Paper model:</b> {b_paper:.2%}  ({paper_vs_live:+.2%})\n"
+            f"🔢 <b>Promotion streak:</b> {streak_str}\n\n"
+            f"📅 <b>Data:</b> {n_train} training days · {n_val} test days\n\n"
+            f"✅ System healthy. Ready for tonight's experiments."
         )
         return
 
-    # ── Step 2: Telegram start ────────────────────────────────────────────────
-    bt_line = (
-        f"📈 <b>Trade params baseline:</b> {b_composite_bt:.2%}\n"
-        if b_composite_bt > 0 else ""
-    )
+    # ── Step 5: Telegram start ────────────────────────────────────────────────
+    paper_vs_live = b_paper - b_live
+    streak_info = f"Paper ahead {streak}/{PAPER_WIN_STREAK} nights" if streak > 0 else "Paper not ahead yet"
     _send(
-        f"🤖 <b>BankNifty Brain Training — Starting Now</b>\n"
-        f"{date_str}\n\n"
-        f"Tonight I'll try <b>{n_experiments} small ideas</b> across ML features, "
-        f"signal thresholds, and trading parameters.\n"
-        f"Each idea gets tested — if it helps, I save it. If not, I throw it away.\n\n"
-        f"📊 <b>ML model score:</b>       {b_composite:.2%}\n"
-        f"🎯 <b>Direction accuracy:</b>   {b_pnl:.2%}\n"
-        f"{bt_line}"
-        f"📅 <b>Data:</b> {n_train} days training · {n_val} days for testing\n\n"
-        f"🌙 Go to sleep. I'll update you after each experiment!"
+        f"🤖 <b>BankNifty Brain Training — Starting</b>\n"
+        f"{date_display}\n\n"
+        f"Running {n_experiments} experiments tonight.\n"
+        f"ML changes go into the <b>paper model</b> first — they need {PAPER_WIN_STREAK} good nights to go live.\n\n"
+        f"📊 <b>Live model score:</b>  {b_live:.2%}\n"
+        f"📄 <b>Paper model score:</b> {b_paper:.2%}  ({paper_vs_live:+.2%})\n"
+        f"🎯 <b>Promotion streak:</b> {streak_info}\n\n"
+        f"🌙 Go to sleep — I'll update you as experiments complete."
     )
 
-    # ── Step 3: Setup Claude ──────────────────────────────────────────────────
-    client        = _make_client()
+    # ── Step 6: Setup Claude ──────────────────────────────────────────────────
+    client = _make_client()
     system_prompt = _build_system_prompt()
 
-    best_composite    = b_composite
-    best_pnl          = b_pnl
-    best_composite_bt = b_composite_bt
-    best_pnl_bt       = b_pnl_bt
-    experiment_log: list[dict] = []
-    kept_count     = 0
+    best_paper = b_paper
+    best_live = b_live
+    best_pnl_p = b_pnl_paper
+    best_pnl_l = b_pnl_live
 
-    # ── Step 4: Experiment loop ───────────────────────────────────────────────
+    # Backtest baseline
+    print("[Baseline BT] Running autoexperiment_backtest.py...")
+    baseline_bt = _run_backtest_experiment()
+    if "error" in baseline_bt:
+        print(f"  [BT]  baseline failed: {baseline_bt['error']} — auto_trader.py experiments skipped")
+        b_bt = 0.0
+    else:
+        b_bt = baseline_bt["composite"]
+        print(f"  [BT]  composite: {b_bt:.4f}")
+    best_bt = b_bt
+
+    experiment_log: list[dict] = []
+    kept_paper_count = 0
+    kept_immediate_count = 0
+
+    # ── Step 7: Experiment loop ───────────────────────────────────────────────
     for i in range(1, n_experiments + 1):
         print(f"\n[Exp {i}/{n_experiments}] Calling Claude...")
         t0 = time.time()
 
-        # Build fresh code context (files may have changed)
-        code_context = _build_context_snippet()
+        # Show paper state for ML experiments
+        code_context = _build_context_snippet(use_paper=True)
 
         proposal = _call_claude(
-            client, system_prompt, code_context,
-            experiment_log, i, n_experiments,
+            client,
+            system_prompt,
+            code_context,
+            experiment_log,
+            i,
+            n_experiments,
         )
 
         if proposal is None:
-            print(f"  Claude returned no valid proposal — skipping experiment {i}")
-            experiment_log.append({
-                "n": i, "description": "(Claude API error)",
-                "before": best_composite, "after": 0.0, "kept": False,
-            })
-            _send(
-                f"⚠️ <b>Idea #{i} — skipped</b>\n"
-                f"Couldn't get a valid idea from Claude this round. Moving on."
+            print(f"  Claude returned no valid proposal — skipping exp {i}")
+            experiment_log.append(
+                {
+                    "n": i,
+                    "description": "(Claude API error)",
+                    "before": best_paper,
+                    "after": 0.0,
+                    "kept": False,
+                }
             )
+            _send(f"⚠️ <b>Idea #{i} — skipped</b>\n\nCouldn't get a valid idea from the AI this round. Moving on.")
             continue
 
         description = proposal.get("description", "(no description)")
-        filename    = proposal.get("file", "?")
-        print(f"  Proposal: [{filename}] {description}")
+        plain_eng = proposal.get("plain_english", description)
+        filename = proposal.get("file", "?")
+        is_paper = filename in _PAPER_FILES
+        is_backtest = filename in _BACKTEST_FILES
 
-        # Apply change
-        ok, reason = _apply_change(proposal)
+        print(f"  Proposal: [{filename}] {description}")
+        print(f"  Plain: {plain_eng}")
+
+        # Apply change (paper routing for ml_engine.py)
+        ok, reason, actual_file = _apply_change(proposal)
         if not ok:
             print(f"  Apply failed: {reason} — skipping")
-            experiment_log.append({
-                "n": i, "description": description + f" [SKIP: {reason}]",
-                "before": best_composite, "after": 0.0, "kept": False,
-            })
+            experiment_log.append(
+                {
+                    "n": i,
+                    "description": description + f" [SKIP: {reason}]",
+                    "before": best_paper if is_paper else best_bt,
+                    "after": 0.0,
+                    "kept": False,
+                }
+            )
             continue
 
-        # Route to the appropriate evaluator based on which file was changed.
-        # ML files (ml_engine.py, signal_engine.py) → ML holdout score.
-        # auto_trader.py → backtest composite (win_rate + drawdown).
-        is_backtest_file = filename in _BACKTEST_FILES
-        if is_backtest_file:
-            if b_composite_bt == 0.0:
-                # Backtest baseline failed — skip auto_trader.py experiments
-                print(f"  Backtest baseline unavailable — reverting auto_trader.py change")
-                _revert_files([filename])
-                experiment_log.append({
-                    "n": i, "description": description + " [SKIP: BT baseline unavailable]",
-                    "before": best_composite_bt, "after": 0.0, "kept": False,
-                })
+        # Route to correct evaluator
+        if is_backtest:
+            if b_bt == 0.0:
+                print(f"  Backtest baseline unavailable — reverting {actual_file}")
+                _revert_files([actual_file])
+                experiment_log.append(
+                    {
+                        "n": i,
+                        "description": description + " [SKIP: BT baseline unavailable]",
+                        "before": best_bt,
+                        "after": 0.0,
+                        "kept": False,
+                    }
+                )
                 continue
-            print(f"  Running autoexperiment_backtest.py (auto_trader.py change)...")
-            result       = _run_backtest_experiment()
-            current_best = best_composite_bt
-            current_pnl  = best_pnl_bt
+            print(f"  Running backtest evaluator...")
+            result = _run_backtest_experiment()
+            cur_best = best_bt
+            cur_pnl = b_bt
+        elif is_paper:
+            print(f"  Running paper ML evaluator...")
+            result = _run_ml_experiment(module="ml_engine_paper")
+            cur_best = best_paper
+            cur_pnl = best_pnl_p
         else:
-            print(f"  Running autoexperiment_bn.py...")
-            result       = _run_ml_experiment()
-            current_best = best_composite
-            current_pnl  = best_pnl
+            # Immediate ML file (signal_engine.py)
+            print(f"  Running live ML evaluator...")
+            result = _run_ml_experiment(module="ml_engine")
+            cur_best = best_live
+            cur_pnl = best_pnl_l
 
         elapsed = time.time() - t0
 
         if "error" in result:
             print(f"  Experiment failed: {result['error']} — reverting")
-            _revert_files([filename])
-            experiment_log.append({
-                "n": i, "description": description + f" [FAIL: {result['error'][:60]}]",
-                "before": current_best, "after": 0.0, "kept": False,
-            })
-            _send(
-                f"⚠️ <b>Idea #{i} of {n_experiments} — crashed during test</b>\n"
-                f"💡 Idea: {description}\n\n"
-                f"The test run hit an error. Thrown away, moving on."
+            _revert_files([actual_file])
+            experiment_log.append(
+                {
+                    "n": i,
+                    "description": description + f" [FAIL: {result['error'][:60]}]",
+                    "before": cur_best,
+                    "after": 0.0,
+                    "kept": False,
+                }
             )
+            _send(f"⚠️ <b>Idea #{i} of {n_experiments} — test crashed</b>\n\n💡 {plain_eng}\n\nThrown away, moving on.")
             continue
 
         new_composite = result["composite"]
-        new_pnl       = result.get("pnl_proxy", 0.0)
-        pnl_floor     = current_pnl * PNL_GUARD
+        new_pnl = result.get("pnl_proxy", 0.0)
+        pnl_floor = cur_pnl * PNL_GUARD
 
-        print(f"  Score: {current_best:.4f} → {new_composite:.4f}  "
-              f"pnl: {current_pnl:.4f} → {new_pnl:.4f}  ({elapsed:.0f}s)")
+        print(
+            f"  Score: {cur_best:.4f} → {new_composite:.4f}  "
+            f"pnl: {cur_pnl:.4f} → {new_pnl:.4f}  ({elapsed:.0f}s)"
+        )
 
-        # Accept / reject
-        prev_composite = current_best
-        if new_composite >= current_best and new_pnl >= pnl_floor:
-            # Attempt to commit — if git fails, treat as discard
-            commit_msg = (
-                f"autoloop exp {i}: {description} "
-                f"({current_best:.4f}→{new_composite:.4f})"
-            )
-            committed = _commit(commit_msg, [filename])
-            if committed:
-                experiment_log.append({
-                    "n": i, "description": description,
-                    "before": prev_composite, "after": new_composite, "kept": True,
-                })
-                # Update the appropriate tracker
-                if is_backtest_file:
-                    best_composite_bt = new_composite
-                    best_pnl_bt       = new_pnl
-                else:
-                    best_composite    = new_composite
-                    best_pnl          = new_pnl
-                kept_count    += 1
-                delta = new_composite - prev_composite
-                delta_str = f"+{delta:.2%}" if delta > 0 else "no change"
-                evaluator_label = "backtest" if is_backtest_file else "ML holdout"
-                _send(
-                    f"✅ <b>Idea #{i} of {n_experiments} worked!</b>\n"
-                    f"💡 {description}\n\n"
-                    f"Score before: {prev_composite:.2%}\n"
-                    f"Score after:  {new_composite:.2%}  ({delta_str})\n"
-                    f"<i>Evaluated via {evaluator_label}</i>\n\n"
-                    f"Saved ✓  Moving to idea #{i+1}..."
-                )
-                print(f"  ✅ KEPT")
+        prev_best = cur_best
+        if new_composite >= cur_best and new_pnl >= pnl_floor:
+            # Keep it — commit
+            if is_paper:
+                commit_msg = f"autoloop paper exp {i}: {description} ({cur_best:.4f}→{new_composite:.4f})"
+                mode_label = "📄 Paper model"
+                commit_files = [actual_file]
+            elif is_backtest:
+                commit_msg = f"autoloop live exp {i}: {description} ({cur_best:.4f}→{new_composite:.4f})"
+                mode_label = "✅ Live (trade params)"
+                commit_files = [actual_file]
             else:
-                print("  git commit failed — reverting, counting as DISCARDED")
-                _revert_files([filename])
-                experiment_log.append({
-                    "n": i, "description": description + " [git commit failed]",
-                    "before": prev_composite, "after": new_composite, "kept": False,
-                })
+                commit_msg = f"autoloop live exp {i}: {description} ({cur_best:.4f}→{new_composite:.4f})"
+                mode_label = "✅ Live (signal rules)"
+                commit_files = [actual_file]
+
+            committed = _commit(commit_msg, commit_files)
+            if committed:
+                experiment_log.append(
+                    {
+                        "n": i,
+                        "description": description,
+                        "before": prev_best,
+                        "after": new_composite,
+                        "kept": True,
+                    }
+                )
+                delta = new_composite - prev_best
+                delta_str = f"+{delta:.2%}" if delta > 0 else "no change"
+
+                if is_paper:
+                    best_paper = new_composite
+                    best_pnl_p = new_pnl
+                    kept_paper_count += 1
+                    _log_paper_change(description, plain_eng, prev_best, new_composite)
+                    _send(
+                        f"📄 <b>Paper model improved — experiment #{i}</b>\n\n"
+                        f"💡 {plain_eng}\n\n"
+                        f"Paper score: {prev_best:.2%} → {new_composite:.2%}  ({delta_str})\n\n"
+                        f"<i>Needs {PAPER_WIN_STREAK} nights ahead to go live.</i>"
+                    )
+                elif is_backtest:
+                    best_bt = new_composite
+                    kept_immediate_count += 1
+                    _send(
+                        f"✅ <b>Trade settings improved — live now</b>\n\n"
+                        f"💡 {plain_eng}\n\n"
+                        f"Score: {prev_best:.2%} → {new_composite:.2%}  ({delta_str})\n\n"
+                        f"<i>This affects tomorrow's trade directly.</i>"
+                    )
+                else:
+                    best_live = new_composite
+                    best_pnl_l = new_pnl
+                    kept_immediate_count += 1
+                    _send(
+                        f"✅ <b>Signal rules improved — live now</b>\n\n"
+                        f"💡 {plain_eng}\n\n"
+                        f"Score: {prev_best:.2%} → {new_composite:.2%}  ({delta_str})\n\n"
+                        f"<i>This affects tomorrow's trade directly.</i>"
+                    )
+                print(f"  ✅ KEPT ({mode_label})")
+            else:
+                print("  git commit failed — reverting")
+                _revert_files([actual_file])
+                experiment_log.append(
+                    {
+                        "n": i,
+                        "description": description + " [git commit failed]",
+                        "before": prev_best,
+                        "after": new_composite,
+                        "kept": False,
+                    }
+                )
                 _send(
-                    f"⚠️ <b>Idea #{i} of {n_experiments} — couldn't save</b>\n"
-                    f"💡 {description}\n\n"
-                    f"Score looked good ({prev_composite:.2%} → {new_composite:.2%}) "
-                    f"but git save failed. Thrown away for safety."
+                    f"⚠️ <b>Idea #{i} — couldn't save</b>\n\n"
+                    f"💡 {plain_eng}\n\n"
+                    f"Score looked good ({prev_best:.2%} → {new_composite:.2%}) but git save failed. Thrown away."
                 )
         else:
-            # DISCARD
-            _revert_files([filename])
-            reason_str = ""
-            if new_composite < current_best:
-                reason_str = f"composite {new_composite:.4f} < {current_best:.4f}"
-            else:
-                reason_str = f"pnl {new_pnl:.4f} < floor {pnl_floor:.4f}"
-
-            experiment_log.append({
-                "n": i, "description": description,
-                "before": current_best, "after": new_composite, "kept": False,
-            })
-
+            _revert_files([actual_file])
+            reason_str = (
+                f"composite {new_composite:.4f} < {cur_best:.4f}"
+                if new_composite < cur_best
+                else f"pnl {new_pnl:.4f} < floor {pnl_floor:.4f}"
+            )
+            experiment_log.append(
+                {"n": i, "description": description, "before": cur_best, "after": new_composite, "kept": False}
+            )
             _send(
-                f"❌ <b>Idea #{i} of {n_experiments} didn't help</b>\n"
-                f"💡 {description}\n\n"
-                f"Score before: {current_best:.2%}\n"
-                f"Score after:  {new_composite:.2%}  (worse)\n\n"
+                f"❌ <b>Idea #{i} of {n_experiments} didn't help</b>\n\n"
+                f"💡 {plain_eng}\n\n"
+                f"Score: {cur_best:.2%} → {new_composite:.2%}  (no improvement)\n\n"
                 f"Thrown away. Back to previous version."
             )
             print(f"  ❌ DISCARDED ({reason_str})")
 
-    # ── Step 5: Summary ───────────────────────────────────────────────────────
+    # ── Step 8: End-of-run summary ────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  Autoresearch complete")
-    print(f"  {kept_count}/{n_experiments} experiments kept")
-    print(f"  Best composite: {best_composite:.4f}  (was {b_composite:.4f})")
+    print(f"  Paper: {kept_paper_count} kept  |  Immediate: {kept_immediate_count} kept")
+    print(f"  Paper score: {b_paper:.4f} → {best_paper:.4f}")
+    print(f"  Live score:  {b_live:.4f} → {best_live:.4f}")
     print(f"{'='*60}\n")
 
-    kept_items = [e for e in experiment_log if e["kept"]]
-    discarded  = n_experiments - kept_count
+    kept_total = kept_paper_count + kept_immediate_count
+    discarded = n_experiments - kept_total
+    claude_cost = _get_claude_cost_yesterday()
 
-    improvement_pct = ((best_composite - b_composite) / max(b_composite, 0.001)) * 100
+    # Check updated streak
+    should_promote2, streak2, _ = _check_paper_promotion()
+    streak_str = (
+        f"{streak2}/{PAPER_WIN_STREAK} nights ahead — promotion {'TOMORROW' if streak2 == PAPER_WIN_STREAK - 1 else 'building'}!"
+        if streak2 > 0
+        else "No streak yet"
+    )
 
-    if kept_items:
-        kept_lines = "\n".join(
-            f"  {j+1}. {e['description']}\n"
-            f"      {e['before']:.2%} → {e['after']:.2%}"
-            for j, e in enumerate(kept_items)
-        )
-        score_line = (
-            f"📈 Score: {b_composite:.2%} → {best_composite:.2%}  ({improvement_pct:+.1f}%) 🚀"
-            if improvement_pct > 0.1
-            else f"📊 Score held steady at {best_composite:.2%}"
-        )
+    paper_adv = best_paper - best_live
+
+    if kept_total > 0:
+        kept_items = [e for e in experiment_log if e["kept"]]
+        kept_lines = "\n".join(f"  {j+1}. {e['description']}" for j, e in enumerate(kept_items))
         summary_msg = (
-            f"🌅 <b>BankNifty Brain Training — Done!</b>\n"
-            f"{date_str}\n\n"
-            f"✅ {kept_count} ideas worked  ·  ❌ {discarded} didn't\n\n"
-            f"{score_line}\n\n"
-            f"<b>What changed:</b>\n{kept_lines}\n"
+            f"🌅 <b>Brain Training Done</b>  ·  {date_display}\n\n"
+            f"✅ {kept_paper_count} paper  ·  ✅ {kept_immediate_count} live  ·  ❌ {discarded} thrown away\n\n"
+            f"📄 Paper model: {b_paper:.2%} → {best_paper:.2%}\n"
+            f"📊 Live model:  {b_live:.2%} → {best_live:.2%}\n"
+            f"📈 Paper lead:  {paper_adv:+.2%}\n\n"
+            f"🔢 Promotion: {streak_str}\n\n"
+            f"<b>What changed tonight:</b>\n{kept_lines}\n\n"
+            f"💰 Claude API cost yesterday: {claude_cost}"
         )
-        if not args.no_evolver:
-            summary_msg += (
-                f"\n🔄 Retraining the 4 models with the improved code...\n"
-                f"You'll get another message when that's done."
-            )
     else:
         summary_msg = (
-            f"🌅 <b>BankNifty Brain Training — Done</b>\n"
-            f"{date_str}\n\n"
-            f"Tried {n_experiments} ideas — none helped.\n\n"
-            f"📊 Score stayed at {best_composite:.2%}. The model is already well-tuned.\n"
-            f"Nothing changed in the code. Models were NOT retrained.\n\n"
-            f"Try again next week — the market will give us new patterns to learn from."
+            f"🌅 <b>Brain Training Done</b>  ·  {date_display}\n\n"
+            f"Tried {n_experiments} ideas — none helped tonight.\n\n"
+            f"📄 Paper model: {best_paper:.2%}\n"
+            f"📊 Live model:  {best_live:.2%}\n"
+            f"📈 Paper lead:  {paper_adv:+.2%}\n\n"
+            f"🔢 Promotion: {streak_str}\n\n"
+            f"💰 Claude API cost yesterday: {claude_cost}"
         )
 
     _send(summary_msg)
 
-    # ── Step 6: Run model_evolver if improvements were made ───────────────────
-    if kept_count > 0 and not args.no_evolver:
-        print("[Evolver] Running model_evolver.py to retrain 4 models on improved code...")
+    # ── Step 9: Run evolver if immediate changes were made ────────────────────
+    if kept_immediate_count > 0 and not args.no_evolver:
+        print("[Evolver] Immediate changes made — running model_evolver.py...")
+        _send("🔄 <b>Signal rules changed — retraining models now</b>\n\nTakes ~10 minutes. Next update when done.")
         try:
-            subprocess.run(
-                [sys.executable, "model_evolver.py"],
-                cwd=str(_HERE),
-                timeout=3600,   # 1-hour hard limit
-            )
+            subprocess.run([sys.executable, "model_evolver.py"], cwd=str(_HERE), timeout=3600)
             print("[Evolver] Done.")
         except subprocess.TimeoutExpired:
             print("[Evolver] Timed out after 1 hour.")
-            _send(
-                f"⚠️ <b>Model retraining timed out</b>\n"
-                f"Ran for over 1 hour and was stopped.\n\n"
-                f"The code improvements are saved — run <code>python3 model_evolver.py</code> manually tomorrow."
-            )
+            _send("⚠️ <b>Model retraining timed out</b>\nRun manually: <code>python3 model_evolver.py</code>")
         except Exception as e:
             print(f"[Evolver] Error: {e}")
-            _send(
-                f"⚠️ <b>Model retraining failed</b>\n"
-                f"Error: {e}\n\n"
-                f"The code improvements are saved — run <code>python3 model_evolver.py</code> manually."
-            )
-    elif kept_count == 0:
-        print("[Evolver] No improvements kept — skipping model_evolver.")
+    else:
+        print("[Evolver] No immediate changes — skipping.")
 
 
 if __name__ == "__main__":
