@@ -49,6 +49,9 @@ No human input needed during market hours.
 | `renew_token.py` | Every-5-min token renewer (23h50m interval) |
 | `notify.py` | Telegram send/log helper (2 functions) |
 | `dhan_mcp.py` | MCP server — exposes live Dhan positions/orders/P&L to Claude Code |
+| `autoloop_bn.py` | Saturday autoresearch — Claude API proposes feature/signal changes, keep/revert via git |
+| `autoexperiment_bn.py` | Fast 252-day holdout evaluator used by autoloop (outputs JSON composite score) |
+| `research_program_bn.md` | Autoresearch brief — defines what the AI agent may and may not change |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
 
 ---
@@ -94,7 +97,7 @@ RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 
 ```
 1. Fetch all data sources (Dhan + yfinance + NSE FII + PCR)
-2. compute_features() from ml_engine + extended features (gold, crude, PCR, FII)
+2. compute_features() from ml_engine — 31 features across technicals, macro, flow, options
 3. Feature selection via RF importance (keep > 1%)
 4. Optuna HPO: 30 trials × RF + XGB + LGB + CAT = 120 trials (~8-12 min)
 5. Champion = best on 252-day temporal holdout (accuracy + recall blend)
@@ -248,7 +251,33 @@ python3 midday_conviction.py --dry-run   # midday thesis check, no Telegram
 # Lot/expiry scanner
 python3 lot_expiry_scanner.py --show   # print current override state
 python3 lot_expiry_scanner.py          # run scan + Telegram alert if change
+
+# Autoresearch
+python3 autoexperiment_bn.py                 # baseline composite score (JSON output)
+python3 autoloop_bn.py --dry-run             # test loop without calling Claude API
+python3 autoloop_bn.py --experiments 3       # run 3 live experiments
+python3 autoloop_bn.py                       # full 20-experiment overnight run
 ```
+
+---
+
+## ML Feature Set (ml_engine.py FEATURE_COLS — 31 features)
+
+| Group | Features | What they capture |
+|---|---|---|
+| Rule signals | `s_ema20`, `s_trend5`, `s_vix`, `s_bn_nf_div` | Discrete ±1 rule outputs |
+| Continuous signals | `ema20_pct`, `trend5`, `vix_dir`, `bn_nf_div` | Raw magnitudes behind the rules |
+| Technical | `rsi14`, `hv20`, `bn_gap` | Momentum, volatility, opening gap |
+| Global markets | `sp500_chg`, `nikkei_chg`, `spf_gap` | Overnight global risk sentiment |
+| Macro / FII drivers | `crude_ret`, `dxy_ret`, `us10y_chg`, `usdinr_ret` | Inflation, dollar strength, yield, rupee |
+| Volatility regime | `vix_level`, `vix_pct_chg`, `vix_hv_ratio` | Fear level and realized vol ratio |
+| Momentum & drawdown | `bn_ret1`, `bn_ret20`, `bn_dist_high20` | Short/medium trend + distance from recent high |
+| Calendar | `dow`, `dte` | Day-of-week, days to expiry |
+| Options sentiment | `pcr`, `pcr_ma5`, `pcr_chg` | Put/call ratio and its trend |
+| Opening signal | `vix_open_chg` | VIX gap at 9:15 AM (risk-on/off at entry) |
+| Institutional flow | `fii_net_cash_z` | Z-scored FII cash market activity (prev day) |
+
+The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this list and validates each on the 252-day holdout before committing.
 
 ---
 
@@ -259,7 +288,8 @@ python3 lot_expiry_scanner.py          # run scan + Telegram alert if change
 | Debug a morning trade failure | `auto_trader.py` + `logs/auto_trader.log` |
 | Change SL % or RR | `auto_trader.py` constants (top of file) |
 | Add a new indicator | `signal_engine.py` `score_row()` + `compute_indicators()` |
-| Understand ML features | `ml_engine.py` `FEATURE_COLS` + `compute_features()` |
+| Understand ML features | `ml_engine.py` `FEATURE_COLS` + `compute_features()` — see ML Feature Set below |
+| Run/debug autoresearch | `autoloop_bn.py` + `autoexperiment_bn.py` + `research_program_bn.md` |
 | Change lot size | `backtest_engine.py` `get_lot_size()` + `auto_trader.py` `LOT_SIZE` |
 | Run new backtest | `backtest_engine.py` — standalone, reads `data/signals.csv` |
 | Add data source | `data_fetcher.py` + `model_evolver.py` feature list |

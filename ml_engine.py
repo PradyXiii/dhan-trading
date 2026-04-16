@@ -328,7 +328,7 @@ def compute_features(df):
     return d.dropna(subset=req)
 
 
-# 22 features fed into the RF
+# 31 features fed into the RF
 FEATURE_COLS = [
     # Rule-based score components (discrete ±1 signals)
     "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",

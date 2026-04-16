@@ -113,6 +113,8 @@ Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT
 
 An ensemble of walk-forward models (RF / XGBoost / LightGBM / CatBoost) votes on direction. The champion is the single best model; the full ensemble is used for live prediction agreement. It always outputs CALL or PUT — never skips a trade day.
 
+31 features across five layers: rule signals, global markets (S&P 500, Nikkei, S&P futures), macro drivers (crude oil, DXY, US 10Y yield, USD/INR), options sentiment (PCR, VIX), and institutional flow (FII net cash, z-scored).
+
 **Step 3 — Autoresearch (weekly, Saturday night):**
 
 Claude AI iterates over the feature engineering and signal logic. Each proposed change is evaluated on a 252-day out-of-sample holdout. Improvements are committed to git; regressions are reverted. The 4-model ensemble is retrained on Sunday morning using the improved code. The model gets smarter every week without any human input.
@@ -299,6 +301,8 @@ Add to `~/.claude/settings.json`:
 **1-lot minimum** — The 5% risk rule sizes positions (more capital → more lots), not a gate. If you can physically afford 1 lot, the system trades it.
 
 **Nightly model competition** — RF, XGBoost, LightGBM, and CatBoost compete every night via Optuna HPO (30 trials per model = 120 trials total). The winner is saved as champion.pkl and the full 4-model ensemble is saved to models/ensemble/ for live agreement voting.
+
+**Macro feature layer** — The model explicitly captures FII-driving forces: crude oil return, DXY return, US 10-year yield change, and USD/INR return. When rupee weakens, dollar strengthens, or crude spikes, FII outflows accelerate and banking stocks lead the selloff — these signals are now baked in alongside the technical and options-sentiment features.
 
 ---
 
