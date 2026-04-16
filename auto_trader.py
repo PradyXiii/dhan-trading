@@ -368,7 +368,7 @@ def refresh_data_and_signal():
 
 def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
                        sl_price, tp_price, security_id, score, iv=0.0,
-                       expiry=None, ml_conf=0.0):
+                       expiry=None, ml_conf=0.0, order_id=None, order_mode=None):
     """
     Write oracle intent to data/today_trade.json so trade_journal.py can
     compare it against actual fills at EOD.  Overwrites any previous file.
@@ -389,6 +389,8 @@ def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
         "signal_score":   int(score),
         "iv_at_entry":    float(iv),
         "ml_conf":        round(float(ml_conf), 4),
+        "order_id":       str(order_id) if order_id else None,
+        "order_mode":     str(order_mode) if order_mode else None,
     }
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
@@ -954,13 +956,10 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "price":           0,
         "targetPrice":     tp_price,
         "stopLossPrice":   sl_price,
-        # trailingJump = SL distance: SL steps up by SL_distance after each SL_distance gain.
-        # Before the first full SL_distance gain, the static SL at sl_price protects.
-        # Once in profit by 15%, trail moves SL to breakeven; at 30% it locks in 15%.
-        # Dhan T&C: trailingJump max = max(1, entry_price - stop_loss_price) = SL distance.
-        # Bug fix: was min(5, ...) which capped trail at ₹5, causing it to fire on
-        # any ₹5 intraday pullback regardless of premium size.
-        "trailingJump":    max(1, round(premium * SL_PCT, 0)),
+        # trailingJump = ₹5 step: SL ratchets up every ₹5 the option gains.
+        # Tight trail intentionally catches reversals early — e.g. option hit ₹1047,
+        # trail exited at ₹906, saved ₹107 vs static SL at ₹799 (which fell to ₹682).
+        "trailingJump":    min(5, max(1, round(premium * SL_PCT, 1))),
     }
     market_closed = False
     try:
@@ -1363,16 +1362,20 @@ def main():
         )
         return
 
+    # Extract mode and orderId from result before writing today_trade.json
+    # (so midday_conviction.py can use orderId for breakeven SL lock)
+    mode = result.get("mode", "SUPER_ORDER")
+    oid  = (result.get("orderId") or result.get("order_id") or
+            (result.get("buy_order") or {}).get("orderId"))
+
     # Write oracle intent for EOD trade journal (live trades only)
     iv_val = float(sig.get("iv_at_entry", sig.get("iv", 0.0)) or 0.0)
     _write_today_trade(signal, atm_strike, lots, dte, spot,
                        oracle_premium=premium,
                        sl_price=sl_price, tp_price=tp_price,
                        security_id=security_id, score=score, iv=iv_val,
-                       expiry=expiry, ml_conf=ml_conf)
-
-    # Live result
-    mode = result.get("mode", "SUPER_ORDER")
+                       expiry=expiry, ml_conf=ml_conf,
+                       order_id=oid, order_mode=mode)
 
     # Emergency modes — critical alerts already sent inside place_super_order
     if mode == "FAILED":
@@ -1381,9 +1384,6 @@ def main():
     if mode == "FALLBACK_NO_SL":
         notify.log("FALLBACK_NO_SL — BUY placed but SL failed. Emergency alert sent. Manual action needed.")
         return
-
-    oid  = (result.get("orderId") or result.get("order_id") or
-            (result.get("buy_order") or {}).get("orderId"))
 
     corr_id = f"at_{date.today().strftime('%Y%m%d')}"
     if oid:

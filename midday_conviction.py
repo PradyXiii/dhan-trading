@@ -424,6 +424,85 @@ def reassess(trade, bn_spot, option_ltp, macro) -> tuple[int, list, str]:
     return score, lines, verdict
 
 
+# ── Breakeven SL lock ────────────────────────────────────────────────────────
+
+def _update_trade_flag(key: str, value) -> None:
+    """Update a single key in today_trade.json (used to mark sl_raised_to_breakeven)."""
+    path = os.path.join(DATA_DIR, "today_trade.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        data[key] = value
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        _log(f"Could not update today_trade.json ({key}): {e}")
+
+
+def _lift_sl_to_breakeven(trade: dict, current_ltp: float) -> bool:
+    """Move the Super Order SL to entry price once the option is in profit.
+
+    Conditions checked:
+    - current_ltp >= oracle_premium  (option at or above our entry price)
+    - order_id present in today_trade.json  (saved by auto_trader.py since today)
+    - order_mode == "SUPER_ORDER"  (Super Orders only; FALLBACK uses SL-M, AMO has no auto-SL)
+    - sl_raised_to_breakeven not already True  (avoid duplicate API calls)
+
+    On success: calls PUT /v2/super/orders/{orderId} to set stopLossPrice=entry,
+    writes sl_raised_to_breakeven=True to today_trade.json, returns True.
+    """
+    if trade.get("sl_raised_to_breakeven"):
+        _log("Breakeven SL already set on a prior run — skipping.")
+        return False
+
+    entry_prem = float(trade.get("oracle_premium", 0))
+    if not entry_prem or current_ltp < entry_prem:
+        return False   # not yet in profit
+
+    order_id   = trade.get("order_id")
+    order_mode = trade.get("order_mode") or "SUPER_ORDER"
+
+    if not order_id:
+        _log("No order_id in today_trade.json — cannot lock SL to breakeven. "
+             "(order_id is saved by auto_trader.py from today onward)")
+        return False
+
+    if order_mode not in ("SUPER_ORDER",):
+        _log(f"order_mode={order_mode} — breakeven lock only works on Super Orders.")
+        return False
+
+    sl_current = float(trade.get("sl_price", 0))
+    if sl_current >= entry_prem:
+        _log(f"SL ₹{sl_current:.0f} already at/above entry ₹{entry_prem:.0f} — nothing to do.")
+        return False
+
+    _log(f"Option ₹{current_ltp:.0f} >= entry ₹{entry_prem:.0f} — moving SL to breakeven…")
+
+    payload = {
+        "dhanClientId": CLIENT_ID,
+        "orderId":      str(order_id),
+        "legName":      "STOP_LOSS_LEG",
+        "stopLossPrice": round(entry_prem, 1),
+        "trailingJump": 5,
+    }
+    try:
+        resp = requests.put(
+            f"https://api.dhan.co/v2/super/orders/{order_id}",
+            headers=HEADERS,
+            json=payload,
+            timeout=10,
+        )
+        result = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if resp.status_code == 200 and result.get("status") not in ("failure", "error"):
+            _log(f"SL moved to breakeven ₹{entry_prem:.0f}  [orderId: {order_id}]")
+            _update_trade_flag("sl_raised_to_breakeven", True)
+            return True
+        _log(f"SL breakeven API returned {resp.status_code}: {resp.text[:120]}")
+    except Exception as e:
+        _log(f"SL breakeven exception: {e}")
+    return False
+
+
 # ── Reversal helpers ─────────────────────────────────────────────────────────
 
 def _check_position_open(security_id: str) -> bool:
@@ -578,6 +657,21 @@ def main():
     option_ltp = get_option_ltp(security_id, trade)
     macro      = get_macro()
     _log(f"BN spot: {bn_spot}  |  LTP: {option_ltp}  |  Macro: {list(macro.keys())}")
+
+    # ── [2.5] Breakeven SL lock ────────────────────────────────────────────────
+    be_moved = False
+    if option_ltp and not DRY_RUN:
+        be_moved = _lift_sl_to_breakeven(trade, option_ltp)
+        if be_moved:
+            notify.send(
+                f"🔒 <b>Stop-loss moved to breakeven!</b>\n\n"
+                f"Your {direction} option is now above your entry price "
+                f"(₹{option_ltp:.0f} vs entry ₹{entry_prem:.0f}).\n\n"
+                f"We just moved the stop-loss up to <b>₹{entry_prem:.0f}</b> "
+                f"(your original buy price).\n\n"
+                f"<b>Worst case is now breakeven — you can't lose on this trade.</b>\n\n"
+                f"<i>Target is still at ₹{tp_price:.0f}. The trade stays open.</i>"
+            )
 
     # ── [3] Reassess conviction ────────────────────────────────────────────────
     conv_score, factor_lines, _ = reassess(trade, bn_spot, option_ltp, macro)
