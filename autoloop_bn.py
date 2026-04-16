@@ -707,10 +707,17 @@ def _preflight_feature_check(paper_file: Path) -> list[str]:
     paper_cols = set(re.findall(r'["\']([^"\']+)["\']', m.group(1)))
 
     new_cols = paper_cols - live_cols
+    if not new_cols:
+        return []
+
+    # Extract compute_features body — check assignment within it, variable-name-agnostic
+    # (BN uses d["col"] = ..., MCX uses df["col"] = ..., both caught by ["col"] = pattern)
+    cf_match = re.search(r'(def compute_features.*?)(?=\ndef |\Z)', paper_content, re.DOTALL)
+    cf_body = cf_match.group(1) if cf_match else paper_content
+
     missing = []
     for col in new_cols:
-        pattern = r'df\[["\']' + re.escape(col) + r'["\']\]\s*='
-        if not re.search(pattern, paper_content):
+        if not re.search(r'\[["\']' + re.escape(col) + r'["\']\]\s*=', cf_body):
             missing.append(col)
     return missing
 
