@@ -121,7 +121,10 @@ def load_extended_data():
         "us10y":  (f"{DATA_DIR}/us10y.csv",  "us10y_close"),
     }
     for key, (path, col) in extras.items():
-        if os.path.exists(path):
+        if col in df.columns:
+            # Already loaded by ml_engine.load_all_data() — skip to avoid duplicate columns
+            pass
+        elif os.path.exists(path):
             tmp = pd.read_csv(path, parse_dates=["date"])
             tmp = tmp[["date", "close"]].rename(columns={"close": col})
             df = df.merge(tmp, on="date", how="left")
