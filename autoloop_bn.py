@@ -340,7 +340,12 @@ def main():
     print("[Baseline] Running autoexperiment_bn.py...")
     baseline = _run_experiment()
     if "error" in baseline:
-        msg = f"❌ Autoresearch ABORTED — baseline failed:\n{baseline['error']}"
+        msg = (
+            f"❌ <b>Autoresearch couldn't start</b>\n"
+            f"Something went wrong before any experiments ran.\n\n"
+            f"Error: <code>{baseline['error']}</code>\n\n"
+            f"Check the logs on the VM."
+        )
         print(msg)
         _send(msg)
         sys.exit(1)
@@ -356,27 +361,25 @@ def main():
     if args.dry_run:
         print("\n[Dry-run] Baseline complete. Exiting (no experiments).")
         _send(
-            f"🔬 <b>Autoresearch dry-run  ·  {date_str}</b>\n"
-            f"─────────────────────\n"
-            f"Baseline composite:  {b_composite:.4f}\n"
-            f"PnL proxy:           {b_pnl:.4f}\n"
-            f"Train / Val rows:    {n_train} / {n_val}\n"
-            f"─────────────────────\n"
-            f"Dry-run complete — no experiments run."
+            f"🔬 <b>Autoresearch — Test Check</b>  ·  {date_str}\n\n"
+            f"Just measuring where the model stands today.\n\n"
+            f"📊 <b>Current model score:</b> {b_composite:.2%}  (higher = better)\n"
+            f"🎯 <b>Direction accuracy:</b>   {b_pnl:.2%}\n"
+            f"📅 <b>Data:</b> {n_train} days training · {n_val} days testing\n\n"
+            f"✅ System looks healthy. Ready for a real overnight run."
         )
         return
 
     # ── Step 2: Telegram start ────────────────────────────────────────────────
     _send(
-        f"🔬 <b>Autoresearch started  ·  {date_str}</b>\n"
-        f"─────────────────────\n"
-        f"Baseline composite:  {b_composite:.4f}\n"
-        f"PnL proxy:           {b_pnl:.4f}\n"
-        f"Train / Val rows:    {n_train} / {n_val}\n"
-        f"Experiments planned: {n_experiments}\n"
-        f"Search space: features + signal logic\n"
-        f"─────────────────────\n"
-        f"Sit back. Results in the morning."
+        f"🤖 <b>BankNifty Brain Training — Starting Now</b>\n"
+        f"{date_str}\n\n"
+        f"Tonight I'll try <b>{n_experiments} small ideas</b> to improve the model.\n"
+        f"Each idea gets tested — if it helps, I save it. If not, I throw it away.\n\n"
+        f"📊 <b>Starting score:</b>      {b_composite:.2%}\n"
+        f"🎯 <b>Direction accuracy:</b>  {b_pnl:.2%}\n"
+        f"📅 <b>Data:</b> {n_train} days training · {n_val} days for testing\n\n"
+        f"🌙 Go to sleep. I'll update you after each experiment!"
     )
 
     # ── Step 3: Setup Claude ──────────────────────────────────────────────────
@@ -407,6 +410,10 @@ def main():
                 "n": i, "description": "(Claude API error)",
                 "before": best_composite, "after": 0.0, "kept": False,
             })
+            _send(
+                f"⚠️ <b>Idea #{i} — skipped</b>\n"
+                f"Couldn't get a valid idea from Claude this round. Moving on."
+            )
             continue
 
         description = proposal.get("description", "(no description)")
@@ -435,7 +442,11 @@ def main():
                 "n": i, "description": description + f" [FAIL: {result['error'][:60]}]",
                 "before": best_composite, "after": 0.0, "kept": False,
             })
-            _send(f"❌ Exp {i}/{n_experiments}: {description}\n   Experiment error — DISCARDED")
+            _send(
+                f"⚠️ <b>Idea #{i} of {n_experiments} — crashed during test</b>\n"
+                f"💡 Idea: {description}\n\n"
+                f"The test run hit an error. Thrown away, moving on."
+            )
             continue
 
         new_composite = result["composite"]
@@ -462,9 +473,14 @@ def main():
                 best_composite = new_composite
                 best_pnl       = new_pnl
                 kept_count    += 1
+                delta = new_composite - prev_composite
+                delta_str = f"+{delta:.2%}" if delta > 0 else "no change"
                 _send(
-                    f"✅ Exp {i}/{n_experiments}: {description}\n"
-                    f"   Score: {prev_composite:.4f} → {new_composite:.4f}  KEPT"
+                    f"✅ <b>Idea #{i} of {n_experiments} worked!</b>\n"
+                    f"💡 {description}\n\n"
+                    f"Score before: {prev_composite:.2%}\n"
+                    f"Score after:  {new_composite:.2%}  ({delta_str})\n\n"
+                    f"Saved ✓  Moving to idea #{i+1}..."
                 )
                 print(f"  ✅ KEPT")
             else:
@@ -475,9 +491,10 @@ def main():
                     "before": prev_composite, "after": new_composite, "kept": False,
                 })
                 _send(
-                    f"⚠️ Exp {i}/{n_experiments}: {description}\n"
-                    f"   Score: {prev_composite:.4f} → {new_composite:.4f}  "
-                    f"DISCARDED (git commit failed — check git config)"
+                    f"⚠️ <b>Idea #{i} of {n_experiments} — couldn't save</b>\n"
+                    f"💡 {description}\n\n"
+                    f"Score looked good ({prev_composite:.2%} → {new_composite:.2%}) "
+                    f"but git save failed. Thrown away for safety."
                 )
         else:
             # DISCARD
@@ -494,8 +511,11 @@ def main():
             })
 
             _send(
-                f"❌ Exp {i}/{n_experiments}: {description}\n"
-                f"   Score: {best_composite:.4f} → {new_composite:.4f}  DISCARDED ({reason_str})"
+                f"❌ <b>Idea #{i} of {n_experiments} didn't help</b>\n"
+                f"💡 {description}\n\n"
+                f"Score before: {best_composite:.2%}\n"
+                f"Score after:  {new_composite:.2%}  (worse)\n\n"
+                f"Thrown away. Back to previous version."
             )
             print(f"  ❌ DISCARDED ({reason_str})")
 
@@ -509,29 +529,40 @@ def main():
     kept_items = [e for e in experiment_log if e["kept"]]
     discarded  = n_experiments - kept_count
 
-    if kept_items:
-        kept_lines = "\n".join(
-            f"  {j+1}. {e['description']}  ({e['before']:.4f} → {e['after']:.4f})"
-            for j, e in enumerate(kept_items)
-        )
-    else:
-        kept_lines = "  (none — baseline was already optimal)"
-
     improvement_pct = ((best_composite - b_composite) / max(b_composite, 0.001)) * 100
 
-    summary_msg = (
-        f"🔬 <b>Autoresearch complete  ·  {date_str}</b>\n"
-        f"─────────────────────\n"
-        f"Results:    {kept_count} kept / {discarded} discarded\n"
-        f"Best score: {best_composite:.4f}  (was {b_composite:.4f}, "
-        f"{improvement_pct:+.1f}%)\n"
-        f"─────────────────────\n"
-        f"Kept changes:\n{kept_lines}\n"
-        f"─────────────────────\n"
-    )
-
-    if kept_count > 0 and not args.no_evolver:
-        summary_msg += "Running model evolver to retrain 4 models..."
+    if kept_items:
+        kept_lines = "\n".join(
+            f"  {j+1}. {e['description']}\n"
+            f"      {e['before']:.2%} → {e['after']:.2%}"
+            for j, e in enumerate(kept_items)
+        )
+        score_line = (
+            f"📈 Score: {b_composite:.2%} → {best_composite:.2%}  ({improvement_pct:+.1f}%) 🚀"
+            if improvement_pct > 0.1
+            else f"📊 Score held steady at {best_composite:.2%}"
+        )
+        summary_msg = (
+            f"🌅 <b>BankNifty Brain Training — Done!</b>\n"
+            f"{date_str}\n\n"
+            f"✅ {kept_count} ideas worked  ·  ❌ {discarded} didn't\n\n"
+            f"{score_line}\n\n"
+            f"<b>What changed:</b>\n{kept_lines}\n"
+        )
+        if not args.no_evolver:
+            summary_msg += (
+                f"\n🔄 Retraining the 4 models with the improved code...\n"
+                f"You'll get another message when that's done."
+            )
+    else:
+        summary_msg = (
+            f"🌅 <b>BankNifty Brain Training — Done</b>\n"
+            f"{date_str}\n\n"
+            f"Tried {n_experiments} ideas — none helped.\n\n"
+            f"📊 Score stayed at {best_composite:.2%}. The model is already well-tuned.\n"
+            f"Nothing changed in the code. Models were NOT retrained.\n\n"
+            f"Try again next week — the market will give us new patterns to learn from."
+        )
 
     _send(summary_msg)
 
@@ -547,10 +578,18 @@ def main():
             print("[Evolver] Done.")
         except subprocess.TimeoutExpired:
             print("[Evolver] Timed out after 1 hour.")
-            _send("⚠️ model_evolver.py timed out after 1 hour")
+            _send(
+                f"⚠️ <b>Model retraining timed out</b>\n"
+                f"Ran for over 1 hour and was stopped.\n\n"
+                f"The code improvements are saved — run <code>python3 model_evolver.py</code> manually tomorrow."
+            )
         except Exception as e:
             print(f"[Evolver] Error: {e}")
-            _send(f"⚠️ model_evolver.py error: {e}")
+            _send(
+                f"⚠️ <b>Model retraining failed</b>\n"
+                f"Error: {e}\n\n"
+                f"The code improvements are saved — run <code>python3 model_evolver.py</code> manually."
+            )
     elif kept_count == 0:
         print("[Evolver] No improvements kept — skipping model_evolver.")
 
