@@ -12,6 +12,7 @@ If neither fired by 3:15 PM → squareoff at market price.
 Cron (3:15 PM IST = 9:45 AM UTC):
   45 9 * * 1-5 cd ~/dhan-trading && python3 exit_positions.py >> logs/exit.log 2>&1
 """
+import json
 import os
 import sys
 import requests
@@ -84,6 +85,118 @@ def _is_trading_day() -> bool:
     if today.weekday() >= 5:
         return False
     return today not in NSE_HOLIDAYS_2026
+
+
+def _load_today_trade() -> dict:
+    """Read data/today_trade.json written by auto_trader.py. Returns {} if missing."""
+    path = os.path.join(DATA_DIR, "today_trade.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            td = json.load(f)
+        if td.get("date") != date.today().isoformat():
+            return {}
+        return td
+    except Exception:
+        return {}
+
+
+def _get_today_bn_sells() -> list:
+    """
+    Fetch today's tradebook from Dhan and return SELL fills for today's BN option.
+    Returns list of fill dicts (may be empty on API failure).
+    """
+    try:
+        resp = requests.get("https://api.dhan.co/v2/trades", headers=HEADERS, timeout=10)
+    except Exception as e:
+        notify.log(f"Tradebook fetch failed: {e}")
+        return []
+    if resp.status_code != 200:
+        notify.log(f"Tradebook API {resp.status_code}: {resp.text[:80]}")
+        return []
+    trades = resp.json()
+    if not isinstance(trades, list):
+        trades = trades.get("data", [])
+    td = _load_today_trade()
+    sec_id = str(td.get("security_id", ""))
+    return [
+        t for t in trades
+        if t.get("transactionType") == "SELL"
+        and str(t.get("securityId", "")) == sec_id
+        and t.get("exchangeSegment", "") == "NSE_FNO"
+    ] if sec_id else []
+
+
+def _classify_exit(exit_price: float, sl_price: float, tp_price: float) -> str:
+    """Return human-readable exit reason based on where exit_price lands."""
+    sl_tol = sl_price * 0.05  # 5% tolerance — SL-M slippage
+    tp_tol = tp_price * 0.05
+    if exit_price <= sl_price + sl_tol:
+        return "🔴 Stop-loss hit"
+    if exit_price >= tp_price - tp_tol:
+        return "🟢 Target hit"
+    return "🔒 EOD close"
+
+
+def _send_exit_telegram(today_trade: dict, sells: list):
+    """
+    Build and send exit Telegram notification matching the entry alert format.
+    Called when position is already closed (intraday SL/TP) OR after EOD squareoff.
+    `sells` is a list of SELL fill dicts from the tradebook.
+    """
+    signal   = today_trade.get("signal", "?")
+    strike   = today_trade.get("strike", 0)
+    lots     = today_trade.get("lots", 0)
+    entry    = float(today_trade.get("oracle_premium", 0))
+    sl_price = float(today_trade.get("sl_price", 0))
+    tp_price = float(today_trade.get("tp_price", 0))
+    expiry   = today_trade.get("expiry", "?")
+
+    lot_size = 30  # BankNifty Jan 2026+
+
+    if sells:
+        # Weighted average exit price across fills
+        total_qty = sum(int(t.get("tradedQuantity", 0)) for t in sells)
+        total_val = sum(float(t.get("tradedPrice", 0)) * int(t.get("tradedQuantity", 0))
+                        for t in sells)
+        exit_price = total_val / total_qty if total_qty else 0.0
+        exit_time  = sells[-1].get("exchangeTime", "")[:16] if sells else ""
+    else:
+        exit_price = 0.0
+        exit_time  = ""
+
+    pnl_per_lot = (exit_price - entry) * lot_size
+    total_pnl   = pnl_per_lot * lots
+    pnl_pct     = ((exit_price - entry) / entry * 100) if entry else 0.0
+    reason      = _classify_exit(exit_price, sl_price, tp_price) if exit_price else "🔒 EOD close"
+
+    sign_pnl = "+" if total_pnl >= 0 else ""
+    sign_pct = "+" if pnl_pct >= 0 else ""
+
+    lines = [
+        f"📤 <b>Trade Closed  ·  {date.today().strftime('%d %b %Y')}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Signal      {signal}  ·  {strike:.0f} strike",
+        f"Expiry      {expiry}",
+        f"Lots        {lots}  ({lots * lot_size} qty)",
+        "",
+        f"Entry       ₹{entry:.2f}",
+    ]
+    if exit_price:
+        lines += [
+            f"Exit        ₹{exit_price:.2f}",
+        ]
+        if exit_time:
+            lines.append(f"Exit time   {exit_time} IST")
+    lines += [
+        f"SL / TP     ₹{sl_price:.2f} / ₹{tp_price:.2f}",
+        "",
+        f"P&amp;L         <b>{sign_pnl}₹{total_pnl:,.0f}  ({sign_pct}{pnl_pct:.1f}%)</b>",
+        f"Reason      {reason}",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    notify.send("\n".join(lines))
 
 
 def get_open_bn_positions():
@@ -160,11 +273,17 @@ def main():
     positions = get_open_bn_positions()
     if not positions:
         notify.log("No open BankNifty positions — nothing to square off. SL/TP already hit.")
+        # Send exit Telegram if we placed a trade today (SL or TP fired intraday)
+        today_trade = _load_today_trade()
+        if today_trade:
+            sells = [] if DRY_RUN else _get_today_bn_sells()
+            _send_exit_telegram(today_trade, sells)
         _write_exit_marker()
         return
 
-    mode      = "  [DRY RUN]" if DRY_RUN else ""
-    results   = []
+    mode        = "  [DRY RUN]" if DRY_RUN else ""
+    today_trade = _load_today_trade()
+    results     = []
 
     for pos in positions:
         symbol   = str(pos.get("tradingSymbol", pos.get("securityId", "?")))
@@ -197,11 +316,23 @@ def main():
     sign      = "+" if total_pnl >= 0 else ""
 
     lines = [
-        f"🔒  <b>EOD Squareoff{mode}</b>",
-        "─────────────────────",
-        f"{date.today().strftime('%d %b %Y')}  ·  3:15 PM IST",
+        f"📤 <b>Trade Closed — EOD{mode}  ·  {date.today().strftime('%d %b %Y')}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Closed at 3:15 PM IST  ·  🔒 EOD close",
         "",
     ]
+    if today_trade:
+        lines.append(
+            f"Signal      {today_trade.get('signal','?')}  ·  "
+            f"{today_trade.get('strike',0):.0f} strike  ·  "
+            f"expiry {today_trade.get('expiry','?')}"
+        )
+        lines.append(
+            f"SL / TP     ₹{today_trade.get('sl_price',0):.2f} / "
+            f"₹{today_trade.get('tp_price',0):.2f}"
+        )
+        lines.append("")
+
     for r in results:
         ok = "✓" if not r["error"] else "✗"
         ps = "+" if r["pnl"] >= 0 else ""
