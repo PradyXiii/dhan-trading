@@ -1097,7 +1097,7 @@ def main():
             experiment_log.append(
                 {
                     "n": i,
-                    "description": description + f" [FAIL: {result['error'][:60]}]",
+                    "description": description + f" [FAIL: {result['error'][:220]}]",
                     "before": cur_best,
                     "after": 0.0,
                     "kept": False,
