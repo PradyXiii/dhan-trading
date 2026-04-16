@@ -36,9 +36,12 @@ N_EXPERIMENTS    = 5
 MODEL            = "claude-opus-4-6"
 MAX_TOKENS       = 2048
 PNL_GUARD        = 0.90
-PAPER_ADVANTAGE  = 0.015    # paper must beat live by ≥1.5%
+PAPER_ADVANTAGE  = 0.015    # paper must beat live by ≥1.5% (combined score)
 PAPER_WIN_STREAK = 3        # consecutive nights needed
 PAPER_MIN_DAYS   = 3        # minimum days before eligible
+LIVE_WEIGHT      = 0.6      # live-trade accuracy weight in combined promotion score
+HOLDOUT_WEIGHT   = 0.4      # holdout composite weight in combined promotion score
+MIN_LIVE_FOR_MIX = 3        # need ≥N labeled live trades before mixing in live accuracy
 
 _IST             = timezone(timedelta(hours=5, minutes=30))
 _HERE            = Path(__file__).parent.resolve()
@@ -111,22 +114,47 @@ def _ensure_paper_file() -> None:
         print("[Paper] ml_engine_paper.py created and committed.")
 
 
-def _log_paper_performance(date_str: str, live_score: float, paper_score: float) -> None:
-    """Append one row to paper_performance.csv."""
+def _log_paper_performance(date_str: str, live_score: float, paper_score: float,
+                           live_eval: dict | None = None) -> None:
+    """Append one row to paper_performance.csv.
+    live_eval: dict from _score_paper_on_live_trades() with paper_acc, live_acc, n_trades.
+    combined_advantage = 60% live accuracy lead + 40% holdout lead (when ≥3 live trades).
+    """
     _PAPER_PERF_CSV.parent.mkdir(exist_ok=True)
+    holdout_adv = paper_score - live_score
+    n_live = live_eval.get("n_trades", 0) if live_eval else 0
+
+    if live_eval and n_live >= MIN_LIVE_FOR_MIX:
+        live_adv = live_eval["paper_acc"] - live_eval["live_acc"]
+        combined_adv = LIVE_WEIGHT * live_adv + HOLDOUT_WEIGHT * holdout_adv
+    else:
+        combined_adv = holdout_adv   # not enough live trades yet — holdout only
+
     header_needed = not _PAPER_PERF_CSV.exists()
     with open(_PAPER_PERF_CSV, "a", newline="") as f:
         w = csv.writer(f)
         if header_needed:
-            w.writerow(["date", "live_score", "paper_score", "advantage"])
-        w.writerow([date_str, f"{live_score:.4f}", f"{paper_score:.4f}", f"{paper_score - live_score:.4f}"])
+            w.writerow(["date", "live_score", "paper_score", "holdout_advantage",
+                        "live_paper_acc", "live_live_acc", "n_live_trades", "combined_advantage"])
+        w.writerow([
+            date_str,
+            f"{live_score:.4f}",
+            f"{paper_score:.4f}",
+            f"{holdout_adv:.4f}",
+            f"{live_eval.get('paper_acc', 0.0):.4f}" if live_eval else "0.0000",
+            f"{live_eval.get('live_acc',  0.0):.4f}" if live_eval else "0.0000",
+            n_live,
+            f"{combined_adv:.4f}",
+        ])
 
 
 def _check_paper_promotion() -> tuple[bool, int, float]:
-    """Check if paper model should be promoted to live."""
+    """Check if paper model should be promoted to live.
+    Uses combined_advantage when available (60% live trades + 40% holdout),
+    falls back to holdout_advantage for older rows.
+    """
     if not _PAPER_PERF_CSV.exists():
         return False, 0, 0.0
-    rows = []
     try:
         with open(_PAPER_PERF_CSV, newline="") as f:
             rows = list(csv.DictReader(f))
@@ -136,13 +164,16 @@ def _check_paper_promotion() -> tuple[bool, int, float]:
     if len(rows) < PAPER_MIN_DAYS:
         return False, 0, 0.0
 
-    # Count consecutive wins from the end
     streak = 0
     latest_adv = 0.0
     for row in reversed(rows):
+        # combined_advantage when available; fall back to holdout_advantage or legacy advantage
+        adv_str = (row.get("combined_advantage") or
+                   row.get("holdout_advantage") or
+                   row.get("advantage", "0"))
         try:
-            adv = float(row["advantage"])
-        except (KeyError, ValueError):
+            adv = float(adv_str)
+        except (ValueError, TypeError):
             break
         if adv >= PAPER_ADVANTAGE:
             streak += 1
@@ -152,6 +183,109 @@ def _check_paper_promotion() -> tuple[bool, int, float]:
             break
 
     return streak >= PAPER_WIN_STREAK, streak, latest_adv
+
+
+def _score_paper_on_live_trades() -> dict:
+    """
+    Score the paper model on actual live trade dates vs real market outcomes.
+
+    live_trades.csv records oracle_correct (True/False) + signal (CALL/PUT).
+    We infer the true market direction from those two columns, then ask:
+    "What would the paper model have predicted on that date?"
+    Returns {'paper_acc': float, 'live_acc': float, 'n_trades': int}.
+    """
+    live_csv = _HERE / "data" / "live_trades.csv"
+    empty = {"paper_acc": 0.0, "live_acc": 0.0, "n_trades": 0}
+
+    if not live_csv.exists() or not _PAPER_FILE.exists():
+        return empty
+
+    import csv as _csv
+    try:
+        with open(live_csv) as f:
+            rows = list(_csv.DictReader(f))
+    except Exception:
+        return empty
+
+    # Only rows with a definitive outcome
+    labeled = [r for r in rows
+               if str(r.get("oracle_correct", "")).lower() in ("true", "false")]
+    if not labeled:
+        return empty
+
+    # Live model accuracy = fraction oracle was correct on actual trades
+    live_correct = sum(1 for r in labeled if str(r["oracle_correct"]).lower() == "true")
+    live_acc = live_correct / len(labeled)
+
+    # Score the paper model on those same dates
+    try:
+        import importlib
+        import pandas as pd
+        from sklearn.ensemble import RandomForestClassifier
+
+        sys.path.insert(0, str(_HERE))
+        mle_paper = importlib.import_module("ml_engine_paper")
+
+        df_all    = mle_paper.compute_features(mle_paper.load_all_data())
+        df_labels = mle_paper.compute_labels(df_all)
+        df        = df_all.merge(df_labels[["date", "label"]], on="date", how="inner")
+        df["date"] = pd.to_datetime(df["date"])
+
+        feat_cols = mle_paper.FEATURE_COLS
+        missing   = [c for c in feat_cols if c not in df.columns]
+        if missing:
+            print(f"  [live-eval] paper model missing columns: {missing}")
+            return {"paper_acc": 0.0, "live_acc": live_acc, "n_trades": len(labeled)}
+
+        df_clean = df.dropna(subset=feat_cols + ["label"])
+
+        # Build (date, true_market_direction) pairs
+        trade_dates, true_dirs = [], []
+        for r in labeled:
+            dt  = pd.Timestamp(r["date"])
+            sig = r["signal"].upper()
+            correct = str(r["oracle_correct"]).lower() == "true"
+            # True direction: CALL if (CALL+correct) or (PUT+wrong)
+            true_dir = "CALL" if (sig == "CALL") == correct else "PUT"
+            trade_dates.append(dt)
+            true_dirs.append(true_dir)
+
+        # Train paper model on all data strictly before the earliest live trade
+        earliest  = min(trade_dates)
+        train_df  = df_clean[df_clean["date"] < earliest]
+        if len(train_df) < 100:
+            print(f"  [live-eval] only {len(train_df)} training rows before first live trade — skipping")
+            return {"paper_acc": 0.0, "live_acc": live_acc, "n_trades": len(labeled)}
+
+        rf = RandomForestClassifier(
+            n_estimators=200, max_depth=8, min_samples_leaf=3,
+            max_features="sqrt", class_weight="balanced",
+            random_state=42, n_jobs=-1,
+        )
+        rf.fit(train_df[feat_cols].values,
+               (train_df["label"] == "CALL").astype(int).values)
+
+        paper_correct, n_scored = 0, 0
+        for dt, true_dir in zip(trade_dates, true_dirs):
+            match = df_clean[df_clean["date"] == dt]
+            if match.empty:
+                continue
+            pred_label = rf.predict(match[feat_cols].values[0:1])[0]
+            pred_dir   = "CALL" if pred_label == 1 else "PUT"
+            if pred_dir == true_dir:
+                paper_correct += 1
+            n_scored += 1
+
+        if n_scored == 0:
+            return {"paper_acc": 0.0, "live_acc": live_acc, "n_trades": 0}
+
+        paper_acc = paper_correct / n_scored
+        print(f"  [live-eval] paper {paper_acc:.2%} vs live {live_acc:.2%} on {n_scored} real trades")
+        return {"paper_acc": paper_acc, "live_acc": live_acc, "n_trades": n_scored}
+
+    except Exception as e:
+        print(f"  [live-eval] Error scoring paper on live trades: {e}")
+        return {"paper_acc": 0.0, "live_acc": live_acc, "n_trades": len(labeled)}
 
 
 def _load_paper_changes() -> list[dict]:
@@ -551,13 +685,26 @@ def main():
         b_pnl_paper = baseline_paper.get("pnl_proxy", b_pnl_live)
         print(f"  [Paper] composite: {b_paper:.4f}  pnl_proxy: {b_pnl_paper:.4f}")
 
-    # Log today's performance
+    # Live-trade validation: score paper model on real fill dates
+    print("[Live-eval] Scoring paper model on actual trade dates...")
+    live_eval = _score_paper_on_live_trades()
+    n_live = live_eval["n_trades"]
+    if n_live >= MIN_LIVE_FOR_MIX:
+        live_adv = live_eval["paper_acc"] - live_eval["live_acc"]
+        holdout_adv = b_paper - b_live
+        combined_adv = LIVE_WEIGHT * live_adv + HOLDOUT_WEIGHT * holdout_adv
+        print(f"  Combined advantage: {combined_adv:+.4f}  "
+              f"(live {live_adv:+.4f} × {LIVE_WEIGHT}  +  holdout {holdout_adv:+.4f} × {HOLDOUT_WEIGHT})")
+    else:
+        print(f"  Only {n_live} labeled live trades — using holdout only (need {MIN_LIVE_FOR_MIX}+)")
+
+    # Log today's performance (with live eval data)
     if not args.dry_run:
-        _log_paper_performance(date_str, b_live, b_paper)
+        _log_paper_performance(date_str, b_live, b_paper, live_eval)
 
     # ── Step 3: Check paper promotion ─────────────────────────────────────────
     should_promote, streak, latest_adv = _check_paper_promotion()
-    print(f"[Paper] Streak: {streak}/{PAPER_WIN_STREAK}  Latest advantage: {latest_adv:+.4f}")
+    print(f"[Paper] Streak: {streak}/{PAPER_WIN_STREAK}  Latest combined advantage: {latest_adv:+.4f}")
 
     if should_promote and not args.dry_run:
         _promote_paper_to_live(streak, latest_adv)
@@ -579,10 +726,19 @@ def main():
     if args.dry_run:
         paper_vs_live = b_paper - b_live
         streak_str = f"{streak}/{PAPER_WIN_STREAK} nights ahead" if streak > 0 else "not ahead yet"
+        if n_live >= MIN_LIVE_FOR_MIX:
+            live_eval_line = (
+                f"🧾 <b>On real trades ({n_live}):</b> paper {live_eval['paper_acc']:.0%}  "
+                f"vs live {live_eval['live_acc']:.0%}  "
+                f"({live_eval['paper_acc'] - live_eval['live_acc']:+.0%})\n"
+            )
+        else:
+            live_eval_line = f"🧾 <b>Real trade data:</b> {n_live}/{MIN_LIVE_FOR_MIX} trades logged — holdout only\n"
         _send(
             f"🔬 <b>Autoresearch — Daily Check</b>  ·  {date_display}\n\n"
-            f"📊 <b>Live model:</b>  {b_live:.2%}\n"
-            f"📄 <b>Paper model:</b> {b_paper:.2%}  ({paper_vs_live:+.2%})\n"
+            f"📊 <b>Live model (252-day test):</b>  {b_live:.2%}\n"
+            f"📄 <b>Paper model (252-day test):</b> {b_paper:.2%}  ({paper_vs_live:+.2%})\n"
+            f"{live_eval_line}"
             f"🔢 <b>Promotion streak:</b> {streak_str}\n\n"
             f"📅 <b>Data:</b> {n_train} training days · {n_val} test days\n\n"
             f"✅ System healthy. Ready for tonight's experiments."
@@ -592,14 +748,26 @@ def main():
     # ── Step 5: Telegram start ────────────────────────────────────────────────
     paper_vs_live = b_paper - b_live
     streak_info = f"Paper ahead {streak}/{PAPER_WIN_STREAK} nights" if streak > 0 else "Paper not ahead yet"
+    if n_live >= MIN_LIVE_FOR_MIX:
+        live_eval_line = (
+            f"🧾 <b>Real trades ({n_live}):</b> paper {live_eval['paper_acc']:.0%}  "
+            f"vs live {live_eval['live_acc']:.0%}  "
+            f"({live_eval['paper_acc'] - live_eval['live_acc']:+.0%})\n"
+        )
+        scoring_note = f"(promotion uses {int(LIVE_WEIGHT*100)}% real trades + {int(HOLDOUT_WEIGHT*100)}% historical test)"
+    else:
+        live_eval_line = f"🧾 <b>Real trade data:</b> {n_live}/{MIN_LIVE_FOR_MIX} trades logged — using holdout only for now\n"
+        scoring_note = f"(will mix in real trade accuracy once {MIN_LIVE_FOR_MIX} trades logged)"
     _send(
         f"🤖 <b>BankNifty Brain Training — Starting</b>\n"
         f"{date_display}\n\n"
         f"Running {n_experiments} experiments tonight.\n"
         f"ML changes go into the <b>paper model</b> first — they need {PAPER_WIN_STREAK} good nights to go live.\n\n"
-        f"📊 <b>Live model score:</b>  {b_live:.2%}\n"
-        f"📄 <b>Paper model score:</b> {b_paper:.2%}  ({paper_vs_live:+.2%})\n"
-        f"🎯 <b>Promotion streak:</b> {streak_info}\n\n"
+        f"📊 <b>Live model (252-day test):</b>  {b_live:.2%}\n"
+        f"📄 <b>Paper model (252-day test):</b> {b_paper:.2%}  ({paper_vs_live:+.2%})\n"
+        f"{live_eval_line}"
+        f"🎯 <b>Promotion streak:</b> {streak_info}\n"
+        f"<i>{scoring_note}</i>\n\n"
         f"🌙 Go to sleep — I'll update you as experiments complete."
     )
 
