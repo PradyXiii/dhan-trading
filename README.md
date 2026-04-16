@@ -1,6 +1,6 @@
 # BankNifty Options Auto-Trader
 
-Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:15 AM IST, the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Nothing to do during market hours.
+Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:15 AM IST the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Every Saturday night it runs an AI-driven experiment loop that tries to improve its own model — keeping what works, reverting what doesn't. Nothing to do during market hours.
 
 ---
 
@@ -58,12 +58,21 @@ Every 5 minutes (all 7 days)
         — Also saves 4-model ensemble at models/ensemble/*.pkl
         — Sends a plain-English brain-training report to Telegram
 
+11:30 PM IST, every Saturday
+  └── autoloop_bn.py  (Autoresearch)
+        — Claude AI proposes one small code change per experiment (feature or signal tweak)
+        — autoexperiment_bn.py evaluates it: trains RF on all data, tests on last 252 days
+        — If score improves: change is committed to git
+        — If score drops: change is reverted, next idea tried
+        — Runs 20 experiments overnight; sends Telegram after each + a morning summary
+        — On completion, triggers model_evolver.py to retrain the 4 models on improved code
+
 1st of every month, 10:00 AM IST
   └── lot_expiry_scanner.py
         — Checks if NSE has changed BankNifty lot size or expiry structure
         — Alerts via Telegram if anything has changed
 
-Weekly, Sunday 2:00 AM IST
+Every Sunday, 2:00 AM IST
   └── Log rotation — trims any logs over 10 MB to the last 1000 lines
 ```
 
@@ -76,10 +85,9 @@ Weekly, Sunday 2:00 AM IST
 | Instrument | BankNifty options (monthly last-Tuesday expiry, Phase 4 Sep 2025+) |
 | Trading days | All 5 weekdays — Wednesday is a normal day (not expiry day) |
 | Direction | CALL or PUT — decided by ML oracle, informed by rule-based score |
-| Strike | ATM first, walks OTM if unaffordable for your capital |
+| Strike | ATM first; walks OTM if unaffordable, ITM if capital is flush |
 | Stop-loss | 15% of premium |
 | Target | 37.5% of premium (RR = 2.5×) |
-| Trailing stop | ₹5 option price movement |
 | Risk per trade | 5% of available capital |
 | Minimum trade | 1 lot (always trades if you can physically afford it) |
 | Max lots | 20 |
@@ -103,9 +111,13 @@ Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT
 
 **Step 2 — ML override:**
 
-An ensemble of walk-forward models (RF / XGBoost / LightGBM / CatBoost) votes on direction. The champion is the single best model; the full ensemble is used for live prediction agreement. It is a direction oracle — always outputs CALL or PUT, never skips a trade day.
+An ensemble of walk-forward models (RF / XGBoost / LightGBM / CatBoost) votes on direction. The champion is the single best model; the full ensemble is used for live prediction agreement. It always outputs CALL or PUT — never skips a trade day.
 
-**Step 3 — Live feedback loop:**
+**Step 3 — Autoresearch (weekly, Saturday night):**
+
+Claude AI iterates over the feature engineering and signal logic. Each proposed change is evaluated on a 252-day out-of-sample holdout. Improvements are committed to git; regressions are reverted. The 4-model ensemble is retrained on Sunday morning using the improved code. The model gets smarter every week without any human input.
+
+**Step 4 — Live feedback loop:**
 
 After each live trade, `trade_journal.py` records the actual outcome. Every night the evolver injects those real outcomes back into training and boosts historical rows that match "miss-day" market conditions, so the model incrementally corrects its own mistakes.
 
@@ -130,6 +142,9 @@ replay_today.py          Post-mortem tool — runs after evolver to replay today
 renew_token.py           Dynamic token renewal — 23h50m interval, 7 days a week
 notify.py                Telegram send helper
 dhan_mcp.py              MCP server — query live Dhan positions/P&L from Claude Code
+autoloop_bn.py           Saturday autoresearch loop — Claude API experiments → git keep/revert
+autoexperiment_bn.py     Fast 252-day holdout evaluator used by autoloop
+research_program_bn.md   Research brief — defines what autoresearch may and may not change
 setup_automation.sh      One-shot VM setup: install deps, set up all cron jobs, dry-run test
 ```
 
@@ -142,6 +157,7 @@ setup_automation.sh      One-shot VM setup: install deps, set up all cron jobs, 
 - GCP VM (or any Linux server) with Python 3.10+
 - Dhan trading account with API access enabled
 - Telegram bot (create one at t.me/BotFather)
+- Anthropic API key (for the Saturday autoresearch loop — get one at console.anthropic.com)
 
 ### 1. Clone and install
 
@@ -149,7 +165,8 @@ setup_automation.sh      One-shot VM setup: install deps, set up all cron jobs, 
 git clone <your-repo-url>
 cd dhan-trading
 pip3 install pandas numpy yfinance requests python-dotenv scikit-learn \
-             optuna xgboost lightgbm catboost joblib mcp --break-system-packages
+             optuna xgboost lightgbm catboost joblib anthropic \
+             --break-system-packages
 ```
 
 ### 2. Set up credentials
@@ -165,6 +182,7 @@ DHAN_ACCESS_TOKEN=your_token       # from dhan.co → API settings
 DHAN_CLIENT_ID=your_client_id
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
+ANTHROPIC_API_KEY=your_key         # from console.anthropic.com → API keys
 ```
 
 ### 3. First-time data fetch and ML training
@@ -182,14 +200,14 @@ python3 model_evolver.py      # first HPO run — takes 8–12 min, saves models
 bash setup_automation.sh      # sets up all cron jobs, tests API, runs dry-run
 ```
 
-This installs seven scheduled jobs plus weekly log rotation: token renewer (every 5 min), health ping (8:50 AM), auto trader (9:15 AM), midday conviction (11 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), lot scanner (1st of month), log rotation (Sunday 2 AM).
+This installs every scheduled job automatically: token renewer (every 5 min), health ping (8:50 AM), auto trader (9:15 AM), midday conviction (11 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), autoresearch loop (Saturday 11:30 PM), lot scanner (1st of month), log rotation (Sunday 2 AM).
 
 ### 5. Verify
 
 ```bash
-python3 auto_trader.py --dry-run    # full morning flow without placing an order
-crontab -l                          # confirm all cron jobs are listed
-cat token_meta.json                 # shows when token was last renewed
+python3 auto_trader.py --dry-run       # full morning flow without placing an order
+python3 autoloop_bn.py --dry-run       # autoresearch baseline check + Telegram test
+crontab -l                             # confirm all cron jobs are listed
 ```
 
 ---
@@ -217,6 +235,11 @@ python3 model_evolver.py                     # run nightly HPO manually
 python3 model_evolver.py --no-data           # HPO only, skip data fetch
 python3 model_evolver.py --trials 30         # override trial count (default 30)
 
+# Autoresearch
+python3 autoloop_bn.py --dry-run             # measure baseline score + Telegram test
+python3 autoloop_bn.py --experiments 3       # quick 3-experiment live test
+python3 autoloop_bn.py --no-evolver          # run experiments without retraining at end
+
 # Post-mortem replay
 python3 replay_today.py                      # replay today with current ensemble, vs actual
 
@@ -230,7 +253,6 @@ python3 trade_journal.py --dry-run           # journal check without API calls
 
 # Token management
 python3 renew_token.py                       # check / force token renewal
-cat token_meta.json                          # see when it was last renewed
 
 # Lot/expiry scanner
 python3 lot_expiry_scanner.py --show         # print current lot size and expiry override
@@ -266,6 +288,8 @@ Add to `~/.claude/settings.json`:
 
 **ML as direction oracle, not filter** — Rules provide a starting direction. The ML model overrides it when market conditions disagree. It always produces a direction — CALL or PUT — and never skips a trade.
 
+**Autoresearch (Karpathy pattern)** — Every Saturday night Claude AI proposes small changes to feature engineering (`ml_engine.py`) and signal logic (`signal_engine.py`). Each change is evaluated on a 252-day out-of-sample holdout using a fixed RF. Improvements are committed; regressions are reverted. The 4 models retrain on the improved code. The system improves itself week over week without human involvement.
+
 **Live feedback loop** — After each trade, the actual outcome (SL hit vs TP hit) gets injected back into the model's training data with high weight. Patterns that caused past misses get upweighted in historical training so the model gradually reduces repeat errors.
 
 **Monthly expiry (Phase 4, Sep 2025+)** — BankNifty switched from weekly Thursday expiry to monthly last-Tuesday expiry. All 5 weekdays are now valid trading days.
@@ -282,7 +306,7 @@ Add to `~/.claude/settings.json`:
 
 Gitignored for safety — these live only on the VM, never in version control:
 
-- `.env` — Dhan token, client ID, Telegram bot token, chat ID
+- `.env` — Dhan token, client ID, Telegram bot token, chat ID, Anthropic API key
 - `data/` — all fetched OHLCV, signal CSVs, live trade journal, today_trade.json
 - `models/` — trained champion.pkl, champion_meta.json, ensemble/*.pkl
 - `logs/` — cron log output for every scheduled job
