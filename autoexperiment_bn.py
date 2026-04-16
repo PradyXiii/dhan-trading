@@ -128,25 +128,34 @@ def run():
         n_jobs=-1,
     )
     rf.fit(X_train, y_train)
-    y_pred = rf.predict(X_val)
+    y_pred       = rf.predict(X_val)
+    y_train_pred = rf.predict(X_train)
 
-    # ── Sanity cap: composite > 0.90 on a binary market-direction problem is
-    # almost certainly leakage from a combination of mildly-correlated features
-    # that individually pass the |corr|>0.85 check but together reconstruct the
-    # label.  Real edge on BankNifty options tops out around 0.70–0.80.
-    composite = _composite(y_val, y_pred)
+    composite       = _composite(y_val, y_pred)
+    train_composite = _composite(y_train, y_train_pred)
+
+    # ── Two-part leakage guard ────────────────────────────────────────────────
+    # 1. Holdout cap: >0.90 on a binary market-direction problem is unrealistic.
+    # 2. Train cap: with max_depth=8 min_samples_leaf=3 on ~1400 rows, clean
+    #    features should produce train composite ≤0.85.  Anything above 0.92
+    #    means the RF is fitting leaked signal — even if holdout looks OK today,
+    #    the leakage will inflate scores progressively as features compound.
+    leak_reason = None
     if composite > 0.90:
-        train_pred = rf.predict(X_train)
-        train_composite = _composite(y_train, train_pred)
-        print(json.dumps({
-            "error": (
-                f"composite {composite:.4f} exceeds sanity cap 0.90 — "
-                f"likely cross-feature label leakage "
-                f"(train composite={train_composite:.4f}). "
-                "Check for same-day OHLC in rolling windows or ATR denominator."
-            ),
-            "composite": 0.0,
-        }))
+        leak_reason = (
+            f"holdout composite {composite:.4f} exceeds cap 0.90 — "
+            f"likely label leakage (train={train_composite:.4f}). "
+            "Check for same-day close/high/low in rolling windows "
+            "(must call .shift(1) BEFORE .rolling()/.ewm())."
+        )
+    elif train_composite > 0.92:
+        leak_reason = (
+            f"train composite {train_composite:.4f} exceeds cap 0.92 — "
+            f"RF memorising leaked signal (holdout={composite:.4f}). "
+            "Find the feature missing .shift(1) before rolling/pct_change/ewm."
+        )
+    if leak_reason:
+        print(json.dumps({"error": leak_reason, "composite": 0.0}))
         sys.exit(1)
 
     pnl_proxy = round(float((y_pred == y_val).mean()), 4)
