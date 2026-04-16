@@ -1362,8 +1362,7 @@ def main():
         )
         return
 
-    # Extract mode and orderId from result before writing today_trade.json
-    # (so midday_conviction.py can use orderId for breakeven SL lock)
+    # Extract mode and orderId before writing today_trade.json
     mode = result.get("mode", "SUPER_ORDER")
     oid  = (result.get("orderId") or result.get("order_id") or
             (result.get("buy_order") or {}).get("orderId"))
