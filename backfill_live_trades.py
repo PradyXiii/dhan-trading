@@ -95,6 +95,27 @@ def fetch_trade_history(from_date: str, to_date: str) -> list[dict]:
     return all_trades
 
 
+def fetch_todays_tradebook() -> list[dict]:
+    """Fetch today's fills via GET /v2/trades (no date params = today only)."""
+    try:
+        r = requests.get("https://api.dhan.co/v2/trades", headers=HEADERS, timeout=15)
+    except Exception as e:
+        print(f"  Tradebook API error: {e}")
+        return []
+
+    if r.status_code == 401:
+        print("  401 Unauthorized — token expired. Run: python3 renew_token.py")
+        sys.exit(1)
+    if r.status_code != 200:
+        print(f"  Tradebook HTTP {r.status_code}: {r.text[:200]}")
+        return []
+
+    data = r.json()
+    trades = data if isinstance(data, list) else data.get("data", [])
+    print(f"  Today's tradebook: {len(trades)} total fills")
+    return trades
+
+
 def filter_banknifty_fno(trades: list[dict]) -> list[dict]:
     """Keep only BANKNIFTY options in NSE_FNO segment."""
     out = []
@@ -350,10 +371,25 @@ def main():
         print("ERROR: DHAN_ACCESS_TOKEN not set in .env")
         sys.exit(1)
 
-    print(f"\nFetching Dhan trade history: {args.from_date} → {args.to_date}")
-    all_trades = fetch_trade_history(args.from_date, args.to_date)
-    print(f"Total trades fetched: {len(all_trades)}")
+    # Historical trades (from_date → yesterday via dated API)
+    today_str = date.today().isoformat()
+    history_to = args.to_date if args.to_date < today_str else (
+        date.today() - timedelta(days=1)
+    ).isoformat()
 
+    all_trades = []
+    if args.from_date <= history_to:
+        print(f"\nFetching Dhan trade history: {args.from_date} → {history_to}")
+        all_trades = fetch_trade_history(args.from_date, history_to)
+        print(f"History trades fetched: {len(all_trades)}")
+
+    # Today's fills via tradebook (GET /v2/trades — no date params)
+    if args.to_date >= today_str:
+        print(f"\nFetching today's tradebook ({today_str})...")
+        todays = fetch_todays_tradebook()
+        all_trades.extend(todays)
+
+    print(f"\nTotal trades: {len(all_trades)}")
     bn_trades = filter_banknifty_fno(all_trades)
     print(f"BANKNIFTY NSE_FNO trades: {len(bn_trades)}")
 
