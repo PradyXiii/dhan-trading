@@ -118,6 +118,37 @@ def _run_experiment() -> dict:
 
 # ── File content helpers ──────────────────────────────────────────────────────
 
+def _reversal_summary() -> str:
+    """Summarise recent intraday reversals from midday_checkpoints.csv (last 30 days).
+    Returns empty string if no data available."""
+    from collections import Counter
+    path = _HERE / "data" / "midday_checkpoints.csv"
+    if not path.exists():
+        return ""
+    try:
+        df      = pd.read_csv(path, parse_dates=["date"])
+        cutoff  = pd.Timestamp.now() - pd.Timedelta(days=30)
+        df      = df[df["date"] >= cutoff]
+        revs    = df[df["reversal_detected"].astype(str).str.lower() == "true"]
+        if revs.empty:
+            return ""
+        codes   = Counter()
+        for rc in revs["reason_codes"].dropna():
+            for c in str(rc).split("|"):
+                c = c.strip()
+                if c:
+                    codes[c] += 1
+        lines = [f"  {code}: {n}×" for code, n in codes.most_common(5)]
+        return (
+            f"\n\n### Recent intraday reversals (last 30 days)\n"
+            f"{len(revs)} reversal(s) out of {len(df)} midday checks.\n"
+            f"Top reversal drivers:\n" + "\n".join(lines) + "\n"
+            "Prefer features that would have predicted or guarded against these patterns."
+        )
+    except Exception:
+        return ""
+
+
 def _read_file(filename: str) -> str:
     path = _HERE / filename
     try:
@@ -230,6 +261,7 @@ def _call_claude(
         + code_context
         + "\n\n"
         + log_str
+        + _reversal_summary()
         + "\n\n"
         "### Your task\n"
         "Propose ONE small, targeted change. Return ONLY a valid JSON object with these keys:\n"

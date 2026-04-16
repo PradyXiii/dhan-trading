@@ -318,11 +318,13 @@ def _build_model(model_type, params):
 #  LIVE TRADE FEEDBACK — inject real outcomes + boost miss-day patterns
 # ─────────────────────────────────────────────────────────────────────────────
 
-LIVE_TRADES_PATH = f"{DATA_DIR}/live_trades.csv"
-LIVE_INJECT_WEIGHT = 10.0   # live trade rows are 10× more valuable than synthetic labels
-MISS_BOOST         = 3.0    # historical rows matching miss patterns get 3× weight
-MIN_LIVE_TRADES    = 5      # minimum labeled trades before feedback kicks in
-MIN_MISSES         = 2      # minimum misses before boosting historical rows
+LIVE_TRADES_PATH    = f"{DATA_DIR}/live_trades.csv"
+MIDDAY_CHECKPOINTS  = f"{DATA_DIR}/midday_checkpoints.csv"
+LIVE_INJECT_WEIGHT  = 10.0  # live trade rows are 10× more valuable than synthetic labels
+MIDDAY_MISS_WEIGHT  = 5.0   # midday reversal rows: confirmed wrong direction mid-session
+MISS_BOOST          = 3.0   # historical rows matching miss patterns get 3× weight
+MIN_LIVE_TRADES     = 5     # minimum labeled trades before feedback kicks in
+MIN_MISSES          = 2     # minimum misses before boosting historical rows
 
 
 def _load_live_outcomes(df_full, selected_cols):
@@ -433,6 +435,58 @@ def _identify_miss_drivers(X_misses, X_hits, selected_cols, top_n=3):
     return drivers[:top_n]
 
 
+def _load_midday_reversals(df_full, selected_cols):
+    """
+    Load midday_checkpoints.csv and return reversal rows as (feature_vector, y_label) pairs.
+    Reversal = the model predicted the wrong direction mid-session.
+    y_label is the OPPOSITE of the signal (what we should have predicted instead).
+    Returns empty list if file missing or no reversals found.
+    """
+    from pathlib import Path
+    import csv as _csv
+
+    if not Path(MIDDAY_CHECKPOINTS).exists():
+        return []
+
+    try:
+        with open(MIDDAY_CHECKPOINTS) as f:
+            rows = list(_csv.DictReader(f))
+    except Exception as e:
+        print(f"  [feedback] Cannot read midday_checkpoints.csv: {e}")
+        return []
+
+    reversal_rows = [r for r in rows
+                     if str(r.get("reversal_detected", "")).lower() == "true"
+                     and str(r.get("signal", "")).upper() in ("CALL", "PUT")]
+    if not reversal_rows:
+        return []
+
+    df_full = df_full.copy()
+    df_full["date"] = pd.to_datetime(df_full["date"])
+    inject = []
+
+    for row in reversal_rows:
+        try:
+            dt    = pd.to_datetime(row["date"])
+            match = df_full[df_full["date"] == dt]
+            if match.empty:
+                continue
+            feat = match[selected_cols].fillna(0).values[0]
+            # Reversal = we were wrong → label is opposite of signal
+            # Convention: CALL=1, PUT=0 (matches _load_live_outcomes)
+            # CALL reversal: should have been PUT → y_label = 0
+            # PUT  reversal: should have been CALL → y_label = 1
+            signal  = row["signal"].upper()
+            y_label = 0 if signal == "CALL" else 1
+            inject.append((feat, y_label))
+        except Exception:
+            continue
+
+    if inject:
+        print(f"  [feedback] Loaded {len(inject)} midday reversals from checkpoints")
+    return inject
+
+
 def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
     """
     Build augmented (X, y, sample_weight) incorporating live trade feedback.
@@ -440,7 +494,8 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
     Steps:
     1. Load live_trades.csv + join feature vectors
     2. Inject live rows into training set (weight=LIVE_INJECT_WEIGHT)
-    3. Boost historical rows matching miss-day patterns (weight=MISS_BOOST)
+    3. Inject midday reversal rows (weight=MIDDAY_MISS_WEIGHT)
+    4. Boost historical rows matching miss-day patterns (weight=MISS_BOOST)
 
     Returns (X_aug, y_aug, sample_weights, live_info) where live_info
     is a dict for Telegram reporting.
@@ -471,8 +526,26 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
         X_aug = X_all.copy()
         y_aug = y_all.copy()
 
-    # ── Step 2: boost historical rows matching miss patterns ──────────────────
-    if n_misses >= MIN_MISSES:
+    # ── Step 2: inject midday reversal rows ───────────────────────────────────
+    midday_rows = _load_midday_reversals(df_full, selected_cols)
+    if midday_rows:
+        X_mid = np.array([r[0] for r in midday_rows])
+        y_mid = np.array([r[1] for r in midday_rows])
+        X_aug = np.vstack([X_aug, X_mid])
+        y_aug = np.concatenate([y_aug, y_mid])
+        sample_weights = np.concatenate([
+            sample_weights,
+            np.full(len(midday_rows), MIDDAY_MISS_WEIGHT),
+        ])
+        # Also fold into X_misses so miss-driver analysis sees them
+        X_misses = (np.vstack([X_misses, X_mid])
+                    if X_misses is not None and X_misses.size
+                    else X_mid)
+        n_misses += len(midday_rows)
+        print(f"  [feedback] Injected {len(midday_rows)} midday reversals (weight={MIDDAY_MISS_WEIGHT}×)")
+
+    # ── Step 3: boost historical rows matching miss patterns ──────────────────
+    if n_misses >= MIN_MISSES and X_misses is not None:
         miss_drivers = _identify_miss_drivers(X_misses, X_hits, selected_cols)
 
         if miss_drivers:
