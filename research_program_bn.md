@@ -32,6 +32,9 @@ vix_close, vix_open (sometimes)         — India VIX
 sp_close                                — S&P 500 close
 nk_close                                — Nikkei 225 close
 spf_open, spf_close                     — S&P 500 futures OHLCV
+crude_close (sometimes, may be NaN)     — Crude oil futures (CL=F)
+dxy_close (sometimes, may be NaN)       — US Dollar Index
+us10y_close (sometimes, may be NaN)     — US 10-Year Treasury yield
 fii_net_cash (sometimes, may be NaN)    — FII net cash market flow
 pcr (sometimes, may be NaN)             — Put-Call ratio from option chain
 ```
@@ -46,6 +49,7 @@ rule_score, rule_signal
 ema20_pct, vix_level, vix_pct_chg, vix_hv_ratio
 bn_ret1, bn_ret20, dow, dte
 vix_open_chg, pcr_ma5, pcr_chg, fii_net_cash_z
+crude_ret, dxy_ret, us10y_chg
 ```
 
 ### signal_engine.py — score_row()

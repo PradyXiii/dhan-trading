@@ -148,6 +148,24 @@ def load_all_data():
     df = df.dropna(subset=["bn_close","nf_close","vix_close","sp_close",
                             "nk_close","spf_open","spf_close"])
 
+    # ── Global macro: crude oil, dollar index, US 10Y yield (optional) ─────────
+    # All three are fetched daily by data_fetcher.py. They are the primary
+    # drivers of FII behaviour and banking-sector risk-off moves.
+    for _col, _file in [("crude_close", "crude.csv"),
+                         ("dxy_close",   "dxy.csv"),
+                         ("us10y_close", "us10y.csv")]:
+        _path = f"{DATA_DIR}/{_file}"
+        if os.path.exists(_path):
+            try:
+                _tmp = pd.read_csv(_path, parse_dates=["date"])[["date", "close"]]
+                _tmp = _tmp.rename(columns={"close": _col})
+                df   = df.merge(_tmp, on="date", how="left")
+                df[_col] = df[_col].ffill(limit=5)
+            except Exception:
+                df[_col] = np.nan
+        else:
+            df[_col] = np.nan
+
     # ── FII net cash (optional) ───────────────────────────────────────────────
     fii_path = f"{DATA_DIR}/fii_dii.csv"
     if os.path.exists(fii_path):
@@ -270,6 +288,25 @@ def compute_features(df):
         d["pcr_ma5"] = 1.0
         d["pcr_chg"] = 0.0
 
+    # ── Global macro returns ─────────────────────────────────────────────────
+    # crude_ret: crude oil daily % return. Rising crude → inflation risk →
+    #            hawkish Fed → FII selling → bearish for banking index.
+    # dxy_ret:   dollar index daily % return. Strong dollar → FII outflows
+    #            from India → BN selling pressure.
+    # us10y_chg: US 10Y yield change (bps-like). Rising yields → banks' cost
+    #            of funds rises → HDFC/Kotak/SBI under pressure → BN PUT signal.
+    for _feat, _src, _mode in [("crude_ret",  "crude_close", "pct"),
+                                ("dxy_ret",    "dxy_close",   "pct"),
+                                ("us10y_chg",  "us10y_close", "diff")]:
+        if _src in d.columns:
+            if _mode == "pct":
+                d[_feat] = (d[_src] / d[_src].shift(1) - 1) * 100
+            else:
+                d[_feat] = d[_src].diff()
+        else:
+            d[_feat] = 0.0
+        d[_feat] = d[_feat].fillna(0.0)
+
     # ── NEW: FII net cash flow (z-scored) ────────────────────────────────────
     # FII cash market activity is the dominant institutional flow driver.
     # Heavy FII selling (negative) = bearish regardless of technicals.
@@ -298,6 +335,8 @@ FEATURE_COLS = [
     "rsi14", "hv20", "bn_gap",
     # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
+    # Macro drivers (crude → inflation risk; DXY → FII outflows; US10Y → bank cost of funds)
+    "crude_ret", "dxy_ret", "us10y_chg",
     # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
     # Momentum
