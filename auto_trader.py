@@ -69,6 +69,12 @@ def _release_lock():
             _lock_fh.close()
         except Exception:
             pass
+    # Remove the lock file on clean exit so the mtime staleness check only
+    # fires when a previous run actually crashed (leaving the file behind).
+    try:
+        os.remove(_LOCK_FILE)
+    except OSError:
+        pass
 
 atexit.register(_release_lock)
 _acquire_lock()
