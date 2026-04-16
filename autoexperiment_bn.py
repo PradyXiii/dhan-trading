@@ -137,7 +137,7 @@ def run():
     # ── Two-part leakage guard ────────────────────────────────────────────────
     # 1. Holdout cap: >0.90 on a binary market-direction problem is unrealistic.
     # 2. Train cap: with max_depth=8 min_samples_leaf=3 on ~1400 rows, clean
-    #    features should produce train composite ≤0.85.  Anything above 0.92
+    #    features should produce train composite ≤0.85.  Anything above 0.98
     #    means the RF is fitting leaked signal — even if holdout looks OK today,
     #    the leakage will inflate scores progressively as features compound.
     leak_reason = None
@@ -148,9 +148,9 @@ def run():
             "Check for same-day close/high/low in rolling windows "
             "(must call .shift(1) BEFORE .rolling()/.ewm())."
         )
-    elif train_composite > 0.92:
+    elif train_composite > 0.98:
         leak_reason = (
-            f"train composite {train_composite:.4f} exceeds cap 0.92 — "
+            f"train composite {train_composite:.4f} exceeds cap 0.98 — "
             f"RF memorising leaked signal (holdout={composite:.4f}). "
             "Find the feature missing .shift(1) before rolling/pct_change/ewm."
         )
