@@ -104,18 +104,47 @@ def _commit(message: str, files: list[str]) -> bool:
 # ── Paper tracking helpers ────────────────────────────────────────────────────
 
 def _ensure_paper_file(commit: bool = True) -> None:
-    """Create ml_engine_paper.py from ml_engine.py if missing.
-    commit=False skips the git commit (used during --dry-run)."""
-    if _PAPER_FILE.exists():
-        return
-    print("[Paper] ml_engine_paper.py not found — creating...")
-    shutil.copy(_HERE / "ml_engine.py", _PAPER_FILE)
-    if commit:
-        committed = _commit("autoloop: create ml_engine_paper.py (paper trading copy)", ["ml_engine_paper.py"])
-        if committed:
-            print("[Paper] ml_engine_paper.py created and committed.")
+    """Sync ml_engine_paper.py with ml_engine.py.
+
+    Behavior:
+      1. Paper file missing → copy from live.
+      2. Paper file exists, no accumulated changes (paper_changes.json empty) → re-sync from live
+         (handles the case where ml_engine.py was updated upstream while paper file is stale).
+      3. Paper file exists, has accumulated changes → leave alone (preserves autoresearch work).
+    """
+    live_file = _HERE / "ml_engine.py"
+
+    has_accumulated_changes = False
+    if _PAPER_CHANGES.exists():
+        try:
+            changes = json.loads(_PAPER_CHANGES.read_text())
+            has_accumulated_changes = bool(changes)
+        except Exception:
+            has_accumulated_changes = False
+
+    if not _PAPER_FILE.exists():
+        print("[Paper] ml_engine_paper.py not found — creating from live...")
+        shutil.copy(live_file, _PAPER_FILE)
+        action = "created"
+    elif not has_accumulated_changes:
+        live_content = live_file.read_text(encoding="utf-8")
+        paper_content = _PAPER_FILE.read_text(encoding="utf-8")
+        if live_content == paper_content:
+            return
+        print("[Paper] ml_engine_paper.py out of sync with live — re-syncing...")
+        shutil.copy(live_file, _PAPER_FILE)
+        action = "re-synced from live"
     else:
-        print("[Paper] ml_engine_paper.py created (dry-run — not committed).")
+        return
+
+    if commit:
+        committed = _commit(f"autoloop: {action} ml_engine_paper.py", ["ml_engine_paper.py"])
+        if committed:
+            print(f"[Paper] ml_engine_paper.py {action} and committed.")
+        else:
+            print(f"[Paper] ml_engine_paper.py {action} (commit failed or no changes).")
+    else:
+        print(f"[Paper] ml_engine_paper.py {action} (dry-run — not committed).")
 
 
 def _log_paper_performance(date_str: str, live_score: float, paper_score: float,
@@ -533,6 +562,18 @@ def _build_system_prompt() -> str:
         "IMPORTANT: ml_engine.py changes go into a paper (test) model first. "
         "After 3 nights of outperforming the live model by ≥1.5%, they automatically go live. "
         "So be bold — paper experiments have no risk.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Adding a new ML feature requires TWO edits: one to compute_features() and one to FEATURE_COLS.\n"
+        "   In BN ml_engine.py, compute_features() is at line ~228 and FEATURE_COLS is at line ~332 — "
+        "~104 lines apart. They cannot be spanned in one replacement.\n"
+        "   Use the 'changes' array to submit both edits atomically (see JSON format below).\n"
+        "2. The RandomForest only uses columns listed in FEATURE_COLS. If you compute a column but don't add it\n"
+        "   to FEATURE_COLS (or vice versa), the experiment crashes immediately.\n"
+        "3. Rolling window limits: the dataset has ~1500+ rows but beware of NaN chains.\n"
+        "   Use rolling windows ≤60 days for new features. Windows >100 days risk NaN-induced row drops.\n"
+        "   For z-scores/normalisation use rolling(20) or rolling(60). Guard divisions with .replace(0, np.nan).\n"
+        "4. If your change doesn't strictly improve the score (>) it will be reverted. Equal-score = no effect.\n"
+        "5. Do NOT repeat a feature already tried (see experiment log).\n\n"
         "Here is the complete research program:\n\n"
         + brief
     )
@@ -566,16 +607,20 @@ def _call_claude(
         + _reversal_summary()
         + "\n\n"
         "### Your task\n"
-        "Propose ONE small, targeted change. Return ONLY a valid JSON object with these keys:\n"
-        '  "file": "ml_engine.py" or "signal_engine.py" or "auto_trader.py"\n'
-        '  "description": "short one-line technical description"\n'
-        '  "plain_english": "one sentence a non-technical trader can understand"\n'
-        '  "old_code": "exact unique substring to find and replace"\n'
-        '  "new_code": "replacement string"\n\n'
+        "Propose ONE targeted change. Return ONLY a valid JSON object.\n\n"
+        "FOR A SINGLE EDIT (hyperparameter, refactoring, single-section change):\n"
+        '  {"file": "ml_engine.py", "description": "...", "plain_english": "...",\n'
+        '   "old_code": "exact unique substring", "new_code": "replacement"}\n\n'
+        "FOR ADDING A NEW FEATURE (requires TWO edits — compute_features + FEATURE_COLS):\n"
+        '  {"file": "ml_engine.py", "description": "...", "plain_english": "...",\n'
+        '   "changes": [\n'
+        '     {"old_code": "...compute_features section...", "new_code": "...with computation added..."},\n'
+        '     {"old_code": "...FEATURE_COLS section...", "new_code": "...with new col added..."}\n'
+        "   ]}\n\n"
         "Rules:\n"
-        "- old_code must be a UNIQUE substring of the file (include context lines).\n"
+        "- Each old_code must be a UNIQUE substring of the target file.\n"
         "- Do NOT repeat a change already tried (see experiment log).\n"
-        "- ONE change only. No markdown fences. No explanation. JSON only.\n"
+        "- No markdown fences. No explanation outside the JSON. JSON only.\n"
     )
 
     try:
@@ -590,7 +635,37 @@ def _call_claude(
         if raw.startswith("```"):
             raw = "\n".join(line for line in raw.splitlines() if not line.strip().startswith("```")).strip()
 
-        return json.loads(raw)
+        # Robust extraction: find the first complete JSON object by tracking braces.
+        # Handles cases where Claude appends explanation text after the JSON.
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            if start == -1:
+                raise
+            depth = 0
+            in_string = False
+            escape = False
+            for i in range(start, len(raw)):
+                ch = raw[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\" and in_string:
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return json.loads(raw[start:i+1])
+            raise json.JSONDecodeError("Unbalanced braces", raw, len(raw))
     except json.JSONDecodeError as e:
         print(f"  Claude returned invalid JSON: {e}")
         return None
@@ -599,38 +674,95 @@ def _call_claude(
         return None
 
 
+# ── Pre-flight validator ──────────────────────────────────────────────────────
+
+def _preflight_feature_check(paper_file: Path) -> list[str]:
+    """Scan paper file for FEATURE_COLS entries added by the experiment but missing
+    a df[col]= assignment in compute_features().
+
+    Only checks NEWLY added columns (paper FEATURE_COLS minus live FEATURE_COLS) to
+    avoid false positives for features loaded from data rather than computed.
+    """
+    import re
+
+    def _extract_feature_cols(path: Path) -> set:
+        try:
+            content = path.read_text(encoding="utf-8")
+            m = re.search(r"FEATURE_COLS\s*=\s*\[([^\]]+)\]", content, re.DOTALL)
+            if not m:
+                return set()
+            return set(re.findall(r'["\']([^"\']+)["\']', m.group(1)))
+        except Exception:
+            return set()
+
+    live_cols = _extract_feature_cols(_HERE / "ml_engine.py")
+    try:
+        paper_content = paper_file.read_text(encoding="utf-8")
+    except Exception:
+        return []
+
+    m = re.search(r"FEATURE_COLS\s*=\s*\[([^\]]+)\]", paper_content, re.DOTALL)
+    if not m:
+        return []
+    paper_cols = set(re.findall(r'["\']([^"\']+)["\']', m.group(1)))
+
+    new_cols = paper_cols - live_cols
+    missing = []
+    for col in new_cols:
+        pattern = r'df\[["\']' + re.escape(col) + r'["\']\]\s*='
+        if not re.search(pattern, paper_content):
+            missing.append(col)
+    return missing
+
+
 # ── Change applicator ─────────────────────────────────────────────────────────
 
 def _apply_change(proposal: dict) -> tuple[bool, str, str]:
-    """Apply change. Routes ml_engine.py changes to ml_engine_paper.py."""
+    """Apply change(s). Routes ml_engine.py changes to ml_engine_paper.py.
+
+    Supports two formats:
+      • Single: {"old_code": "...", "new_code": "..."}
+      • Multi:  {"changes": [{"old_code": "...", "new_code": "..."}, ...]}
+    All edits are applied atomically — if any edit fails, the file is reverted.
+    """
     filename = proposal.get("file", "")
     if filename not in _ALLOWED_FILES:
         return False, f"file '{filename}' not in allowed list", filename
 
-    # Route paper files
     actual_file = "ml_engine_paper.py" if filename in _PAPER_FILES else filename
-
-    old_code = proposal.get("old_code", "")
-    new_code = proposal.get("new_code", "")
-
-    if not old_code:
-        return False, "old_code is empty", filename
-    if old_code == new_code:
-        return False, "old_code == new_code", filename
-
     path = _HERE / actual_file
     if not path.exists():
         return False, f"{actual_file} not found", actual_file
 
-    content = path.read_text(encoding="utf-8")
+    # Build normalised list of (old, new) pairs
+    if "changes" in proposal:
+        pairs = [(c.get("old_code", ""), c.get("new_code", "")) for c in proposal["changes"]]
+    else:
+        pairs = [(proposal.get("old_code", ""), proposal.get("new_code", ""))]
 
-    if old_code not in content:
-        return False, f"old_code not found in {actual_file}", actual_file
+    if not pairs:
+        return False, "no changes specified", actual_file
 
-    if content.count(old_code) > 1:
-        return False, f"old_code not unique in {actual_file}", actual_file
+    original = path.read_text(encoding="utf-8")
+    content = original
 
-    path.write_text(content.replace(old_code, new_code, 1), encoding="utf-8")
+    for idx, (old_code, new_code) in enumerate(pairs):
+        label = f"change[{idx}]"
+        if not old_code:
+            path.write_text(original, encoding="utf-8")
+            return False, f"{label}: old_code is empty", actual_file
+        if old_code == new_code:
+            path.write_text(original, encoding="utf-8")
+            return False, f"{label}: old_code == new_code", actual_file
+        if old_code not in content:
+            path.write_text(original, encoding="utf-8")
+            return False, f"{label}: old_code not found in {actual_file}", actual_file
+        if content.count(old_code) > 1:
+            path.write_text(original, encoding="utf-8")
+            return False, f"{label}: old_code not unique in {actual_file}", actual_file
+        content = content.replace(old_code, new_code, 1)
+
+    path.write_text(content, encoding="utf-8")
     return True, "ok", actual_file
 
 
@@ -853,6 +985,27 @@ def main():
             )
             continue
 
+        # Pre-flight: catch FEATURE_COLS/compute_features mismatch before 30s run
+        if is_paper:
+            uncomputed = _preflight_feature_check(_PAPER_FILE)
+            if uncomputed:
+                print(f"  Pre-flight: {uncomputed} in FEATURE_COLS but not computed — reverting")
+                _revert_files([actual_file])
+                pf_err = f"FEATURE_COLS has {uncomputed} but no df[col]= assignment in compute_features"
+                experiment_log.append({
+                    "n": i,
+                    "description": description + f" [PREFLIGHT FAIL: {pf_err[:60]}]",
+                    "before": best_paper,
+                    "after": 0.0,
+                    "kept": False,
+                })
+                _send(
+                    f"⚠️ <b>Idea #{i} of {n_experiments} — incomplete change</b>\n\n"
+                    f"💡 {plain_eng}\n\n"
+                    f"Feature added to FEATURE_COLS but not computed. Moving on."
+                )
+                continue
+
         # Route to correct evaluator
         if is_backtest:
             if b_bt == 0.0:
@@ -911,7 +1064,8 @@ def main():
         )
 
         prev_best = cur_best
-        if new_composite >= cur_best and new_pnl >= pnl_floor:
+        # Require strict improvement — equal scores mean the change had no effect
+        if new_composite > cur_best and new_pnl >= pnl_floor:
             # Keep it — commit
             if is_paper:
                 commit_msg = f"autoloop paper exp {i}: {description} ({cur_best:.4f}→{new_composite:.4f})"
@@ -991,9 +1145,9 @@ def main():
         else:
             _revert_files([actual_file])
             reason_str = (
-                f"composite {new_composite:.4f} < {cur_best:.4f}"
-                if new_composite < cur_best
-                else f"pnl {new_pnl:.4f} < floor {pnl_floor:.4f}"
+                f"pnl {new_pnl:.4f} < floor {pnl_floor:.4f}"
+                if new_composite > cur_best
+                else f"composite {new_composite:.4f} not > {cur_best:.4f} (no improvement)"
             )
             experiment_log.append(
                 {"n": i, "description": description, "before": cur_best, "after": new_composite, "kept": False}

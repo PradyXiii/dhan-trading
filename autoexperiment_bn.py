@@ -72,12 +72,20 @@ def run():
         print(json.dumps({"error": f"missing columns: {missing}", "composite": 0.0}))
         sys.exit(1)
 
+    # Diagnose NaN-heavy columns before dropna (helps Claude fix bad rolling windows)
+    nan_culprits = []
+    for col in feat_cols:
+        nan_pct = df[col].isna().mean()
+        if nan_pct > 0.30:
+            nan_culprits.append(f"{col}={nan_pct:.0%}NaN")
+
     df = df.dropna(subset=feat_cols + ["label"])
 
     min_rows = HOLDOUT_DAYS + 100
     if len(df) < min_rows:
+        culprit_str = f" (high-NaN cols: {nan_culprits})" if nan_culprits else ""
         print(json.dumps({
-            "error": f"only {len(df)} rows after dropna — need >{min_rows}",
+            "error": f"only {len(df)} rows after dropna — need >{min_rows}{culprit_str}",
             "composite": 0.0,
         }))
         sys.exit(1)
