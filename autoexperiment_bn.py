@@ -130,7 +130,25 @@ def run():
     rf.fit(X_train, y_train)
     y_pred = rf.predict(X_val)
 
+    # ── Sanity cap: composite > 0.90 on a binary market-direction problem is
+    # almost certainly leakage from a combination of mildly-correlated features
+    # that individually pass the |corr|>0.85 check but together reconstruct the
+    # label.  Real edge on BankNifty options tops out around 0.70–0.80.
     composite = _composite(y_val, y_pred)
+    if composite > 0.90:
+        train_pred = rf.predict(X_train)
+        train_composite = _composite(y_train, train_pred)
+        print(json.dumps({
+            "error": (
+                f"composite {composite:.4f} exceeds sanity cap 0.90 — "
+                f"likely cross-feature label leakage "
+                f"(train composite={train_composite:.4f}). "
+                "Check for same-day OHLC in rolling windows or ATR denominator."
+            ),
+            "composite": 0.0,
+        }))
+        sys.exit(1)
+
     pnl_proxy = round(float((y_pred == y_val).mean()), 4)
 
     print(json.dumps({

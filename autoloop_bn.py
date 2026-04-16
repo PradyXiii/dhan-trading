@@ -394,35 +394,54 @@ def _promote_paper_to_live(streak: int, avg_advantage: float) -> None:
 
 # ── Claude API cost helper ────────────────────────────────────────────────────
 
+_COST_LOG_DIR = _HERE / "data"
+
+# Claude claude-opus-4-6 pricing (per 1M tokens, USD)
+_PRICE_IN      = 5.00
+_PRICE_OUT     = 25.00
+_PRICE_CACHE_W = 6.25   # cache write
+_PRICE_CACHE_R = 0.50   # cache read
+
+
+def _record_api_usage(usage) -> None:
+    """Append token counts from one API call to today's usage file."""
+    try:
+        _COST_LOG_DIR.mkdir(exist_ok=True)
+        today = datetime.now(_IST).date().isoformat()
+        path = _COST_LOG_DIR / f"claude_usage_{today}.json"
+        data = {}
+        if path.exists():
+            with open(path) as f:
+                data = json.load(f)
+        for key in ("input_tokens", "output_tokens",
+                    "cache_creation_input_tokens", "cache_read_input_tokens"):
+            data[key] = data.get(key, 0) + getattr(usage, key, 0)
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
 def _get_claude_cost_yesterday() -> str:
-    """Return yesterday's Claude API spend."""
+    """Return yesterday's Claude API spend from local token log."""
     try:
-        import requests
-    except ImportError:
-        return "N/A"
-
-    admin_key = os.getenv("ANTHROPIC_ADMIN_API_KEY", "")
-    if not admin_key:
-        return "N/A"
-
-    today_ist = datetime.now(_IST).date()
-    yesterday_ist = today_ist - timedelta(days=1)
-
-    try:
-        r = requests.get(
-            "https://api.anthropic.com/v1/organizations/cost_report",
-            headers={"X-Api-Key": admin_key, "anthropic-version": "2023-06-01"},
-            params={"start_date": str(yesterday_ist), "end_date": str(today_ist)},
-            timeout=10,
+        today_ist = datetime.now(_IST).date()
+        yesterday = (today_ist - timedelta(days=1)).isoformat()
+        path = _COST_LOG_DIR / f"claude_usage_{yesterday}.json"
+        if not path.exists():
+            return "N/A (no log yet)"
+        with open(path) as f:
+            d = json.load(f)
+        cost = (
+            d.get("input_tokens", 0)                    / 1_000_000 * _PRICE_IN
+            + d.get("output_tokens", 0)                 / 1_000_000 * _PRICE_OUT
+            + d.get("cache_creation_input_tokens", 0)   / 1_000_000 * _PRICE_CACHE_W
+            + d.get("cache_read_input_tokens", 0)       / 1_000_000 * _PRICE_CACHE_R
         )
-        if r.status_code == 200:
-            data = r.json()
-            entries = data.get("data", [data])
-            total_cents = sum(int(item.get("total_cost_cents", item.get("amount_cents", 0))) for item in entries)
-            usd = total_cents / 100.0
-            return f"${usd:.2f}"
-        else:
-            return f"N/A"
+        total_tok = sum(d.get(k, 0) for k in (
+            "input_tokens", "output_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens"))
+        return f"${cost:.3f}  ({total_tok:,} tokens)"
     except Exception:
         return "N/A"
 
@@ -644,6 +663,7 @@ def _call_claude(
             system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_message}],
         )
+        _record_api_usage(response.usage)
         raw = response.content[0].text.strip()
 
         if raw.startswith("```"):
