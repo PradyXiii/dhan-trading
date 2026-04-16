@@ -76,15 +76,36 @@ s_hv20     — 1 if hv20 < 12,     -1 if > 20,   else 0
 s_bn_gap   — 1 if bn_gap > 0.3,  -1 if < -0.3, else 0
 ```
 
+### auto_trader.py — trading constants only
+
+You may change ONLY these two constants:
+
+```python
+SL_PCT = 0.15   # stop-loss percentage on premium (e.g. try 0.12 or 0.18)
+RR     = 2.5    # reward:risk — TP = SL × RR (e.g. try 2.0 or 3.0)
+```
+
+**Evaluation**: `python3 autoexperiment_backtest.py`
+Output: `{"composite": 0.534, "pnl_proxy": 0.534, "n_val": 430, ...}`
+
+Composite = 0.70 × win_rate + 0.30 × drawdown_score (full backtest history, ML signals).
+A change is KEPT only if composite >= baseline_bt AND pnl_proxy >= baseline_bt_pnl × 0.90.
+
+Constraints:
+- SL_PCT must stay in range [0.08, 0.25]
+- RR must stay in range [1.5, 4.0]
+- Do NOT touch LOT_SIZE, RISK_PCT, MAX_LOTS, PREMIUM_K, ITM_WALK_MAX, or any API-related code
+
 ---
 
 ## What you MUST NOT change
 
 - Any Dhan API call, URL, endpoint, request payload, or response parsing
-- Files: auto_trader.py, model_evolver.py, exit_positions.py, backtest_engine.py,
+- Files: model_evolver.py, exit_positions.py, backtest_engine.py,
   data_fetcher.py, trade_journal.py, notify.py, renew_token.py, health_ping.py,
-  midday_conviction.py, autoexperiment_bn.py, autoloop_bn.py
-- Constants: SL_PCT, RR, LIVE_TRADING_ENABLED, ML_THRESHOLD, SCORE_THRESHOLD
+  midday_conviction.py, autoexperiment_bn.py, autoexperiment_backtest.py, autoloop_bn.py
+- Constants in auto_trader.py: LOT_SIZE, RISK_PCT, MAX_LOTS, PREMIUM_K, ITM_WALK_MAX,
+  ML_CONF_THRESHOLD, ENTRY_SPOT_GAP_THRESHOLD, ENTRY_WAIT_MAX_MINS
 - Data source tickers (^INDIAVIX, ^GSPC, ES=F, etc.) or CSV filenames
 
 ---
@@ -115,3 +136,5 @@ context so it cannot match two places).
   "new_code": "replacement string"
 }
 ```
+
+`"file"` must be one of: `"ml_engine.py"`, `"signal_engine.py"`, `"auto_trader.py"`.

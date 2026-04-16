@@ -36,8 +36,12 @@ PNL_GUARD     = 0.90       # pnl_proxy must not fall below 90% of baseline
 _IST          = timezone(timedelta(hours=5, minutes=30))
 _HERE         = Path(__file__).parent.resolve()
 
-# Files the agent is allowed to modify
-_ALLOWED_FILES = {"ml_engine.py", "signal_engine.py"}
+# Files the agent is allowed to modify.
+# ML files → evaluated by autoexperiment_bn.py (ML holdout composite score).
+# auto_trader.py → evaluated by autoexperiment_backtest.py (backtest win_rate + drawdown).
+_ALLOWED_FILES  = {"ml_engine.py", "signal_engine.py", "auto_trader.py"}
+_ML_FILES       = {"ml_engine.py", "signal_engine.py"}
+_BACKTEST_FILES = {"auto_trader.py"}
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -66,14 +70,16 @@ def _git(*args: str) -> tuple[int, str]:
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
-def _revert_files() -> None:
-    """Discard any uncommitted changes to the two editable files."""
-    _git("checkout", "--", "ml_engine.py", "signal_engine.py")
+def _revert_files(files: list[str] | None = None) -> None:
+    """Discard uncommitted changes. Defaults to all ML editable files."""
+    targets = files if files else ["ml_engine.py", "signal_engine.py"]
+    _git("checkout", "--", *targets)
 
 
-def _commit(message: str) -> bool:
-    """Stage editable files and create a commit. Returns True on success."""
-    rc, out = _git("add", "ml_engine.py", "signal_engine.py")
+def _commit(message: str, files: list[str] | None = None) -> bool:
+    """Stage specified files and create a commit. Returns True on success."""
+    targets = files if files else ["ml_engine.py", "signal_engine.py"]
+    rc, out = _git("add", *targets)
     if rc != 0:
         print(f"  git add failed: {out}")
         return False
@@ -84,36 +90,50 @@ def _commit(message: str) -> bool:
     return True
 
 
-# ── Experiment runner ─────────────────────────────────────────────────────────
+# ── Experiment runners ────────────────────────────────────────────────────────
 
-def _run_experiment() -> dict:
+def _run_subprocess(script: str, timeout: int = 300) -> dict:
     """
-    Run autoexperiment_bn.py in a subprocess and return parsed JSON.
+    Run a script in a subprocess and return the last JSON line from stdout.
     Returns {"composite": 0.0, "error": "..."} on failure.
     """
     try:
         result = subprocess.run(
-            [sys.executable, "autoexperiment_bn.py"],
+            [sys.executable, script],
             cwd=str(_HERE),
             capture_output=True,
             text=True,
-            timeout=300,    # 5-minute hard limit
+            timeout=timeout,
         )
         stdout = result.stdout.strip()
         if not stdout:
             return {"composite": 0.0, "error": f"empty stdout (stderr: {result.stderr[:200]})"}
-        # Find the last JSON line in output
         for line in reversed(stdout.splitlines()):
             line = line.strip()
             if line.startswith("{"):
                 return json.loads(line)
         return {"composite": 0.0, "error": f"no JSON in stdout: {stdout[:200]}"}
     except subprocess.TimeoutExpired:
-        return {"composite": 0.0, "error": "timeout after 300s"}
+        return {"composite": 0.0, "error": f"timeout after {timeout}s"}
     except json.JSONDecodeError as e:
         return {"composite": 0.0, "error": f"JSON parse error: {e}"}
     except Exception as e:
         return {"composite": 0.0, "error": str(e)}
+
+
+def _run_ml_experiment() -> dict:
+    """ML holdout evaluator — for ml_engine.py / signal_engine.py changes."""
+    return _run_subprocess("autoexperiment_bn.py", timeout=300)
+
+
+def _run_backtest_experiment() -> dict:
+    """Backtest evaluator — for auto_trader.py constant changes. Slower (~2 min)."""
+    return _run_subprocess("autoexperiment_backtest.py", timeout=600)
+
+
+# Keep backward-compatible alias
+def _run_experiment() -> dict:
+    return _run_ml_experiment()
 
 
 # ── File content helpers ──────────────────────────────────────────────────────
@@ -121,6 +141,7 @@ def _run_experiment() -> dict:
 def _reversal_summary() -> str:
     """Summarise recent intraday reversals from midday_checkpoints.csv (last 30 days).
     Returns empty string if no data available."""
+    import pandas as pd
     from collections import Counter
     path = _HERE / "data" / "midday_checkpoints.csv"
     if not path.exists():
@@ -178,13 +199,16 @@ def _build_context_snippet() -> str:
     """
     ml  = _read_file("ml_engine.py")
     sig = _read_file("signal_engine.py")
+    at  = _read_file("auto_trader.py")
 
     # Extract FEATURE_COLS list
-    feat_section   = _extract_section(ml, "FEATURE_COLS", lines_after=40)
+    feat_section    = _extract_section(ml,  "FEATURE_COLS",       lines_after=40)
     # Extract compute_features() function header + first ~60 lines
-    compute_section = _extract_section(ml, "def compute_features", lines_after=70)
+    compute_section = _extract_section(ml,  "def compute_features", lines_after=70)
     # Extract score_row() from signal_engine
-    score_section  = _extract_section(sig, "def score_row", lines_after=60)
+    score_section   = _extract_section(sig, "def score_row",       lines_after=60)
+    # Extract trading constants block from auto_trader.py
+    at_section      = _extract_section(at,  "LOT_SIZE",            lines_after=14)
 
     return (
         "### ml_engine.py — FEATURE_COLS\n```python\n"
@@ -193,6 +217,8 @@ def _build_context_snippet() -> str:
         + compute_section
         + "\n```\n\n### signal_engine.py — score_row() (first 60 lines)\n```python\n"
         + score_section
+        + "\n```\n\n### auto_trader.py — trading constants\n```python\n"
+        + at_section
         + "\n```"
     )
 
@@ -368,9 +394,9 @@ def main():
     print(f"  Experiments: {n_experiments} | Dry-run: {args.dry_run}")
     print(f"{'='*60}\n")
 
-    # ── Step 1: Baseline ──────────────────────────────────────────────────────
-    print("[Baseline] Running autoexperiment_bn.py...")
-    baseline = _run_experiment()
+    # ── Step 1: Baseline — two evaluators run once to establish starting scores ──
+    print("[Baseline ML] Running autoexperiment_bn.py...")
+    baseline = _run_ml_experiment()
     if "error" in baseline:
         msg = (
             f"❌ <b>Autoresearch couldn't start</b>\n"
@@ -386,8 +412,20 @@ def main():
     b_pnl       = baseline.get("pnl_proxy", 0.0)
     n_train     = baseline.get("n_train", "?")
     n_val       = baseline.get("n_val", "?")
-    print(f"  Baseline composite: {b_composite:.4f}  pnl_proxy: {b_pnl:.4f}")
-    print(f"  Train rows: {n_train}  Val rows: {n_val}")
+    print(f"  [ML]  Baseline composite: {b_composite:.4f}  pnl_proxy: {b_pnl:.4f}")
+    print(f"  [ML]  Train rows: {n_train}  Val rows: {n_val}")
+
+    print("[Baseline BT] Running autoexperiment_backtest.py...")
+    baseline_bt = _run_backtest_experiment()
+    if "error" in baseline_bt:
+        print(f"  [BT]  Warning: backtest baseline failed: {baseline_bt['error']}")
+        print(f"  [BT]  auto_trader.py experiments will be skipped this run.")
+        b_composite_bt = 0.0
+        b_pnl_bt       = 0.0
+    else:
+        b_composite_bt = baseline_bt["composite"]
+        b_pnl_bt       = baseline_bt.get("pnl_proxy", 0.0)
+        print(f"  [BT]  Baseline composite: {b_composite_bt:.4f}  pnl_proxy: {b_pnl_bt:.4f}")
 
     # ── Dry-run exits here ────────────────────────────────────────────────────
     if args.dry_run:
@@ -403,13 +441,19 @@ def main():
         return
 
     # ── Step 2: Telegram start ────────────────────────────────────────────────
+    bt_line = (
+        f"📈 <b>Trade params baseline:</b> {b_composite_bt:.2%}\n"
+        if b_composite_bt > 0 else ""
+    )
     _send(
         f"🤖 <b>BankNifty Brain Training — Starting Now</b>\n"
         f"{date_str}\n\n"
-        f"Tonight I'll try <b>{n_experiments} small ideas</b> to improve the model.\n"
+        f"Tonight I'll try <b>{n_experiments} small ideas</b> across ML features, "
+        f"signal thresholds, and trading parameters.\n"
         f"Each idea gets tested — if it helps, I save it. If not, I throw it away.\n\n"
-        f"📊 <b>Starting score:</b>      {b_composite:.2%}\n"
-        f"🎯 <b>Direction accuracy:</b>  {b_pnl:.2%}\n"
+        f"📊 <b>ML model score:</b>       {b_composite:.2%}\n"
+        f"🎯 <b>Direction accuracy:</b>   {b_pnl:.2%}\n"
+        f"{bt_line}"
         f"📅 <b>Data:</b> {n_train} days training · {n_val} days for testing\n\n"
         f"🌙 Go to sleep. I'll update you after each experiment!"
     )
@@ -418,8 +462,10 @@ def main():
     client        = _make_client()
     system_prompt = _build_system_prompt()
 
-    best_composite = b_composite
-    best_pnl       = b_pnl
+    best_composite    = b_composite
+    best_pnl          = b_pnl
+    best_composite_bt = b_composite_bt
+    best_pnl_bt       = b_pnl_bt
     experiment_log: list[dict] = []
     kept_count     = 0
 
@@ -462,17 +508,38 @@ def main():
             })
             continue
 
-        # Run evaluation
-        print(f"  Running autoexperiment_bn.py...")
-        result = _run_experiment()
+        # Route to the appropriate evaluator based on which file was changed.
+        # ML files (ml_engine.py, signal_engine.py) → ML holdout score.
+        # auto_trader.py → backtest composite (win_rate + drawdown).
+        is_backtest_file = filename in _BACKTEST_FILES
+        if is_backtest_file:
+            if b_composite_bt == 0.0:
+                # Backtest baseline failed — skip auto_trader.py experiments
+                print(f"  Backtest baseline unavailable — reverting auto_trader.py change")
+                _revert_files([filename])
+                experiment_log.append({
+                    "n": i, "description": description + " [SKIP: BT baseline unavailable]",
+                    "before": best_composite_bt, "after": 0.0, "kept": False,
+                })
+                continue
+            print(f"  Running autoexperiment_backtest.py (auto_trader.py change)...")
+            result       = _run_backtest_experiment()
+            current_best = best_composite_bt
+            current_pnl  = best_pnl_bt
+        else:
+            print(f"  Running autoexperiment_bn.py...")
+            result       = _run_ml_experiment()
+            current_best = best_composite
+            current_pnl  = best_pnl
+
         elapsed = time.time() - t0
 
         if "error" in result:
             print(f"  Experiment failed: {result['error']} — reverting")
-            _revert_files()
+            _revert_files([filename])
             experiment_log.append({
                 "n": i, "description": description + f" [FAIL: {result['error'][:60]}]",
-                "before": best_composite, "after": 0.0, "kept": False,
+                "before": current_best, "after": 0.0, "kept": False,
             })
             _send(
                 f"⚠️ <b>Idea #{i} of {n_experiments} — crashed during test</b>\n"
@@ -483,41 +550,48 @@ def main():
 
         new_composite = result["composite"]
         new_pnl       = result.get("pnl_proxy", 0.0)
-        pnl_floor     = best_pnl * PNL_GUARD
+        pnl_floor     = current_pnl * PNL_GUARD
 
-        print(f"  Score: {best_composite:.4f} → {new_composite:.4f}  "
-              f"pnl: {best_pnl:.4f} → {new_pnl:.4f}  ({elapsed:.0f}s)")
+        print(f"  Score: {current_best:.4f} → {new_composite:.4f}  "
+              f"pnl: {current_pnl:.4f} → {new_pnl:.4f}  ({elapsed:.0f}s)")
 
         # Accept / reject
-        prev_composite = best_composite
-        if new_composite >= best_composite and new_pnl >= pnl_floor:
+        prev_composite = current_best
+        if new_composite >= current_best and new_pnl >= pnl_floor:
             # Attempt to commit — if git fails, treat as discard
             commit_msg = (
                 f"autoloop exp {i}: {description} "
-                f"({best_composite:.4f}→{new_composite:.4f})"
+                f"({current_best:.4f}→{new_composite:.4f})"
             )
-            committed = _commit(commit_msg)
+            committed = _commit(commit_msg, [filename])
             if committed:
                 experiment_log.append({
                     "n": i, "description": description,
                     "before": prev_composite, "after": new_composite, "kept": True,
                 })
-                best_composite = new_composite
-                best_pnl       = new_pnl
+                # Update the appropriate tracker
+                if is_backtest_file:
+                    best_composite_bt = new_composite
+                    best_pnl_bt       = new_pnl
+                else:
+                    best_composite    = new_composite
+                    best_pnl          = new_pnl
                 kept_count    += 1
                 delta = new_composite - prev_composite
                 delta_str = f"+{delta:.2%}" if delta > 0 else "no change"
+                evaluator_label = "backtest" if is_backtest_file else "ML holdout"
                 _send(
                     f"✅ <b>Idea #{i} of {n_experiments} worked!</b>\n"
                     f"💡 {description}\n\n"
                     f"Score before: {prev_composite:.2%}\n"
-                    f"Score after:  {new_composite:.2%}  ({delta_str})\n\n"
+                    f"Score after:  {new_composite:.2%}  ({delta_str})\n"
+                    f"<i>Evaluated via {evaluator_label}</i>\n\n"
                     f"Saved ✓  Moving to idea #{i+1}..."
                 )
                 print(f"  ✅ KEPT")
             else:
                 print("  git commit failed — reverting, counting as DISCARDED")
-                _revert_files()
+                _revert_files([filename])
                 experiment_log.append({
                     "n": i, "description": description + " [git commit failed]",
                     "before": prev_composite, "after": new_composite, "kept": False,
@@ -530,22 +604,22 @@ def main():
                 )
         else:
             # DISCARD
-            _revert_files()
+            _revert_files([filename])
             reason_str = ""
-            if new_composite < best_composite:
-                reason_str = f"composite {new_composite:.4f} < {best_composite:.4f}"
+            if new_composite < current_best:
+                reason_str = f"composite {new_composite:.4f} < {current_best:.4f}"
             else:
                 reason_str = f"pnl {new_pnl:.4f} < floor {pnl_floor:.4f}"
 
             experiment_log.append({
                 "n": i, "description": description,
-                "before": best_composite, "after": new_composite, "kept": False,
+                "before": current_best, "after": new_composite, "kept": False,
             })
 
             _send(
                 f"❌ <b>Idea #{i} of {n_experiments} didn't help</b>\n"
                 f"💡 {description}\n\n"
-                f"Score before: {best_composite:.2%}\n"
+                f"Score before: {current_best:.2%}\n"
                 f"Score after:  {new_composite:.2%}  (worse)\n\n"
                 f"Thrown away. Back to previous version."
             )

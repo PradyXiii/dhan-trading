@@ -954,8 +954,13 @@ def place_super_order(security_id: str, signal: str, lots: int,
         "price":           0,
         "targetPrice":     tp_price,
         "stopLossPrice":   sl_price,
-        # Dhan T&C: trailingJump max = max(1, entry_price - stop_loss_price)
-        "trailingJump":    min(5, max(1, round(premium * SL_PCT, 1))),
+        # trailingJump = SL distance: SL steps up by SL_distance after each SL_distance gain.
+        # Before the first full SL_distance gain, the static SL at sl_price protects.
+        # Once in profit by 15%, trail moves SL to breakeven; at 30% it locks in 15%.
+        # Dhan T&C: trailingJump max = max(1, entry_price - stop_loss_price) = SL distance.
+        # Bug fix: was min(5, ...) which capped trail at ₹5, causing it to fire on
+        # any ₹5 intraday pullback regardless of premium size.
+        "trailingJump":    max(1, round(premium * SL_PCT, 0)),
     }
     market_closed = False
     try:
