@@ -581,7 +581,13 @@ def _build_system_prompt() -> str:
         "   Use rolling windows ≤60 days for new features. Windows >100 days risk NaN-induced row drops.\n"
         "   For z-scores/normalisation use rolling(20) or rolling(60). Guard divisions with .replace(0, np.nan).\n"
         "4. If your change doesn't strictly improve the score (>) it will be reverted. Equal-score = no effect.\n"
-        "5. Do NOT repeat a feature already tried (see experiment log).\n\n"
+        "5. Do NOT repeat a feature already tried (see experiment log).\n"
+        "6. NO LEAKAGE: the label is derived from today's OHLC (open→close direction drives the\n"
+        "   CALL/PUT tiebreak). Any feature using today's bn_high, bn_low, or bn_close in RAW form\n"
+        "   (not shifted, not inside a rolling window ending yesterday) leaks the label. Forbidden\n"
+        "   examples: (bn_close - bn_open), (bn_high - bn_low), (bn_close / bn_open), body_ratio.\n"
+        "   Allowed: bn_close.shift(1), bn_close.rolling(N).mean().shift(1), bn_open (known at 9:15 AM).\n"
+        "   Features with |corr(feature, label)| > 0.85 are auto-rejected as leakage.\n\n"
         "Here is the complete research program:\n\n"
         + brief
     )

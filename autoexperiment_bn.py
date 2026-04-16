@@ -97,6 +97,25 @@ def run():
     y_train = (df["label"].iloc[:split] == "CALL").astype(int).values
     y_val   = (df["label"].iloc[split:] == "CALL").astype(int).values
 
+    # ── Leakage guard: reject any feature with absurd |corr| with the label ──
+    # The label depends on today's close-open sign, so same-day close/high/low
+    # features can leak. Compute on TRAIN only so holdout stays untouched.
+    import numpy as np
+    leaks = []
+    for i, col in enumerate(feat_cols):
+        x = X_train[:, i]
+        if np.std(x) == 0:
+            continue
+        corr = np.corrcoef(x, y_train)[0, 1]
+        if abs(corr) > 0.85:
+            leaks.append(f"{col}={corr:+.2f}")
+    if leaks:
+        print(json.dumps({
+            "error": f"label leakage suspected (|corr|>0.85 on train): {leaks}",
+            "composite": 0.0,
+        }))
+        sys.exit(1)
+
     # ── Fixed RF — same params as walk-forward training in ml_engine.py ──────
     from sklearn.ensemble import RandomForestClassifier
     rf = RandomForestClassifier(
