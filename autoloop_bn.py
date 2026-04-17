@@ -310,11 +310,11 @@ def _score_paper_on_live_trades() -> dict:
             n_scored += 1
 
         if n_scored == 0:
-            return {"paper_acc": 0.0, "live_acc": live_acc, "n_trades": 0}
+            return {"paper_acc": 0.0, "live_acc": live_acc, "n_trades": len(labeled)}
 
         paper_acc = paper_correct / n_scored
         print(f"  [live-eval] paper {paper_acc:.2%} vs live {live_acc:.2%} on {n_scored} real trades")
-        return {"paper_acc": paper_acc, "live_acc": live_acc, "n_trades": n_scored}
+        return {"paper_acc": paper_acc, "live_acc": live_acc, "n_trades": len(labeled)}
 
     except Exception as e:
         print(f"  [live-eval] Error scoring paper on live trades: {e}")
@@ -920,7 +920,7 @@ def main():
                 f"({live_eval['paper_acc'] - live_eval['live_acc']:+.0%})\n"
             )
         else:
-            live_eval_line = f"🧾 <b>Real trade data:</b> {n_live}/{MIN_LIVE_FOR_MIX} trades logged — holdout only\n"
+            live_eval_line = f"🧾 <b>Real trade data:</b> {n_live} trades logged (need {MIN_LIVE_FOR_MIX} to unlock) — holdout only\n"
         _send(
             f"🔬 <b>Autoresearch — Daily Check</b>  ·  {date_display}\n\n"
             f"📊 <b>Live model (252-day test):</b>  {b_live:.2%}\n"
@@ -943,7 +943,7 @@ def main():
         )
         scoring_note = f"(promotion uses {int(LIVE_WEIGHT*100)}% real trades + {int(HOLDOUT_WEIGHT*100)}% historical test)"
     else:
-        live_eval_line = f"🧾 <b>Real trade data:</b> {n_live}/{MIN_LIVE_FOR_MIX} trades logged — using holdout only for now\n"
+        live_eval_line = f"🧾 <b>Real trade data:</b> {n_live} trades logged (need {MIN_LIVE_FOR_MIX} to unlock) — using holdout only for now\n"
         scoring_note = f"(will mix in real trade accuracy once {MIN_LIVE_FOR_MIX} trades logged)"
     _send(
         f"🤖 <b>BankNifty Brain Training — Starting</b>\n"
