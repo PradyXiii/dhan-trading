@@ -17,6 +17,7 @@ Cron (9:15 AM IST = 3:45 AM UTC, Mon–Fri):
 import os
 import json
 import time
+import email.utils
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone, timedelta
@@ -40,20 +41,39 @@ NEWS_FEEDS = [
 ]
 
 
-def _fetch_rss(url: str, max_items: int = 8) -> list[str]:
-    """Fetch RSS feed, return list of headline strings."""
+def _fetch_rss(url: str, max_items: int = 8, max_age_hours: int = 30) -> list[str]:
+    """
+    Fetch RSS feed, return ONLY headlines published within max_age_hours.
+    Stale headlines (days/weeks old) create false signals — we discard them.
+    """
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             xml_bytes = resp.read()
-        root  = ET.fromstring(xml_bytes)
-        items = root.findall(".//item")
-        titles = []
-        for item in items[:max_items]:
-            title = item.findtext("title") or ""
-            title = title.strip()
-            if title:
-                titles.append(title)
+        root    = ET.fromstring(xml_bytes)
+        items   = root.findall(".//item")
+        cutoff  = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        titles  = []
+        skipped = 0
+        for item in items:
+            title   = (item.findtext("title") or "").strip()
+            pub_str = item.findtext("pubDate") or ""
+            if not title:
+                continue
+            # Parse pubDate; skip if too old
+            if pub_str:
+                try:
+                    pub_dt = email.utils.parsedate_to_datetime(pub_str)
+                    if pub_dt < cutoff:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass   # unparseable date — include it (better than discarding)
+            titles.append(title)
+            if len(titles) >= max_items:
+                break
+        if skipped:
+            print(f"    (skipped {skipped} headlines older than {max_age_hours}h)")
         return titles
     except Exception as e:
         print(f"  RSS fetch failed ({url[:60]}...): {e}")
