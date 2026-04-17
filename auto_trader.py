@@ -238,11 +238,15 @@ RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
            # Grid result: 2.5x beats 2.0x on all metrics (+₹24L P&L, DD -8.8% vs -12.9%)
 
 # ── ML confidence gate ────────────────────────────────────────────────────────
-# Skip trade when ML model probability is below this threshold.
-# Default 0.55: skip coin-flip days where max(P_CALL, P_PUT) < 55%.
-# Raise to 0.60 for more aggressive filtering (fewer but higher-WR trades).
-# Set to 0.0 to disable and trade every signal like before.
+# Skip trade when ML ensemble confidence is below this threshold.
+# Analysis of 252-day holdout: all-days accuracy=52%, conf≥10%=55.8%.
+# Set to 0.0 to disable.
 ML_CONF_THRESHOLD = 0.55
+
+# ── VIX regime filter ─────────────────────────────────────────────────────────
+# Analysis of 252-day holdout: VIX<13 accuracy=46.7% (LOSING), VIX>18=62.9%.
+# Don't trade when India VIX is below this level — model is coin-flip or worse.
+VIX_MIN_TRADE = 13.0
 
 # ── Adaptive opening-wait parameters ─────────────────────────────────────────
 # Root cause of bad 9:30 fills: large BN spot gap → inflated IV at open.
@@ -254,6 +258,15 @@ ENTRY_WAIT_MAX_MINS      = 12      # never wait beyond 9:30 + 12 = 9:42 AM
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def get_vix_level() -> float:
+    """Read latest India VIX close from CSV — yesterday's close, available at 9:30 AM."""
+    try:
+        vix = pd.read_csv(f"{DATA_DIR}/india_vix.csv", parse_dates=["date"])
+        return float(vix["close"].iloc[-1])
+    except Exception:
+        return 15.0   # default to neutral regime if file missing
+
 
 def die(msg: str):
     notify.send(f"❌ <b>Auto Trader Error</b>\n\n{msg}\n\nCheck manually on Dhan app.")
@@ -1155,14 +1168,34 @@ def main():
         return
 
     score_max = 4
-    # ML confidence is now the ensemble agreement score (avg prob of agreeing models).
-    # No trade skipping / direction override — ensemble majority is the signal.
-    # ML_CONF_THRESHOLD kept for future use; logging only for now.
-    if ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:
-        notify.log(
-            f"ML ensemble conf {ml_conf:.0%} < {ML_CONF_THRESHOLD:.0%} "
-            f"(low agreement day) — proceeding with {signal} anyway"
+
+    # ── VIX regime filter ────────────────────────────────────────────────────
+    # Model accuracy: VIX<13 = 46.7% (losing), VIX 13-18 = 57.4%, VIX>18 = 62.9%
+    vix_now = get_vix_level()
+    if VIX_MIN_TRADE > 0 and vix_now < VIX_MIN_TRADE:
+        notify.send(
+            f"⏸  <b>No Trade — Low Volatility Day</b>\n"
+            f"─────────────────────\n"
+            f"{today_wd}  ·  {today_label}\n\n"
+            f"VIX at {vix_now:.1f}  (below {VIX_MIN_TRADE:.0f} threshold)\n"
+            f"In calm markets our model is 47% accurate — worse than a coin flip.\n"
+            f"Waiting for a higher-conviction setup. Capital preserved."
         )
+        notify.log(f"VIX regime filter: VIX={vix_now:.1f} < {VIX_MIN_TRADE} — no trade")
+        return
+
+    # ── ML confidence gate ───────────────────────────────────────────────────
+    if ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:
+        notify.send(
+            f"⏸  <b>No Trade — Low ML Confidence</b>\n"
+            f"─────────────────────\n"
+            f"{today_wd}  ·  {today_label}\n\n"
+            f"ML ensemble confidence {ml_conf:.0%}  (need ≥{ML_CONF_THRESHOLD:.0%})\n"
+            f"Signal was {signal} but models don't agree strongly enough.\n"
+            f"Skipping to preserve capital on low-conviction days."
+        )
+        notify.log(f"ML conf filter: {ml_conf:.0%} < {ML_CONF_THRESHOLD:.0%} — no trade")
+        return
 
     # 3. Capital
     capital = get_capital()
