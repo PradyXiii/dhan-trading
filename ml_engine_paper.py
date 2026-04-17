@@ -285,6 +285,25 @@ def compute_features(df):
     # ── Extended ML features ──────────────────────────────────────────────────
     d["ema20_pct"]    = (_c - d["ema20"]) / d["ema20"] * 100
     d["vix_level"]    = _vix
+
+    # ── Prev-day OHLC-derived features (all use yesterday's values — no leakage) ─
+    # prev_range_pct: yesterday's high-low range as % of close.
+    #   High range day → today likely high-range too (volatility clustering).
+    #   Low range day → probably quiet again; SL/TP unlikely to be hit cleanly.
+    _ph = d["bn_high"].shift(1)
+    _pl = d["bn_low"].shift(1)
+    _po = d["bn_open"].shift(1)
+    d["prev_range_pct"]  = (_ph - _pl) / _c * 100
+    # prev_body_pct: candle body / range. Close to 1 = strong trending candle
+    # (high directional conviction); close to 0 = doji/indecision.
+    d["prev_body_pct"]   = ((_c - _po) / (_ph - _pl).replace(0, np.nan)).fillna(0.0)
+    # bn_ret60: 3-month return — medium-term trend regime.
+    #   Positive = bull phase (favour CALL); negative = bear phase (favour PUT).
+    d["bn_ret60"]        = (_c / _c.shift(60) - 1) * 100
+    # bn_dist_high52: % below the 52-week rolling high.
+    #   Near 0 = at all-time-high territory → strong bull momentum.
+    #   Very negative = deep correction → potential mean-reversion.
+    d["bn_dist_high52"]  = (_c / _c.rolling(252, min_periods=60).max() - 1) * 100
     d["vix_pct_chg"]  = d["vix_dir"] / _vix.shift(1) * 100
     d["vix_hv_ratio"] = _vix / d["hv20"].replace(0, np.nan)
     d["bn_ret1"]       = (_c / _c.shift(1) - 1) * 100
@@ -407,6 +426,12 @@ FEATURE_COLS = [
     # Real options market signals (ATM open prices, known at 9:30 AM)
     "put_call_skew",   # put/call premium ratio — market's directional bias
     "iv_proxy",        # z-scored IV level — high IV = wider intraday range expected
+    # Prev-day candle structure (directional conviction + range regime)
+    "prev_range_pct",  # yesterday's H-L range % — predicts today's range via volatility clustering
+    "prev_body_pct",   # yesterday's body/range ratio — strong candle = trend continuation
+    # Medium/long-term trend regime
+    "bn_ret60",        # 3-month return — bull vs bear phase
+    "bn_dist_high52",  # % below 52-week high — momentum / overbought signal
 ]
 
 

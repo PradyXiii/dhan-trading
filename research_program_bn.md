@@ -8,11 +8,27 @@ Formula (matches model_evolver.py exactly):
   composite = 0.50 × accuracy + 0.25 × recall_CALL + 0.25 × recall_PUT
 
 Evaluated by: `python3 autoexperiment_bn.py`
-Output: `{"composite": 0.734, "pnl_proxy": 0.68, "n_val": 252, "n_train": 1423}`
+Current honest baseline: ~0.515 (no leakage, 1511 training rows, 7 years of data)
+Target: push composite toward 0.60+ through genuine feature signal
 
 A change is KEPT only if:
   - composite >= previous best, AND
   - pnl_proxy >= baseline_pnl × 0.90  (guard against direction bias collapse)
+
+---
+
+## Context — what the label is
+
+The label is NOT simply "did BN close higher or lower today."
+It is: **which side (CALL or PUT) hits its take-profit before stop-loss?**
+
+  - CALL wins if BN moves UP by TP_pts before DOWN by SL_pts from open
+  - PUT wins if BN moves DOWN by TP_pts before UP by SL_pts from open
+  - TP_pts is derived from real ATM call/put premiums (options_atm_daily.csv)
+
+This means the most predictive features are those that predict:
+  1. **Which direction** the day will trend intraday
+  2. **How wide** the intraday range will be (wide range = one side will definitely win)
 
 ---
 
@@ -38,6 +54,8 @@ us10y_close (sometimes, may be NaN)     — US 10-Year Treasury yield
 usdinr_close (sometimes, may be NaN)    — USD/INR exchange rate
 fii_net_cash (sometimes, may be NaN)    — FII net cash market flow
 pcr (sometimes, may be NaN)             — Put-Call ratio from option chain
+call_premium (sometimes, may be NaN)    — Real ATM call open price (9:30 AM)
+put_premium  (sometimes, may be NaN)    — Real ATM put open price (9:30 AM)
 ```
 
 Already computed in compute_features() — just add to FEATURE_COLS to activate:
@@ -48,10 +66,12 @@ hv20, bn_gap
 s_ema20, s_trend5, s_vix, s_bn_nf_div   (discrete ±1 rule signals)
 rule_score, rule_signal
 ema20_pct, vix_level, vix_pct_chg, vix_hv_ratio
-bn_ret1, bn_ret20, dow, dte
+bn_ret1, bn_ret20, bn_ret60, dow, dte
 vix_open_chg, pcr_ma5, pcr_chg, fii_net_cash_z
 crude_ret, dxy_ret, us10y_chg, usdinr_ret
-bn_dist_high20                          (% below 20-day rolling high; negative = in correction)
+bn_dist_high20, bn_dist_high52          (% below rolling high)
+prev_range_pct, prev_body_pct           (prev-day candle structure)
+put_call_skew, iv_proxy                 (real options market signals)
 ```
 
 ### signal_engine.py — score_row()
@@ -107,6 +127,55 @@ Constraints:
 - Constants in auto_trader.py: LOT_SIZE, RISK_PCT, MAX_LOTS, PREMIUM_K, ITM_WALK_MAX,
   ML_CONF_THRESHOLD, ENTRY_SPOT_GAP_THRESHOLD, ENTRY_WAIT_MAX_MINS
 - Data source tickers (^INDIAVIX, ^GSPC, ES=F, etc.) or CSV filenames
+
+---
+
+## High-priority research directions
+
+These have the strongest theoretical basis for predicting intraday BN direction:
+
+1. **Volatility regime interactions**: When iv_proxy is high (IV elevated), intraday
+   range is wide — both SL and TP are more likely to be hit. On these days, direction
+   signals (s_ema20, spf_gap, vix_dir) are more decisive. Try: `iv_proxy * s_ema20`,
+   `iv_proxy * spf_gap`, `iv_proxy * vix_dir`.
+
+2. **Prev-day candle conviction + range**: `prev_body_pct` near ±1 means yesterday
+   was a strong trending candle → today may continue OR mean-revert. Combined with
+   `prev_range_pct` (was yesterday wide or narrow?), this paints the volatility regime.
+   Try: `prev_body_pct * bn_ret5` (does yesterday's conviction align with short momentum?),
+   `prev_range_pct * iv_proxy` (do options and price agree on range expansion?).
+
+3. **Options market direction signal**: `put_call_skew > 1` = puts cost more = market
+   fears downside = potential PUT signal OR mean-reversion CALL signal (contrarian).
+   Try using `put_call_skew` in combination with trend features to identify which regime
+   applies (trending market = follow skew; ranging market = fade skew).
+
+4. **Gap + momentum alignment**: `bn_gap * bn_ret5` or `bn_gap * s_ema20` — if today's
+   opening gap aligns with recent short-term momentum, continuation is more likely.
+
+5. **52-week high regime**: `bn_dist_high52` near 0 = BN at all-time highs = bull trend
+   intact. Far negative = deep correction. This regime determines whether CALL or PUT
+   signals are more reliable. Try it as a standalone feature or in interaction with
+   s_ema20.
+
+6. **Medium-term trend**: `bn_ret60` (3-month return) separates sustained bull phases
+   from bear phases better than `bn_ret20` (4-week, too noisy) or `bn_ret1` (1-day,
+   too short). On positive `bn_ret60` days, CALL accuracy historically higher.
+
+---
+
+## Leakage warning — CRITICAL
+
+The leakage guard rejects any feature with |correlation| > 0.85 with the label,
+AND any holdout composite > 0.90.
+
+**Never use same-day values of bn_close, bn_high, bn_low, vix_close, sp_close,
+nk_close in any calculation**. The label is determined by today's close — using
+today's close in a feature is circular and will be caught.
+
+Always shift by 1: `_c = d["bn_close"].shift(1)` etc. The current code already does
+this correctly for all base series. If you add new features, use `d["bn_high"].shift(1)`,
+`d["bn_low"].shift(1)`, `d["bn_open"].shift(1)` etc., NOT `d["bn_high"]` directly.
 
 ---
 
