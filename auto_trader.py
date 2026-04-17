@@ -32,7 +32,7 @@ import atexit
 import subprocess
 import requests
 import pandas as pd
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import floor, sqrt
 from dotenv import load_dotenv
 
@@ -706,6 +706,137 @@ def _get_bn_ltp() -> float:
     return None
 
 
+def compute_chain_signals(expiry: date, spot: float) -> dict:
+    """
+    Compute max-pain strike and net gamma exposure (GEX) from the live option chain.
+
+    Max pain = strike where total ITM option value (buyers' gain) is minimised.
+    Near expiry, price gravitates toward max pain as market makers protect profits.
+
+    GEX = Σ(call_OI × gamma) − Σ(put_OI × gamma).
+    Positive GEX → MMs net long gamma → they dampen moves (ranging day).
+    Negative GEX → MMs net short gamma → they amplify moves (trending day).
+
+    Returns dict or {} on failure (always safe to ignore).
+    """
+    import math
+
+    try:
+        data, _, chain_spot, inner = _fetch_option_chain(expiry)
+        if data is None or not inner:
+            return {}
+        oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+        if not oc:
+            return {}
+
+        strikes, call_oi, put_oi, call_iv, put_iv = [], {}, {}, {}, {}
+        for key, val in oc.items():
+            try:
+                k   = float(key)
+                ce  = val.get("ce") or val.get("CE") or {}
+                pe  = val.get("pe") or val.get("PE") or {}
+                call_oi[k] = float(ce.get("oi") or 0)
+                put_oi[k]  = float(pe.get("oi") or 0)
+                call_iv[k] = float(ce.get("implied_volatility") or 0)
+                put_iv[k]  = float(pe.get("implied_volatility") or 0)
+                strikes.append(k)
+            except (ValueError, TypeError):
+                continue
+
+        if not strikes:
+            return {}
+        strikes.sort()
+
+        # ── Max pain ─────────────────────────────────────────────────────────
+        min_itm = float("inf")
+        max_pain_strike = spot
+        for test_p in strikes:
+            call_itm = sum((test_p - k) * call_oi[k] for k in strikes if k < test_p)
+            put_itm  = sum((k - test_p) * put_oi[k]  for k in strikes if k > test_p)
+            total    = call_itm + put_itm
+            if total < min_itm:
+                min_itm = total
+                max_pain_strike = test_p
+
+        max_pain_dist = (spot - max_pain_strike) / spot * 100  # + = spot above pain
+
+        # ── Net Gamma Exposure (GEX) ──────────────────────────────────────────
+        T      = max(0.5, (expiry - date.today()).days + 1) / 365.0
+        r      = 0.07
+        sqrt_T = math.sqrt(T)
+
+        def _gamma(S, K, sigma):
+            if sigma <= 0:
+                return 0.0
+            d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrt_T)
+            return math.exp(-0.5 * d1**2) / (math.sqrt(2 * math.pi) * S * sigma * sqrt_T)
+
+        S   = chain_spot or spot
+        gex = 0.0
+        for k in strikes:
+            c_iv = call_iv.get(k, 0) / 100
+            p_iv = put_iv.get(k, 0) / 100
+            if c_iv > 0:
+                gex += call_oi[k] * _gamma(S, k, c_iv)
+            if p_iv > 0:
+                gex -= put_oi[k]  * _gamma(S, k, p_iv)
+
+        # ── ATM straddle premium ──────────────────────────────────────────────
+        atm     = round(spot / 100) * 100
+        atm_key = f"{float(atm):.6f}"
+        atm_d   = oc.get(atm_key, {})
+        atm_c   = float((atm_d.get("ce") or {}).get("last_price") or 0)
+        atm_p   = float((atm_d.get("pe") or {}).get("last_price") or 0)
+
+        return {
+            "max_pain_strike": max_pain_strike,
+            "max_pain_dist":   round(max_pain_dist, 2),
+            "gex_positive":    gex > 0,   # True = ranging, False = trending
+            "straddle":        round(atm_c + atm_p, 1),
+            "n_strikes":       len(strikes),
+        }
+    except Exception as e:
+        notify.log(f"compute_chain_signals error: {e}")
+        return {}
+
+
+def _append_chain_signals(chain_sig: dict, spot: float) -> None:
+    """Append today's chain signals to options_atm_daily.csv for future ML training."""
+    try:
+        import csv
+        path     = f"{DATA_DIR}/options_atm_daily.csv"
+        today_s  = date.today().isoformat()
+        fieldnames = ["date", "call_premium", "put_premium",
+                      "max_pain_strike", "max_pain_dist", "gex_positive", "straddle"]
+
+        # Read existing rows, drop today's if re-running
+        rows = []
+        if os.path.exists(path):
+            with open(path, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get("date") != today_s:
+                        rows.append(row)
+
+        # Append today's row (preserve call_premium/put_premium from existing data)
+        rows.append({
+            "date":             today_s,
+            "call_premium":     "",          # filled by data_fetcher.py rollingoption
+            "put_premium":      "",
+            "max_pain_strike":  chain_sig.get("max_pain_strike", ""),
+            "max_pain_dist":    chain_sig.get("max_pain_dist", ""),
+            "gex_positive":     chain_sig.get("gex_positive", ""),
+            "straddle":         chain_sig.get("straddle", ""),
+        })
+
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+    except Exception as e:
+        notify.log(f"_append_chain_signals write error: {e}")
+
+
 def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
                                      max_otm_strikes=10):
     """
@@ -1177,6 +1308,39 @@ def main():
 
     score_max = 4
 
+    # ── News sentiment (morning_brief.py output, written at 9:15 AM) ────────
+    news_vote    = 0    # +1 aligns with signal, -1 opposes
+    news_note    = ""
+    try:
+        ns_path = f"{DATA_DIR}/news_sentiment.json"
+        if os.path.exists(ns_path):
+            with open(ns_path) as _f:
+                ns = json.load(_f)
+            # Only use if generated today and within 6 hours
+            ns_date = ns.get("date", "")
+            ns_gen  = ns.get("generated", "")
+            ns_age  = (datetime.now(timezone.utc) -
+                       datetime.fromisoformat(ns_gen)).total_seconds() / 3600
+            if ns_date == date.today().isoformat() and ns_age < 6:
+                direction  = ns.get("direction", "NEUTRAL")
+                confidence = ns.get("confidence", "LOW")
+                conf_weight = {"HIGH": 1, "MEDIUM": 1, "LOW": 0}.get(confidence, 0)
+                if conf_weight:
+                    if (direction == "BULLISH" and signal == "CALL") or \
+                       (direction == "BEARISH" and signal == "PUT"):
+                        news_vote = 1
+                        news_note = f"News: {direction} ({confidence}) — aligns ✓"
+                    elif (direction == "BULLISH" and signal == "PUT") or \
+                         (direction == "BEARISH" and signal == "CALL"):
+                        news_vote = -1
+                        news_note = f"News: {direction} ({confidence}) — CONFLICTS ⚠"
+                    else:
+                        news_note = f"News: NEUTRAL — no vote"
+                else:
+                    news_note = f"News: {direction} (LOW confidence — no vote)"
+    except Exception:
+        pass
+
     # ── VIX regime filter ────────────────────────────────────────────────────
     # Model accuracy: VIX<13 = 46.7% (losing), VIX 13-18 = 57.4%, VIX>18 = 62.9%
     vix_now = get_vix_level()
@@ -1265,6 +1429,11 @@ def main():
     if not lots or lots < 1:
         die(f"Lot sizing returned {lots} — insufficient capital or premium too high for 1 lot.")
 
+    # 4c. Option chain intelligence — max pain + GEX (runs a 2nd chain fetch)
+    chain_sig = compute_chain_signals(expiry, spot)
+    if chain_sig:
+        _append_chain_signals(chain_sig, spot)
+
     # 4b. Adaptive opening-wait — if BN spot gapped significantly from yesterday's
     #     close, opening IV is likely elevated. Wait proportionally, then re-fetch
     #     so SL/TP are anchored to the actual fill price, not the inflated open.
@@ -1345,7 +1514,23 @@ def main():
     else:
         score_desc = "  ● weak ●"
 
-    sig_line = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
+    sig_line  = f"\n<i>↳ {sig_note}</i>" if sig_note  else ""
+    news_row  = f"News       {news_note}\n" if news_note else ""
+
+    # Chain intelligence lines (max pain + GEX)
+    chain_line = ""
+    if chain_sig:
+        mp     = chain_sig["max_pain_strike"]
+        mp_d   = chain_sig["max_pain_dist"]
+        gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
+        mp_dir  = "above" if mp_d > 0 else "below"
+        mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
+        chain_line = (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Max pain   ₹{mp:,.0f}  ({abs(mp_d):.1f}% {mp_dir} spot → {mp_bias})\n"
+            f"Gamma      {gex_lbl}\n"
+            f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
+        )
 
     # Stale-data warning (DRY RUN only — API unavailable, approximated fallback)
     stale_line = ""
@@ -1361,6 +1546,7 @@ def main():
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Score      {score:+d} / {score_max}{score_desc}\n"
         f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else '  ⚠ low' if (ml_trained and ml_conf < ML_CONF_THRESHOLD) else ''}\n"
+        f"{news_row}"
         f"Capital    {cap_label}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Option     <code>{opt_sym}</code>{otm_label}\n"
@@ -1372,6 +1558,7 @@ def main():
         f"Target     ₹{tp_price:.0f}  (+{SL_PCT*rr*100:.0f}%)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Risk  ₹{risk_amt:,.0f}   Reward  ₹{target_amt:,.0f}"
+        f"{chain_line}"
         f"{stale_line}"
     )
 

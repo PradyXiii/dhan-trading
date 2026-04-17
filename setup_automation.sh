@@ -123,6 +123,11 @@ CONVICTION_COMMENT="# Midday conviction — 11:00 AM IST, live thesis reassessme
 HEALTH_CMD="35 3 * * 1-5 cd $SCRIPT_DIR && python3 health_ping.py >> $LOG_DIR/health_ping.log 2>&1"
 HEALTH_COMMENT="# Pre-market health ping — 9:05 AM IST, system checks before trade"
 
+# Morning news brief — 9:15 AM IST = 3:45 AM UTC, Mon–Fri
+# Fetches BankNifty headlines, calls Claude for sentiment, writes data/news_sentiment.json
+BRIEF_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 morning_brief.py >> $LOG_DIR/morning_brief.log 2>&1"
+BRIEF_COMMENT="# Morning news brief — 9:15 AM IST, news sentiment for auto_trader"
+
 # Weekly log rotation — Sunday 2 AM IST (8:30 PM Sat UTC)
 # Truncates each log to its last 1000 lines if > 10 MB to prevent disk fill
 LOG_ROTATE_CMD="30 20 * * 0 for f in $LOG_DIR/*.log; do [ -f \"\$f\" ] && [ \$(stat -c%s \"\$f\" 2>/dev/null || echo 0) -gt 10485760 ] && tail -n 1000 \"\$f\" > \"\$f.tmp\" && mv \"\$f.tmp\" \"\$f\" && echo \"Rotated \$f\"; done"
@@ -158,6 +163,7 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "Midday conviction" \
   | grep -v "Pre-market health" \
   | grep -v "Autoresearch" \
+  | grep -v "Morning news brief" \
   | grep -v "Weekly log rotation")
 
 # Add fresh entries
@@ -168,6 +174,8 @@ $RENEWER_CMD_EVENING
 $RENEWER_CMD_REBOOT
 $HEALTH_COMMENT
 $HEALTH_CMD
+$BRIEF_COMMENT
+$BRIEF_CMD
 $CRON_COMMENT
 $CRON_CMD
 $EXIT_COMMENT

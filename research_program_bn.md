@@ -65,6 +65,8 @@ ema20, rsi14, trend5, vix_dir, sp500_chg, nikkei_chg, spf_gap, bn_nf_div
 hv20, bn_gap
 s_ema20, s_trend5, s_vix, s_bn_nf_div   (discrete ±1 rule signals)
 rule_score, rule_signal
+rule_score_lag1                          (yesterday's rule score — conviction momentum)
+adx14                                    (Average Directional Index — trending vs ranging)
 ema20_pct, vix_level, vix_pct_chg, vix_hv_ratio
 bn_ret1, bn_ret20, bn_ret60, dow, dte
 vix_open_chg, pcr_ma5, pcr_chg, fii_net_cash_z
@@ -72,6 +74,7 @@ crude_ret, dxy_ret, us10y_chg, usdinr_ret
 bn_dist_high20, bn_dist_high52          (% below rolling high)
 prev_range_pct, prev_body_pct           (prev-day candle structure)
 put_call_skew, iv_proxy                 (real options market signals)
+straddle_expansion                       (today's ATM straddle vs 20d mean — IV expansion)
 ```
 
 ### signal_engine.py — score_row()

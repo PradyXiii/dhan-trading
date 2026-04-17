@@ -393,6 +393,41 @@ def compute_features(df):
         d["put_call_skew"] = 1.0
         d["iv_proxy"]      = 0.0
 
+    # ── Straddle expansion vs 20-day mean ────────────────────────────────────
+    # ratio > 1.2 = IV elevated vs recent norm → big move expected → TP more likely.
+    if "call_premium" in d.columns and "put_premium" in d.columns:
+        _straddle    = (d["call_premium"].fillna(0) + d["put_premium"].fillna(0)).replace(0, np.nan)
+        _straddle_ma = _straddle.rolling(20, min_periods=5).mean().replace(0, np.nan)
+        d["straddle_expansion"] = (_straddle / _straddle_ma).fillna(1.0)
+    else:
+        d["straddle_expansion"] = 1.0
+
+    # ── ADX 14 (Average Directional Index) ──────────────────────────────────
+    # ADX > 25 = market trending (momentum signals more reliable)
+    # ADX < 15 = market ranging (signals unreliable, mean-reversion dominates)
+    # Uses shifted OHLCV series (_ph, _pl, _c already shift(1)) — no leakage.
+    _prev_c2 = _c.shift(1)
+    _ph_prev = _ph.shift(1)
+    _pl_prev = _pl.shift(1)
+    _tr_adx  = pd.concat([
+        _ph - _pl,
+        (_ph - _prev_c2).abs(),
+        (_pl - _prev_c2).abs(),
+    ], axis=1).max(axis=1)
+    _up_dm  = (_ph - _ph_prev).clip(lower=0)
+    _dn_dm  = (_pl_prev - _pl).clip(lower=0)
+    _dm_p_  = _up_dm.where(_up_dm > _dn_dm, 0.0)
+    _dm_m_  = _dn_dm.where(_dn_dm > _up_dm, 0.0)
+    _atr14_ = _tr_adx.ewm(com=13, min_periods=14).mean()
+    _di_p_  = 100 * _dm_p_.ewm(com=13, min_periods=14).mean() / _atr14_.replace(0, np.nan)
+    _di_m_  = 100 * _dm_m_.ewm(com=13, min_periods=14).mean() / _atr14_.replace(0, np.nan)
+    _dx_    = 100 * (_di_p_ - _di_m_).abs() / (_di_p_ + _di_m_).replace(0, np.nan)
+    d["adx14"] = _dx_.ewm(com=13, min_periods=14).mean().fillna(20.0)
+
+    # ── Rule score momentum (yesterday's conviction) ─────────────────────────
+    # Two consecutive strong rule_score days = sustained institutional momentum.
+    d["rule_score_lag1"] = d["rule_score"].shift(1).fillna(0.0)
+
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "bn_nf_div","hv20","bn_gap","vix_pct_chg","vix_hv_ratio","bn_ret20"]
     return d.dropna(subset=req)
@@ -400,12 +435,12 @@ def compute_features(df):
 
 # 31 features fed into the RF
 FEATURE_COLS = [
-    # Rule-based score components (discrete ±1 signals)
-    "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",
+    # Rule-based score components (discrete ±1 signals) + yesterday's conviction
+    "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div", "rule_score_lag1",
     # Continuous versions of same signals
     "ema20_pct", "trend5", "vix_dir", "bn_nf_div",
     # Additional technical indicators
-    "rsi14", "hv20", "bn_gap",
+    "rsi14", "hv20", "bn_gap", "adx14",
     # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
     # Macro drivers (crude → inflation risk; DXY → FII outflows; US10Y → bank cost of funds)
@@ -424,8 +459,9 @@ FEATURE_COLS = [
     # FII institutional flow (z-scored, previous day — no lookahead)
     "fii_net_cash_z",
     # Real options market signals (ATM open prices, known at 9:30 AM)
-    "put_call_skew",   # put/call premium ratio — market's directional bias
-    "iv_proxy",        # z-scored IV level — high IV = wider intraday range expected
+    "put_call_skew",        # put/call premium ratio — market's directional bias
+    "iv_proxy",             # z-scored IV level — high IV = wider intraday range expected
+    "straddle_expansion",   # today's straddle vs 20d mean — IV expansion signal
     # Prev-day candle structure (directional conviction + range regime)
     "prev_range_pct",  # yesterday's H-L range % — predicts today's range via volatility clustering
     "prev_body_pct",   # yesterday's body/range ratio — strong candle = trend continuation

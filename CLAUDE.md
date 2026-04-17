@@ -55,6 +55,7 @@ No human input needed during market hours.
 | `autoexperiment_backtest.py` | Backtest evaluator for auto_trader.py constant changes |
 | `backfill_live_trades.py` | One-time / periodic utility — imports Dhan trade history into live_trades.csv |
 | `analyze_confidence.py` | Diagnostic tool — confidence buckets, VIX regime accuracy, feature importances; `--write-threshold` updates dynamic VIX filter |
+| `morning_brief.py` | 9:15 AM news sentiment — fetches BankNifty headlines, calls Claude API, writes `data/news_sentiment.json` for auto_trader vote |
 | `research_program_bn.md` | Autoresearch brief — defines what the AI agent may and may not change |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
 
@@ -188,6 +189,7 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/paper_performance.csv` | Daily live vs paper model scores — combined_advantage drives promotion streak |
 | `data/paper_changes.json` | Accumulated plain-English log of paper model improvements (reset on promotion) |
 | `data/vix_threshold.json` | Dynamic VIX trade filter — written nightly by analyze_confidence.py, read by auto_trader.py at startup |
+| `data/news_sentiment.json` | Today's pre-market news sentiment — written by morning_brief.py at 9:15 AM, consumed by auto_trader.py |
 | `models/champion.pkl` | Best HPO model from last evolver run |
 | `models/champion_meta.json` | Model type, accuracy, feature list, trained_at |
 | `models/ensemble/*.pkl` | 4-model ensemble (rf/xgb/lgb/cat) for live voting |
@@ -202,6 +204,7 @@ Installed by `setup_automation.sh`:
 ```
 */5 *  * * *    renew_token.py          # every 5 min, all 7 days
 35 3   * * 1-5  health_ping.py          # 9:05 AM IST
+45 3   * * 1-5  morning_brief.py        # 9:15 AM IST (news sentiment → data/news_sentiment.json)
 0  4   * * 1-5  auto_trader.py          # 9:30 AM IST
 30 5   * * 1-5  midday_conviction.py    # 11:00 AM IST
 45 9   * * 1-5  exit_positions.py       # 3:15 PM IST
