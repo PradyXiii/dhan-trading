@@ -110,8 +110,11 @@ def _build_live_context() -> str:
     try:
         vix_csv  = pd.read_csv(f"{DATA_DIR}/india_vix.csv", parse_dates=["date"])
         vix_last = float(vix_csv["close"].iloc[-1])
-        vix_chg  = vix_last - float(vix_csv["close"].iloc[-2])
-        lines.append(f"India VIX: {vix_last:.1f}  ({vix_chg:+.2f} pts yesterday)")
+        if vix_last > 60 or vix_last < 8:
+            print(f"  ⚠️  VIX {vix_last} in CSV looks like a data error — skipping (real VIX is likely ~17)")
+        else:
+            vix_chg  = vix_last - float(vix_csv["close"].iloc[-2])
+            lines.append(f"India VIX: {vix_last:.1f}  ({vix_chg:+.2f} pts yesterday)")
     except Exception:
         pass
 

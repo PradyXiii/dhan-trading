@@ -254,7 +254,7 @@ def compute_features(df):
     # to avoid training on data that leaks the same-day close into the label.
     _c    = d["bn_close"].shift(1)   # yesterday's BN close
     _c_nf = d["nf_close"].shift(1)   # yesterday's NF close
-    _vix  = d["vix_close"].shift(1)  # yesterday's India VIX — closes 3:30 PM IST, same session as label
+    _vix  = d["vix_close"].shift(1).clip(8, 85)  # yesterday's India VIX; clip outliers from yfinance data errors
     _sp   = d["sp_close"].shift(1)   # yesterday's S&P — closes 1:30 AM IST, not known at 9:30 AM IST
     _nk   = d["nk_close"].shift(1)   # yesterday's Nikkei — full-day close is noon IST, after trade entry
 

@@ -151,6 +151,13 @@ def fetch_yfinance(ticker, name, from_date, to_date):
             .sort_values("date")
             .reset_index(drop=True))
 
+    # Reject obviously corrupt rows for India VIX (yfinance occasionally returns spikes)
+    if ticker == "^INDIAVIX":
+        bad = df[(df["close"] < 8) | (df["close"] > 85)]
+        if not bad.empty:
+            print(f"  {name}: dropping {len(bad)} corrupt row(s) with VIX outside [8,85]: {bad['close'].tolist()}")
+            df = df[(df["close"] >= 8) & (df["close"] <= 85)].reset_index(drop=True)
+
     print(f"  {name}: {len(df)} rows")
     return df
 
