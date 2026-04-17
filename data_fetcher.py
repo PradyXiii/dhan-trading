@@ -18,7 +18,7 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-FROM_DATE = "2021-09-01"
+FROM_DATE = "2019-01-01"
 TO_DATE   = datetime.today().strftime("%Y-%m-%d")
 DATA_DIR  = "data"
 
@@ -35,6 +35,18 @@ def _last_csv_date(path):
             if not df.empty:
                 last = pd.to_datetime(df["date"]).max()
                 return (last + timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return None
+
+
+def _first_csv_date(path):
+    """Return the first date in an existing CSV (as YYYY-MM-DD string), for backfill to_date."""
+    try:
+        if os.path.exists(path):
+            df = pd.read_csv(path, usecols=["date"])
+            if not df.empty:
+                return pd.to_datetime(df["date"]).min().strftime("%Y-%m-%d")
     except Exception:
         pass
     return None
@@ -754,6 +766,51 @@ def main():
                 pcr = pd.concat([existing, pcr]).drop_duplicates("date").sort_values("date")
             pcr.to_csv(out, index=False)
             print(f"  → Saved {out}  ({len(pcr)} rows total)")
+        return
+
+    # Handle --backfill: fetch historical gap from FROM_DATE to each CSV's existing start
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--backfill":
+        print(f"\n=== Backfilling historical data from {FROM_DATE} ===")
+        os.makedirs(DATA_DIR, exist_ok=True)
+
+        for sec_id, name, csv_file in [("25", "BankNifty", "banknifty.csv"),
+                                        ("13", "Nifty50",   "nifty50.csv")]:
+            path     = f"{DATA_DIR}/{csv_file}"
+            to_date  = _first_csv_date(path)
+            if to_date is None or to_date <= FROM_DATE:
+                print(f"  {name}: already starts at/before {FROM_DATE} — skipping")
+                continue
+            print(f"  {name}: fetching {FROM_DATE} → {to_date} ...")
+            df = fetch_dhan_index(sec_id, name, FROM_DATE, to_date)
+            _merge_and_save(path, df)
+            if not df.empty:
+                total = len(pd.read_csv(path))
+                print(f"  → {csv_file}  (+{len(df)} rows, {total} total)")
+
+        yf_backfill = [
+            ("^INDIAVIX", "India VIX",   "india_vix.csv"),
+            ("^GSPC",     "S&P 500",     "sp500.csv"),
+            ("^N225",     "Nikkei 225",  "nikkei.csv"),
+            ("ES=F",      "S&P Futures", "sp500_futures.csv"),
+            ("CL=F",      "Crude",       "crude.csv"),
+            ("USDINR=X",  "USD/INR",     "usdinr.csv"),
+            ("DX-Y.NYB",  "DXY",         "dxy.csv"),
+            ("^TNX",      "US 10Y",      "us10y.csv"),
+        ]
+        for ticker, name, csv_file in yf_backfill:
+            path    = f"{DATA_DIR}/{csv_file}"
+            to_date = _first_csv_date(path)
+            if to_date is None or to_date <= FROM_DATE:
+                print(f"  {name}: already starts at/before {FROM_DATE} — skipping")
+                continue
+            print(f"  {name}: fetching {FROM_DATE} → {to_date} ...")
+            df = fetch_yfinance(ticker, name, FROM_DATE, to_date)
+            _merge_and_save(path, df)
+            if not df.empty:
+                total = len(pd.read_csv(path))
+                print(f"  → {csv_file}  (+{len(df)} rows, {total} total)")
+
+        print(f"\n=== Backfill complete. Run: python3 autoexperiment_bn.py ===")
         return
 
     os.makedirs(DATA_DIR, exist_ok=True)
