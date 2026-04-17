@@ -167,6 +167,23 @@ def load_all_data():
         else:
             df[_col] = np.nan
 
+    # ── Real ATM option premiums (optional) ─────────────────────────────────
+    # options_atm_daily.csv: date, call_premium, put_premium (ATM open prices).
+    # Used in compute_labels (better SL/TP simulation) and as features.
+    opt_path = f"{DATA_DIR}/options_atm_daily.csv"
+    if os.path.exists(opt_path):
+        try:
+            opt = pd.read_csv(opt_path, parse_dates=["date"])[["date","call_premium","put_premium"]]
+            df  = df.merge(opt, on="date", how="left")
+            df["call_premium"] = df["call_premium"].ffill(limit=2)
+            df["put_premium"]  = df["put_premium"].ffill(limit=2)
+        except Exception:
+            df["call_premium"] = np.nan
+            df["put_premium"]  = np.nan
+    else:
+        df["call_premium"] = np.nan
+        df["put_premium"]  = np.nan
+
     # ── FII net cash (optional) ───────────────────────────────────────────────
     fii_path = f"{DATA_DIR}/fii_dii.csv"
     if os.path.exists(fii_path):
@@ -334,6 +351,29 @@ def compute_features(df):
     else:
         d["fii_net_cash_z"] = 0.0
 
+    # ── NEW: Real options market signals ──────────────────────────────────────
+    # put_call_skew: put_premium / call_premium at ATM open.
+    #   > 1.0 → market pricing in more downside risk (PUT signal)
+    #   < 1.0 → market pricing in more upside risk (CALL signal)
+    # iv_proxy: actual ATM premium relative to formula. Captures IV regime —
+    #   high IV days = larger intraday ranges = TP/SL more likely to be hit.
+    # Both use today's option OPEN prices (known at 9:30 AM) — no lookahead.
+    if "call_premium" in d.columns and "put_premium" in d.columns:
+        _cp = d["call_premium"].replace(0, np.nan)
+        _pp = d["put_premium"].replace(0, np.nan)
+        d["put_call_skew"] = (_pp / _cp).fillna(1.0)
+        # iv_proxy: average of call/put vs formula premium; z-scored over 60d
+        _avg_prem    = ((_cp + _pp) / 2).fillna(np.nan)
+        _dte_vals    = d["date"].apply(lambda x: get_dte(x.date() if hasattr(x, "date") else x))
+        _formula_p   = d["bn_open"] * PREMIUM_K * (_dte_vals ** 0.5)
+        _iv_raw      = (_avg_prem / _formula_p.replace(0, np.nan)).fillna(1.0)
+        _iv_mu       = _iv_raw.rolling(60, min_periods=10).mean().fillna(1.0)
+        _iv_std      = _iv_raw.rolling(60, min_periods=10).std().replace(0, np.nan)
+        d["iv_proxy"] = ((_iv_raw - _iv_mu) / _iv_std).fillna(0.0)
+    else:
+        d["put_call_skew"] = 1.0
+        d["iv_proxy"]      = 0.0
+
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "bn_nf_div","hv20","bn_gap","vix_pct_chg","vix_hv_ratio","bn_ret20"]
     return d.dropna(subset=req)
@@ -364,6 +404,9 @@ FEATURE_COLS = [
     "vix_open_chg",
     # FII institutional flow (z-scored, previous day — no lookahead)
     "fii_net_cash_z",
+    # Real options market signals (ATM open prices, known at 9:30 AM)
+    "put_call_skew",   # put/call premium ratio — market's directional bias
+    "iv_proxy",        # z-scored IV level — high IV = wider intraday range expected
 ]
 
 
@@ -407,10 +450,15 @@ def compute_labels(df):
         o, h, l, c = r["bn_open"], r["bn_high"], r["bn_low"], r["bn_close"]
         date  = r["date"]
         dte   = get_dte(date.date() if hasattr(date, "date") else date)
-        prem  = o * PREMIUM_K * (dte ** 0.5)
+        formula_prem = o * PREMIUM_K * (dte ** 0.5)
 
-        call_out = simulate_outcome(o, h, l, c, "CALL", prem)
-        put_out  = simulate_outcome(o, h, l, c, "PUT",  prem)
+        # Use real ATM premiums when available — formula is a rough approximation
+        # that ignores IV crush, skew, and regime. Real premiums = accurate SL/TP.
+        call_prem = r["call_premium"] if ("call_premium" in r.index and pd.notna(r["call_premium"])) else formula_prem
+        put_prem  = r["put_premium"]  if ("put_premium"  in r.index and pd.notna(r["put_premium"]))  else formula_prem
+
+        call_out = simulate_outcome(o, h, l, c, "CALL", call_prem)
+        put_out  = simulate_outcome(o, h, l, c, "PUT",  put_prem)
 
         if call_out == "WIN" and put_out != "WIN":
             label = "CALL"
