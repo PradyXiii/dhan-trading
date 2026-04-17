@@ -443,21 +443,14 @@ FEATURE_COLS = [
     "rsi14", "hv20", "bn_gap", "adx14",
     # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
-    # Macro drivers (crude → inflation risk; DXY → FII outflows; US10Y → bank cost of funds)
-    # usdinr_ret: rupee weakness directly triggers FII outflows from India
-    "crude_ret", "dxy_ret", "us10y_chg", "usdinr_ret",
     # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
     # Momentum & drawdown
     "bn_ret1", "bn_ret20", "bn_dist_high20",
     # Calendar
     "dow", "dte",
-    # Options market sentiment
-    "pcr", "pcr_ma5", "pcr_chg",
     # VIX opening direction at 9:15 AM (risk-off/on signal at trade entry)
     "vix_open_chg",
-    # FII institutional flow (z-scored, previous day — no lookahead)
-    "fii_net_cash_z",
     # Real options market signals (ATM open prices, known at 9:30 AM)
     "put_call_skew",        # put/call premium ratio — market's directional bias
     "iv_proxy",             # z-scored IV level — high IV = wider intraday range expected
