@@ -82,13 +82,13 @@ else:
 
 # ── 5. Install cron job ───────────────────────────────────────────────────────
 echo ""
-echo "[5] Installing cron job (9:15 AM IST = 3:45 AM UTC, Mon–Fri)..."
+echo "[5] Installing cron job (9:30 AM IST = 4:00 AM UTC, Mon–Fri)..."
 
-CRON_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
-CRON_COMMENT="# BankNifty Auto Trader — runs at 9:15 AM IST"
+CRON_CMD="0 4 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
+CRON_COMMENT="# BankNifty Auto Trader — runs at 9:30 AM IST"
 
 # Token renewer — twice daily + @reboot safety net.
-# 7:55 AM IST (2:25 UTC): renews before 9:15 AM trade. 11:00 PM IST (17:30 UTC): overnight renewal.
+# 7:55 AM IST (2:25 UTC): renews before 9:30 AM trade. 11:00 PM IST (17:30 UTC): overnight renewal.
 # @reboot: covers VM restarts between daily runs.
 RENEWER_CMD_MORNING="25 2  * * *  cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
 RENEWER_CMD_EVENING="30 17 * * *  cd $SCRIPT_DIR && python3 renew_token.py >> $LOG_DIR/renew_token.log 2>&1"
@@ -118,10 +118,10 @@ JOURNAL_COMMENT="# Trade journal — 3:30 PM IST, captures live fills + oracle s
 CONVICTION_CMD="30 5 * * 1-5 cd $SCRIPT_DIR && python3 midday_conviction.py >> $LOG_DIR/conviction.log 2>&1"
 CONVICTION_COMMENT="# Midday conviction — 11:00 AM IST, live thesis reassessment"
 
-# Pre-market health ping — 8:50 AM IST = 3:20 AM UTC, Mon–Fri
+# Pre-market health ping — 9:05 AM IST = 3:35 AM UTC, Mon–Fri
 # Fires 25 min before trade: checks token, signal freshness, capital, lock file → Telegram all-clear or alert
-HEALTH_CMD="20 3 * * 1-5 cd $SCRIPT_DIR && python3 health_ping.py >> $LOG_DIR/health_ping.log 2>&1"
-HEALTH_COMMENT="# Pre-market health ping — 8:50 AM IST, system checks before trade"
+HEALTH_CMD="35 3 * * 1-5 cd $SCRIPT_DIR && python3 health_ping.py >> $LOG_DIR/health_ping.log 2>&1"
+HEALTH_COMMENT="# Pre-market health ping — 9:05 AM IST, system checks before trade"
 
 # Weekly log rotation — Sunday 2 AM IST (8:30 PM Sat UTC)
 # Truncates each log to its last 1000 lines if > 10 MB to prevent disk fill
@@ -207,10 +207,10 @@ echo ""
 echo "  Token renewer  : twice daily 7:55 AM IST + 11:00 PM IST + @reboot"
 echo "  Renewer log    : $LOG_DIR/renew_token.log"
 echo ""
-echo "  Health ping    : 8:50 AM IST every weekday (Mon–Fri)"
+echo "  Health ping    : 9:05 AM IST every weekday (Mon–Fri)"
 echo "  Ping log       : $LOG_DIR/health_ping.log"
 echo ""
-echo "  Auto trader    : 9:15 AM IST every weekday (Mon–Fri)"
+echo "  Auto trader    : 9:30 AM IST every weekday (Mon–Fri)"
 echo "  Trader log     : $LOG_DIR/auto_trader.log"
 echo ""
 echo "  EOD squareoff  : 3:15 PM IST every weekday (Mon–Fri)"

@@ -23,7 +23,7 @@ The docs have the exact answer. Read them first, always.
 
 ## What This System Does
 
-Fully automated BankNifty options trading. Cron fires at 9:15 AM IST on trading days:
+Fully automated BankNifty options trading. Cron fires at 9:30 AM IST on trading days:
 data → rule signal → ML override → Dhan Super Order + SL/TP → Telegram alert.
 No human input needed during market hours.
 
@@ -73,7 +73,7 @@ RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 
 ---
 
-## 9:15 AM Flow (auto_trader.py main)
+## 9:30 AM Flow (auto_trader.py main)
 
 ```
 0. _acquire_lock()  — fcntl prevents double cron execution
@@ -199,8 +199,8 @@ Installed by `setup_automation.sh`:
 
 ```
 */5 *  * * *    renew_token.py          # every 5 min, all 7 days
-20 3   * * 1-5  health_ping.py          # 8:50 AM IST
-45 3   * * 1-5  auto_trader.py          # 9:15 AM IST
+35 3   * * 1-5  health_ping.py          # 9:05 AM IST
+0  4   * * 1-5  auto_trader.py          # 9:30 AM IST
 30 5   * * 1-5  midday_conviction.py    # 11:00 AM IST
 45 9   * * 1-5  exit_positions.py       # 3:15 PM IST
 0  10  * * 1-5  trade_journal.py        # 3:30 PM IST

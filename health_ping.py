@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
-health_ping.py — Pre-market system heartbeat at 8:50 AM IST
+health_ping.py — Pre-market system heartbeat at 9:05 AM IST
 =============================================================
-Runs 25 minutes before the 9:15 AM trade. Checks that every dependency
+Runs 25 minutes before the 9:30 AM trade. Checks that every dependency
 the auto_trader needs is healthy, then sends a single Telegram "all-clear"
 (or critical alert if something is broken).
 
@@ -15,8 +15,8 @@ Checks performed:
   5. Critical alert log — reports if data/critical_alerts.log was written
      since yesterday (previous session had Telegram failures)
 
-Cron (8:50 AM IST = 3:20 AM UTC, Mon–Fri):
-  20 3 * * 1-5 cd ~/dhan-trading && python3 health_ping.py >> logs/health_ping.log 2>&1
+Cron (9:05 AM IST = 3:35 AM UTC, Mon–Fri):
+  35 3 * * 1-5 cd ~/dhan-trading && python3 health_ping.py >> logs/health_ping.log 2>&1
 """
 import os
 import sys
@@ -204,7 +204,7 @@ def main():
         issue_lines = "\n".join(f"  {i}" for i in issues)
         notify.send(
             f"🚨 <b>Pre-Market Alert — {today_label}</b>\n\n"
-            f"System issues detected before 9:15 AM trade:\n\n"
+            f"System issues detected before 9:30 AM trade:\n\n"
             f"{issue_lines}\n\n"
             f"<b>Fix these before the trade fires in ~25 min.</b>"
         )
@@ -219,7 +219,7 @@ def main():
             f"💚 <b>System OK — {today_label}</b>\n\n"
             f"Token      ✓  (capital {capital_str})\n"
             f"Signal     {signal_label}  (score {score_label}  ·  {sig_age}  ·  {sig_src})\n\n"
-            f"<i>Auto trader fires in ~25 min at 9:15 AM IST.</i>"
+            f"<i>Auto trader fires in ~25 min at 9:30 AM IST.</i>"
         )
 
 

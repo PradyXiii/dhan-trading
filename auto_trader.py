@@ -3,7 +3,7 @@
 """
 auto_trader.py — BankNifty Options Full Automation
 ====================================================
-Runs every trading day at 9:15 AM IST via cron.
+Runs every trading day at 9:30 AM IST via cron.
 No human interaction required.
 
 Flow:
@@ -17,8 +17,8 @@ Flow:
        e. Place Dhan Super Order (entry + SL + TP in one shot)
        f. Send ONE result message to Telegram
 
-Cron (9:15 AM IST = 3:45 AM UTC):
-  45 3 * * 1-5 cd ~/dhan-trading && python3 auto_trader.py >> logs/auto_trader.log 2>&1
+Cron (9:30 AM IST = 4:00 AM UTC):
+  0 4 * * 1-5 cd ~/dhan-trading && python3 auto_trader.py >> logs/auto_trader.log 2>&1
 
 Add --dry-run flag for testing without placing real orders.
 """
@@ -245,12 +245,12 @@ RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
 ML_CONF_THRESHOLD = 0.55
 
 # ── Adaptive opening-wait parameters ─────────────────────────────────────────
-# Root cause of bad 9:15 fills: large BN spot gap → inflated IV at open.
+# Root cause of bad 9:30 fills: large BN spot gap → inflated IV at open.
 # If |live_spot - yesterday_close| > ENTRY_SPOT_GAP_THRESHOLD, wait proportionally:
 #   0.5% gap → 5 min,  0.8% → 8 min,  1.0% → 10 min,  ≥1.2% → 12 min (cap)
 # After wait: re-fetch option chain so SL/TP auto-reset to actual fill price.
 ENTRY_SPOT_GAP_THRESHOLD = 0.005   # 0.5% BN spot gap (≈280 pts at 56k) triggers wait
-ENTRY_WAIT_MAX_MINS      = 12      # never wait beyond 9:15 + 12 = 9:27 AM
+ENTRY_WAIT_MAX_MINS      = 12      # never wait beyond 9:30 + 12 = 9:42 AM
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1259,7 +1259,7 @@ def main():
                 security_id, atm_strike, premium, lots, spot, otm_distance = \
                     sid2, strike2, prem2, lots2, spot2, otm2
             else:
-                notify.log("Re-fetch returned no data — using original price from 9:15 open.")
+                notify.log("Re-fetch returned no data — using original price from 9:30 open.")
     elif DRY_RUN and sig_spot > 0 and spot > 0:
         spot_gap_pct = abs(spot - sig_spot) / sig_spot
         if spot_gap_pct >= ENTRY_SPOT_GAP_THRESHOLD:

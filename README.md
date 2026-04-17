@@ -1,6 +1,6 @@
 # BankNifty Options Auto-Trader
 
-Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:15 AM IST the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Every Saturday night it runs an AI-driven experiment loop that tries to improve its own model — keeping what works, reverting what doesn't. Nothing to do during market hours.
+Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Every Saturday night it runs an AI-driven experiment loop that tries to improve its own model — keeping what works, reverting what doesn't. Nothing to do during market hours.
 
 ---
 
@@ -22,7 +22,7 @@ Every 5 minutes (all 7 days)
           stale lock-file, critical alert log
         — Sends a single "all clear" (or alarm) to Telegram
 
-9:15 AM IST, Mon–Fri
+9:30 AM IST, Mon–Fri
   └── auto_trader.py
         1. Pull latest market data
         2. Run rule-based signal engine  →  CALL / PUT / NONE
@@ -202,7 +202,7 @@ python3 model_evolver.py      # first HPO run — takes 8–12 min, saves models
 bash setup_automation.sh      # sets up all cron jobs, tests API, runs dry-run
 ```
 
-This installs every scheduled job automatically: token renewer (every 5 min), health ping (8:50 AM), auto trader (9:15 AM), midday conviction (11 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), autoresearch loop (Saturday 11:30 PM), lot scanner (1st of month), log rotation (Sunday 2 AM).
+This installs every scheduled job automatically: token renewer (every 5 min), health ping (9:05 AM), auto trader (9:30 AM), midday conviction (11 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), autoresearch loop (Saturday 11:30 PM), lot scanner (1st of month), log rotation (Sunday 2 AM).
 
 ### 5. Verify
 
