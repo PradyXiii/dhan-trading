@@ -54,6 +54,7 @@ No human input needed during market hours.
 | `autoexperiment_bn.py` | Fast 252-day holdout evaluator; `--module ml_engine_paper` to eval paper model |
 | `autoexperiment_backtest.py` | Backtest evaluator for auto_trader.py constant changes |
 | `backfill_live_trades.py` | One-time / periodic utility — imports Dhan trade history into live_trades.csv |
+| `analyze_confidence.py` | Diagnostic tool — confidence buckets, VIX regime accuracy, feature importances; `--write-threshold` updates dynamic VIX filter |
 | `research_program_bn.md` | Autoresearch brief — defines what the AI agent may and may not change |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
 
@@ -186,6 +187,7 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/midday_checkpoints.csv` | Midday conviction snapshots — reversal detection, fed to model_evolver + autoloop |
 | `data/paper_performance.csv` | Daily live vs paper model scores — combined_advantage drives promotion streak |
 | `data/paper_changes.json` | Accumulated plain-English log of paper model improvements (reset on promotion) |
+| `data/vix_threshold.json` | Dynamic VIX trade filter — written nightly by analyze_confidence.py, read by auto_trader.py at startup |
 | `models/champion.pkl` | Best HPO model from last evolver run |
 | `models/champion_meta.json` | Model type, accuracy, feature list, trained_at |
 | `models/ensemble/*.pkl` | 4-model ensemble (rf/xgb/lgb/cat) for live voting |
@@ -264,6 +266,10 @@ python3 autoexperiment_bn.py --module ml_engine_paper  # evaluate paper model
 python3 autoloop_bn.py --dry-run             # test loop without calling Claude API
 python3 autoloop_bn.py --experiments 3       # run 3 live experiments
 python3 autoloop_bn.py                       # full 5-experiment nightly run
+
+# VIX trade filter
+python3 analyze_confidence.py                # diagnostic: confidence + VIX regime + importances
+python3 analyze_confidence.py --write-threshold  # recompute + save dynamic VIX threshold
 ```
 
 ---
