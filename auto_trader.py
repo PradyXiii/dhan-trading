@@ -244,9 +244,17 @@ RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
 ML_CONF_THRESHOLD = 0.55
 
 # ── VIX regime filter ─────────────────────────────────────────────────────────
-# Analysis of 252-day holdout: VIX<13 accuracy=46.7% (LOSING), VIX>18=62.9%.
-# Don't trade when India VIX is below this level — model is coin-flip or worse.
-VIX_MIN_TRADE = 13.0
+# Dynamically updated by analyze_confidence.py --write-threshold (called nightly
+# by autoloop_bn.py). As model accuracy improves, the threshold relaxes so we
+# trade on more days. Fallback: 13.0 (VIX<13 historically 46.7% accuracy).
+def _load_vix_threshold() -> float:
+    try:
+        with open(f"{DATA_DIR}/vix_threshold.json") as _f:
+            return float(json.load(_f).get("vix_min_trade", 13.0))
+    except Exception:
+        return 13.0
+
+VIX_MIN_TRADE = _load_vix_threshold()
 
 # ── Adaptive opening-wait parameters ─────────────────────────────────────────
 # Root cause of bad 9:30 fills: large BN spot gap → inflated IV at open.

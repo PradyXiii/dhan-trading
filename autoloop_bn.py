@@ -1275,6 +1275,27 @@ def main():
     else:
         print("[Evolver] No immediate changes — skipping.")
 
+    # ── Step 10: Update dynamic VIX threshold ────────────────────────────────
+    # analyze_confidence.py scans VIX buckets on the 252-day holdout and writes
+    # the lowest VIX level where accuracy >= 52% to data/vix_threshold.json.
+    # auto_trader.py reads this at startup — so as the model improves overnight,
+    # it automatically trades on more days.
+    print("[VIX Threshold] Recomputing dynamic trade threshold...")
+    try:
+        r = subprocess.run(
+            [sys.executable, "analyze_confidence.py", "--write-threshold"],
+            cwd=str(_HERE), capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode == 0:
+            # Print just the threshold line for the log
+            for line in r.stdout.splitlines():
+                if "VIX_MIN_TRADE" in line or "Written" in line:
+                    print(f"  {line.strip()}")
+        else:
+            print(f"[VIX Threshold] Failed: {r.stderr[:300]}")
+    except Exception as e:
+        print(f"[VIX Threshold] Error: {e}")
+
 
 if __name__ == "__main__":
     main()
