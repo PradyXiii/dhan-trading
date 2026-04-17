@@ -237,14 +237,17 @@ def compute_features(df):
     # to avoid training on data that leaks the same-day close into the label.
     _c    = d["bn_close"].shift(1)   # yesterday's BN close
     _c_nf = d["nf_close"].shift(1)   # yesterday's NF close
+    _vix  = d["vix_close"].shift(1)  # yesterday's India VIX — closes 3:30 PM IST, same session as label
+    _sp   = d["sp_close"].shift(1)   # yesterday's S&P — closes 1:30 AM IST, not known at 9:30 AM IST
+    _nk   = d["nk_close"].shift(1)   # yesterday's Nikkei — full-day close is noon IST, after trade entry
 
     # ── Core technicals ───────────────────────────────────────────────────────
     d["ema20"]      = _c.ewm(span=20, adjust=False).mean()
     d["rsi14"]      = _rsi(_c, 14)
     d["trend5"]     = (_c - _c.shift(5)) / _c.shift(5) * 100
-    d["vix_dir"]    = d["vix_close"] - d["vix_close"].shift(1)
-    d["sp500_chg"]  = (d["sp_close"] - d["sp_close"].shift(1)) / d["sp_close"].shift(1) * 100
-    d["nikkei_chg"] = (d["nk_close"] - d["nk_close"].shift(1)) / d["nk_close"].shift(1) * 100
+    d["vix_dir"]    = _vix - _vix.shift(1)
+    d["sp500_chg"]  = (_sp / _sp.shift(1) - 1) * 100
+    d["nikkei_chg"] = (_nk / _nk.shift(1) - 1) * 100
     d["spf_gap"]    = (d["spf_open"] - d["spf_close"].shift(1)) / d["spf_close"].shift(1) * 100
     bn_chg          = (_c / _c.shift(1) - 1) * 100
     nf_chg          = (_c_nf / _c_nf.shift(1) - 1) * 100
@@ -264,9 +267,9 @@ def compute_features(df):
 
     # ── Extended ML features ──────────────────────────────────────────────────
     d["ema20_pct"]    = (_c - d["ema20"]) / d["ema20"] * 100
-    d["vix_level"]    = d["vix_close"]
-    d["vix_pct_chg"]  = d["vix_dir"] / d["vix_close"].shift(1) * 100
-    d["vix_hv_ratio"] = d["vix_close"] / d["hv20"].replace(0, np.nan)
+    d["vix_level"]    = _vix
+    d["vix_pct_chg"]  = d["vix_dir"] / _vix.shift(1) * 100
+    d["vix_hv_ratio"] = _vix / d["hv20"].replace(0, np.nan)
     d["bn_ret1"]       = (_c / _c.shift(1) - 1) * 100
     d["bn_ret20"]      = (_c / _c.shift(20) - 1) * 100
     d["bn_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
@@ -279,8 +282,7 @@ def compute_features(df):
     # Positive = VIX opened higher (risk-off) → bearish for CALL.
     # This uses today's open, which IS known at 9:15 AM when the trade is placed.
     if "vix_open" in d.columns:
-        d["vix_open_chg"] = (d["vix_open"] - d["vix_close"].shift(1)) / \
-                             d["vix_close"].shift(1).replace(0, np.nan) * 100
+        d["vix_open_chg"] = (d["vix_open"] - _vix) / _vix.replace(0, np.nan) * 100
     else:
         d["vix_open_chg"] = 0.0
     d["vix_open_chg"] = d["vix_open_chg"].fillna(0.0)
@@ -303,15 +305,18 @@ def compute_features(df):
     #            from India → BN selling pressure.
     # us10y_chg: US 10Y yield change (bps-like). Rising yields → banks' cost
     #            of funds rises → HDFC/Kotak/SBI under pressure → BN PUT signal.
+    # All macro series settle on US/London hours — shift by 1 so training uses
+    # the same prior-day settlement that the live system sees at 9:30 AM IST.
     for _feat, _src, _mode in [("crude_ret",   "crude_close",  "pct"),
                                 ("dxy_ret",     "dxy_close",    "pct"),
                                 ("us10y_chg",   "us10y_close",  "diff"),
                                 ("usdinr_ret",  "usdinr_close", "pct")]:
         if _src in d.columns:
+            _s = d[_src].shift(1)   # yesterday's settlement
             if _mode == "pct":
-                d[_feat] = (d[_src] / d[_src].shift(1) - 1) * 100
+                d[_feat] = (_s / _s.shift(1) - 1) * 100
             else:
-                d[_feat] = d[_src].diff()
+                d[_feat] = _s.diff()
         else:
             d[_feat] = 0.0
         d[_feat] = d[_feat].fillna(0.0)
