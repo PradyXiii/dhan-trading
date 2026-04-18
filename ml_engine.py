@@ -308,9 +308,66 @@ def compute_features(df):
     # ── Short-term momentum ────────────────────────────────────────────────
     d["bn_ret5"]       = (_c / _c.shift(5) - 1) * 100
 
+    # ── ADX14 (Average Directional Index) ──────────────────────────────────
+    # Measures trend strength (0-100). High ADX = strong trend, directional signals reliable.
+    _ph_adx = d["bn_high"].shift(1)   # yesterday's high
+    _pl_adx = d["bn_low"].shift(1)    # yesterday's low
+    _plus_dm  = (_ph_adx - _ph_adx.shift(1)).clip(lower=0)
+    _minus_dm = (_pl_adx.shift(1) - _pl_adx).clip(lower=0)
+    # Zero out when the other DM is larger
+    _plus_dm  = np.where(_plus_dm > _minus_dm, _plus_dm, 0.0)
+    _minus_dm = np.where(pd.Series(_minus_dm) > pd.Series(_plus_dm), _minus_dm, 0.0)
+    _plus_dm  = pd.Series(_plus_dm, index=d.index)
+    _minus_dm = pd.Series(_minus_dm, index=d.index)
+    _tr = pd.concat([
+        (_ph_adx - _pl_adx).abs(),
+        (_ph_adx - _c.shift(1)).abs(),
+        (_pl_adx - _c.shift(1)).abs()
+    ], axis=1).max(axis=1)
+    _atr14    = _tr.ewm(span=14, adjust=False).mean()
+    _plus_di  = 100 * _plus_dm.ewm(span=14, adjust=False).mean() / _atr14.replace(0, np.nan)
+    _minus_di = 100 * _minus_dm.ewm(span=14, adjust=False).mean() / _atr14.replace(0, np.nan)
+    _dx       = ((_plus_di - _minus_di).abs() / (_plus_di + _minus_di).replace(0, np.nan) * 100).fillna(0)
+    d["adx14"] = _dx.ewm(span=14, adjust=False).mean()
+
+    # ── ADX-weighted trend interaction ─────────────────────────────────────
+    # When ADX is high (strong trend), trend5 direction is more predictive
+    d["adx_trend_interact"] = d["adx14"] * d["s_ema20"] / 100.0  # scaled
+    # ADX-weighted gap: strong trend + gap = likely continuation
+    d["adx_gap_interact"]   = d["adx14"] * d["bn_gap"] / 100.0
+
+    # ── VIX open direction at 9:15 AM ────────────────────────────────────────
+    # Moved here (before interaction features) so interactions can safely reference it.
+    if "vix_open" in d.columns:
+        d["vix_open_chg"] = (d["vix_open"] - _vix) / _vix.replace(0, np.nan) * 100
+    else:
+        d["vix_open_chg"] = 0.0
+    d["vix_open_chg"] = d["vix_open_chg"].fillna(0.0)
+
+    # ── Base features — ALL computed before interaction section ──────────────
+    # Moved here so any interaction feature (including autoloop-added ones) can
+    # safely reference vix_pct_chg, vix_hv_ratio, bn_ret1/20, dow, dte, etc.
+    d["vix_pct_chg"]   = d["vix_dir"] / _vix.shift(1) * 100
+    d["vix_hv_ratio"]  = _vix / d["hv20"].replace(0, np.nan)
+    d["bn_ret1"]        = (_c / _c.shift(1) - 1) * 100
+    d["bn_ret20"]       = (_c / _c.shift(20) - 1) * 100
+    d["bn_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
+    d["dow"]           = d["date"].dt.weekday
+    d["dte"]           = d["date"].apply(
+                             lambda x: get_dte(x.date() if hasattr(x, "date") else x))
+
     # ── Interaction features ───────────────────────────────────────────────
+    # NOTE FOR AUTOLOOP: add NEW features AFTER the final ADX block (line ~479),
+    # just before the return statement. Never insert in the middle of this section.
+
     # Gap-momentum alignment: gap in same direction as 5-day momentum → continuation
     d["gap_mom_align"]    = d["bn_gap"] * d["bn_ret5"]
+
+    # VIX-trend interaction: VIX falling + bullish trend = strong CALL signal
+    d["vix_trend_interact"] = d["vix_dir"] * d["s_ema20"]
+
+    # Prev-day body conviction aligned with short-term momentum
+    d["prev_body_momentum"] = d["prev_body_pct"] * d["bn_ret5"]
 
     # IV × SPF gap: when IV is high, global overnight signal is more decisive
     # iv_proxy is computed later, so we compute a local version here
@@ -323,25 +380,6 @@ def compute_features(df):
 
     # 52-week high regime × EMA trend: near highs + bullish EMA = strong CALL
     d["high52_ema_interact"] = d["bn_dist_high52"] * d["s_ema20"]
-
-    d["vix_pct_chg"]  = d["vix_dir"] / _vix.shift(1) * 100
-    d["vix_hv_ratio"] = _vix / d["hv20"].replace(0, np.nan)
-    d["bn_ret1"]       = (_c / _c.shift(1) - 1) * 100
-    d["bn_ret20"]      = (_c / _c.shift(20) - 1) * 100
-    d["bn_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
-    d["dow"]          = d["date"].dt.weekday
-    d["dte"]          = d["date"].apply(
-                            lambda x: get_dte(x.date() if hasattr(x, "date") else x))
-
-    # ── NEW: VIX open direction at 9:15 AM ───────────────────────────────────
-    # vix_open_chg: how much VIX gapped at open vs yesterday's close.
-    # Positive = VIX opened higher (risk-off) → bearish for CALL.
-    # This uses today's open, which IS known at 9:15 AM when the trade is placed.
-    if "vix_open" in d.columns:
-        d["vix_open_chg"] = (d["vix_open"] - _vix) / _vix.replace(0, np.nan) * 100
-    else:
-        d["vix_open_chg"] = 0.0
-    d["vix_open_chg"] = d["vix_open_chg"].fillna(0.0)
 
     # ── NEW: PCR momentum signals ─────────────────────────────────────────────
     # pcr_ma5: 5-day smoothed PCR. Trend in sentiment is more reliable than
@@ -448,6 +486,10 @@ def compute_features(df):
     # Two consecutive strong rule_score days = sustained institutional momentum.
     d["rule_score_lag1"] = d["rule_score"].shift(1).fillna(0.0)
 
+    # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
+    # All features above are already computed. Adding code here means you can safely
+    # reference ANY column that exists earlier in this function without KeyError.
+
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "bn_nf_div","hv20","bn_gap","vix_pct_chg","vix_hv_ratio","bn_ret20"]
     return d.dropna(subset=req)
@@ -486,6 +528,17 @@ FEATURE_COLS = [
     "gap_mom_align",        # bn_gap × bn_ret5 — gap aligned with momentum
     "iv_spf_interaction",   # iv_proxy × spf_gap — IV amplifies global signal
     "high52_ema_interact",  # dist_high52 × s_ema20 — regime × trend
+    # VIX-trend interaction
+    "vix_trend_interact",   # vix_dir × s_ema20 — VIX decline + bullish trend
+    # Prev-day conviction × momentum
+    "prev_body_momentum",   # prev_body_pct × bn_ret5 — candle conviction + momentum
+    # Options/flow features (already computed)
+    "pcr_ma5",              # 5-day smoothed put-call ratio
+    "fii_net_cash_z",       # z-scored FII net cash flow
+    # ADX-based features (trend strength)
+    "adx14",                # trend strength 0-100
+    "adx_trend_interact",   # ADX × s_ema20 — strong trend amplifies direction
+    "adx_gap_interact",     # ADX × bn_gap — strong trend + gap = continuation
 ]
 
 
@@ -1094,14 +1147,13 @@ def predict_today():
             p_call    = sum(pcalls) / len(pcalls)   # avg across ensemble
             p_put     = 1.0 - p_call
             ml_trained = True
-            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB", "cat": "CAT"}
+            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB"}
             vote_str = "  ".join(
                 f"{names.get(m[1]['model_type'], '?')}:{v}"
                 for m, v in zip(ensemble_members, votes)
             )
             print(f"  Ensemble ({len(votes)} models, trained {(ensemble_trained_at or '')[:10]}):")
-            n_models = len(votes)
-            print(f"  {vote_str}  →  {call_v}/{n_models} CALL  {put_v}/{n_models} PUT")
+            print(f"  {vote_str}  →  {call_v}/3 CALL  {put_v}/3 PUT")
             print(f"  → {ml_signal}  (avg agreed conf {ml_conf:.1%})")
 
     # ── Fast path B: single champion model (fallback if ensemble not ready) ───
