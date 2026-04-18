@@ -528,6 +528,50 @@ def _extract_section(content: str, section: str, lines_after: int = 80) -> str:
     return content[:3000]
 
 
+def _build_column_inventory() -> str:
+    """Run load_all_data + compute_features and return a plain inventory of
+    column names Claude can safely reference. Anything NOT in this list must
+    be computed explicitly inside compute_features() before being referenced.
+
+    This stops Claude from hallucinating column names like `iv_proxy` or
+    `adx14` and wasting an experiment on a pre-flight failure.
+    """
+    try:
+        import importlib, sys as _sys
+        _MOD = "_ml_inventory_"
+        if _MOD in _sys.modules:
+            del _sys.modules[_MOD]
+        import importlib.util
+        src = _PAPER_FILE if _PAPER_FILE.exists() else (_HERE / "ml_engine.py")
+        spec = importlib.util.spec_from_file_location(_MOD, src)
+        mod  = importlib.util.module_from_spec(spec)
+        _sys.modules[_MOD] = mod
+        spec.loader.exec_module(mod)
+
+        raw  = mod.load_all_data()
+        feat = mod.compute_features(raw)
+        raw_cols  = sorted(c for c in raw.columns if c != "date")
+        feat_cols = sorted(c for c in feat.columns
+                           if c != "date" and c not in raw.columns)
+        del _sys.modules[_MOD]
+
+        return (
+            "Columns available in the raw dataframe `d` at the START of "
+            "compute_features (from load_all_data):\n"
+            f"  {', '.join(raw_cols)}\n\n"
+            "Columns added by the current compute_features() (available to "
+            "reference AFTER each is assigned):\n"
+            f"  {', '.join(feat_cols)}\n\n"
+            "⚠️ Any column name NOT in either list above does NOT exist and "
+            "MUST be computed inside compute_features() BEFORE you reference "
+            "it in an interaction or in FEATURE_COLS. Hallucinating column "
+            "names (e.g. `iv_proxy`, `adx14` that aren't already here) will "
+            "crash the pre-flight check and waste the experiment."
+        )
+    except Exception as e:
+        return f"(column inventory unavailable: {type(e).__name__}: {e})"
+
+
 def _build_context_snippet(use_paper: bool = False) -> str:
     """Build code snippets for Claude. use_paper=True shows paper model state."""
     ml_source = "ml_engine_paper.py" if (use_paper and _PAPER_FILE.exists()) else "ml_engine.py"
@@ -646,6 +690,8 @@ def _call_claude(
     user_message = (
         f"### Current code snippets (experiment {experiment_number}/{total_experiments})\n\n"
         + code_context
+        + "\n\n### Column inventory (what actually exists right now)\n"
+        + _build_column_inventory()
         + "\n\n"
         + log_str
         + _reversal_summary()
