@@ -935,7 +935,13 @@ def main():
         print(f"  Only {n_live} labeled live trades — using holdout only (need {MIN_LIVE_FOR_MIX}+)")
 
     # Log today's performance (with live eval data)
-    if not args.dry_run:
+    # Skip if paper == live on holdout — models are identical after a promotion,
+    # and the live-eval gap (historical oracle_correct vs current model) is a
+    # frozen artifact that would otherwise trigger infinite re-promotions.
+    models_identical = abs(b_paper - b_live) < 0.0001
+    if models_identical:
+        print("[Paper] Paper = Live (models identical after promotion) — skipping streak log.")
+    elif not args.dry_run:
         _log_paper_performance(date_str, b_live, b_paper, live_eval)
 
     # ── Step 3: Check paper promotion ─────────────────────────────────────────
