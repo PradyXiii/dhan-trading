@@ -304,6 +304,26 @@ def compute_features(df):
     #   Near 0 = at all-time-high territory → strong bull momentum.
     #   Very negative = deep correction → potential mean-reversion.
     d["bn_dist_high52"]  = (_c / _c.rolling(252, min_periods=60).max() - 1) * 100
+
+    # ── Short-term momentum ────────────────────────────────────────────────
+    d["bn_ret5"]       = (_c / _c.shift(5) - 1) * 100
+
+    # ── Interaction features ───────────────────────────────────────────────
+    # Gap-momentum alignment: gap in same direction as 5-day momentum → continuation
+    d["gap_mom_align"]    = d["bn_gap"] * d["bn_ret5"]
+
+    # IV × SPF gap: when IV is high, global overnight signal is more decisive
+    # iv_proxy is computed later, so we compute a local version here
+    _call_p = d.get("call_premium", pd.Series(np.nan, index=d.index))
+    _put_p  = d.get("put_premium", pd.Series(np.nan, index=d.index))
+    _straddle = _call_p + _put_p
+    _straddle_ma = _straddle.shift(1).rolling(20, min_periods=5).mean()
+    _iv_local = ((_straddle - _straddle_ma) / _straddle_ma.replace(0, np.nan)).fillna(0.0)
+    d["iv_spf_interaction"] = _iv_local * d["spf_gap"]
+
+    # 52-week high regime × EMA trend: near highs + bullish EMA = strong CALL
+    d["high52_ema_interact"] = d["bn_dist_high52"] * d["s_ema20"]
+
     d["vix_pct_chg"]  = d["vix_dir"] / _vix.shift(1) * 100
     d["vix_hv_ratio"] = _vix / d["hv20"].replace(0, np.nan)
     d["bn_ret1"]       = (_c / _c.shift(1) - 1) * 100
@@ -443,21 +463,14 @@ FEATURE_COLS = [
     "rsi14", "hv20", "bn_gap", "adx14",
     # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
-    # Macro drivers (crude → inflation risk; DXY → FII outflows; US10Y → bank cost of funds)
-    # usdinr_ret: rupee weakness directly triggers FII outflows from India
-    "crude_ret", "dxy_ret", "us10y_chg", "usdinr_ret",
     # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
     # Momentum & drawdown
     "bn_ret1", "bn_ret20", "bn_dist_high20",
     # Calendar
     "dow", "dte",
-    # Options market sentiment
-    "pcr", "pcr_ma5", "pcr_chg",
     # VIX opening direction at 9:15 AM (risk-off/on signal at trade entry)
     "vix_open_chg",
-    # FII institutional flow (z-scored, previous day — no lookahead)
-    "fii_net_cash_z",
     # Real options market signals (ATM open prices, known at 9:30 AM)
     "put_call_skew",        # put/call premium ratio — market's directional bias
     "iv_proxy",             # z-scored IV level — high IV = wider intraday range expected
@@ -468,6 +481,11 @@ FEATURE_COLS = [
     # Medium/long-term trend regime
     "bn_ret60",        # 3-month return — bull vs bear phase
     "bn_dist_high52",  # % below 52-week high — momentum / overbought signal
+    # Interaction features
+    "bn_ret5",              # 5-day momentum — short-term trend
+    "gap_mom_align",        # bn_gap × bn_ret5 — gap aligned with momentum
+    "iv_spf_interaction",   # iv_proxy × spf_gap — IV amplifies global signal
+    "high52_ema_interact",  # dist_high52 × s_ema20 — regime × trend
 ]
 
 
