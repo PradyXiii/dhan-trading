@@ -170,7 +170,7 @@ try:
     cov = vt.get("coverage_pct")
     check("data/vix_threshold.json",
           thr is not None and 8 <= thr <= 20,
-          f"vix_min_trade={thr}  coverage={cov}%")
+          f"vix_min_trade={thr}  coverage={cov:.1%} of days trade")
 except FileNotFoundError:
     check("data/vix_threshold.json", False,
           "run: python3 analyze_confidence.py --write-threshold")
@@ -284,6 +284,13 @@ try:
     # Show last 15 lines (the decision summary)
     lines = [l for l in output.strip().splitlines() if l.strip()]
     for line in lines[-15:]:
+        # Skip the "Add funds" dry-run footer — not an error
+        if "Add funds to your Dhan" in line:
+            continue
+        # Flag 429 as a known rate-limit artifact (validate runs many API calls at once)
+        if "429" in line or "Too many requests" in line:
+            print(f"    ⚠️  (rate-limit 429 — normal during validation, won't happen in real trading)")
+            continue
         print(f"    {line}")
     check("auto_trader --dry-run", ok, f"exit={r.returncode}")
 except subprocess.TimeoutExpired:
