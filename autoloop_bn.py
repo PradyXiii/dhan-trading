@@ -352,8 +352,12 @@ def _log_paper_change(description: str, plain_english: str, score_before: float,
 
 
 def _clear_paper_changes() -> None:
-    """Reset paper changes after promotion."""
+    """Reset paper changes and performance streak after promotion."""
     _PAPER_CHANGES.write_text("[]")
+    # Also clear the performance streak so the system doesn't re-promote
+    # on the next run (files are identical post-promotion, nothing to commit).
+    if _PAPER_PERF_CSV.exists():
+        _PAPER_PERF_CSV.unlink()
 
 
 def _promote_paper_to_live(streak: int, avg_advantage: float) -> None:
