@@ -722,49 +722,42 @@ def _call_claude(
 # ── Pre-flight validator ──────────────────────────────────────────────────────
 
 def _preflight_feature_check(paper_file: Path) -> list[str]:
-    """Scan paper file for FEATURE_COLS entries added by the experiment but missing
-    a df[col]= assignment in compute_features().
+    """Dynamically import the paper model, run compute_features() on real data,
+    and verify every FEATURE_COLS entry is present in the output.
 
-    Only checks NEWLY added columns (paper FEATURE_COLS minus live FEATURE_COLS) to
-    avoid false positives for features loaded from data rather than computed.
+    Catches ALL crash patterns:
+      - Feature in FEATURE_COLS but never computed        (new-feature omission)
+      - Feature removed from compute_features but still   (existing-feature deletion)
+        referenced in FEATURE_COLS
+      - SyntaxError / import error in the patched file
+      - Any KeyError / ZeroDivision inside compute_features
+
+    Much more reliable than the old regex approach (~5-8s, vs 5 min for full eval).
     """
-    import re
+    _MOD = "_ml_paper_preflight_"
+    if _MOD in sys.modules:
+        del sys.modules[_MOD]
 
-    def _extract_feature_cols(path: Path) -> set:
-        try:
-            content = path.read_text(encoding="utf-8")
-            m = re.search(r"FEATURE_COLS\s*=\s*\[([^\]]+)\]", content, re.DOTALL)
-            if not m:
-                return set()
-            return set(re.findall(r'["\']([^"\']+)["\']', m.group(1)))
-        except Exception:
-            return set()
-
-    live_cols = _extract_feature_cols(_HERE / "ml_engine.py")
     try:
-        paper_content = paper_file.read_text(encoding="utf-8")
-    except Exception:
-        return []
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(_MOD, paper_file)
+        mod  = importlib.util.module_from_spec(spec)
+        sys.modules[_MOD] = mod          # register before exec so self-refs work
+        spec.loader.exec_module(mod)     # SyntaxError surfaces here
 
-    m = re.search(r"FEATURE_COLS\s*=\s*\[([^\]]+)\]", paper_content, re.DOTALL)
-    if not m:
-        return []
-    paper_cols = set(re.findall(r'["\']([^"\']+)["\']', m.group(1)))
+        df_raw  = mod.load_all_data()
+        df_feat = mod.compute_features(df_raw)
 
-    new_cols = paper_cols - live_cols
-    if not new_cols:
-        return []
+        missing = [c for c in mod.FEATURE_COLS if c not in df_feat.columns]
+        return missing
 
-    # Extract compute_features body — check assignment within it, variable-name-agnostic
-    # (BN uses d["col"] = ..., MCX uses df["col"] = ..., both caught by ["col"] = pattern)
-    cf_match = re.search(r'(def compute_features.*?)(?=\ndef |\Z)', paper_content, re.DOTALL)
-    cf_body = cf_match.group(1) if cf_match else paper_content
-
-    missing = []
-    for col in new_cols:
-        if not re.search(r'\[["\']' + re.escape(col) + r'["\']\]\s*=', cf_body):
-            missing.append(col)
-    return missing
+    except SyntaxError as e:
+        return [f"SyntaxError: {e}"]
+    except Exception as e:
+        return [f"{type(e).__name__}: {e}"]
+    finally:
+        if _MOD in sys.modules:
+            del sys.modules[_MOD]
 
 
 # ── Change applicator ─────────────────────────────────────────────────────────
@@ -1052,9 +1045,10 @@ def main():
                     "kept": False,
                 })
                 _send(
-                    f"⚠️ <b>Idea #{i} of {n_experiments} — incomplete change</b>\n\n"
+                    f"⚠️ <b>Idea #{i} of {n_experiments} — pre-flight failed</b>\n\n"
                     f"💡 {plain_eng}\n\n"
-                    f"Feature added to FEATURE_COLS but not computed. Moving on."
+                    f"Problem: <code>{', '.join(uncomputed[:3])}</code>\n"
+                    f"Reverted. Moving on."
                 )
                 continue
 
