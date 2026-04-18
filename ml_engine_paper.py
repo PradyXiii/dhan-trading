@@ -308,6 +308,34 @@ def compute_features(df):
     # ── Short-term momentum ────────────────────────────────────────────────
     d["bn_ret5"]       = (_c / _c.shift(5) - 1) * 100
 
+    # ── ADX14 (Average Directional Index) ──────────────────────────────────
+    # Measures trend strength (0-100). High ADX = strong trend, directional signals reliable.
+    _ph_adx = d["bn_high"].shift(1)   # yesterday's high
+    _pl_adx = d["bn_low"].shift(1)    # yesterday's low
+    _plus_dm  = (_ph_adx - _ph_adx.shift(1)).clip(lower=0)
+    _minus_dm = (_pl_adx.shift(1) - _pl_adx).clip(lower=0)
+    # Zero out when the other DM is larger
+    _plus_dm  = np.where(_plus_dm > _minus_dm, _plus_dm, 0.0)
+    _minus_dm = np.where(pd.Series(_minus_dm) > pd.Series(_plus_dm), _minus_dm, 0.0)
+    _plus_dm  = pd.Series(_plus_dm, index=d.index)
+    _minus_dm = pd.Series(_minus_dm, index=d.index)
+    _tr = pd.concat([
+        (_ph_adx - _pl_adx).abs(),
+        (_ph_adx - _c.shift(1)).abs(),
+        (_pl_adx - _c.shift(1)).abs()
+    ], axis=1).max(axis=1)
+    _atr14    = _tr.ewm(span=14, adjust=False).mean()
+    _plus_di  = 100 * _plus_dm.ewm(span=14, adjust=False).mean() / _atr14.replace(0, np.nan)
+    _minus_di = 100 * _minus_dm.ewm(span=14, adjust=False).mean() / _atr14.replace(0, np.nan)
+    _dx       = ((_plus_di - _minus_di).abs() / (_plus_di + _minus_di).replace(0, np.nan) * 100).fillna(0)
+    d["adx14"] = _dx.ewm(span=14, adjust=False).mean()
+
+    # ── ADX-weighted trend interaction ─────────────────────────────────────
+    # When ADX is high (strong trend), trend5 direction is more predictive
+    d["adx_trend_interact"] = d["adx14"] * d["s_ema20"] / 100.0  # scaled
+    # ADX-weighted gap: strong trend + gap = likely continuation
+    d["adx_gap_interact"]   = d["adx14"] * d["bn_gap"] / 100.0
+
     # ── Interaction features ───────────────────────────────────────────────
     # Gap-momentum alignment: gap in same direction as 5-day momentum → continuation
     d["gap_mom_align"]    = d["bn_gap"] * d["bn_ret5"]
@@ -499,6 +527,10 @@ FEATURE_COLS = [
     # Options/flow features (already computed)
     "pcr_ma5",              # 5-day smoothed put-call ratio
     "fii_net_cash_z",       # z-scored FII net cash flow
+    # ADX-based features (trend strength)
+    "adx14",                # trend strength 0-100
+    "adx_trend_interact",   # ADX × s_ema20 — strong trend amplifies direction
+    "adx_gap_interact",     # ADX × bn_gap — strong trend + gap = continuation
 ]
 
 
