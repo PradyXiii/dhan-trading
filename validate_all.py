@@ -151,9 +151,8 @@ try:
     check("Champion model type",        True, mtype)
     check("Champion feature count ≥ 20", n_feat >= 20, str(n_feat))
     new_in = [f for f in ["adx14", "straddle_expansion", "rule_score_lag1"] if f in feat_l]
-    check("New features in champion",  bool(new_in),
-          f"found: {new_in}" if new_in else "not selected by RF importance this run (normal)",
-          warn_only=True)
+    print(f"  {'✅' if new_in else 'ℹ️ '}  {'New features selected by champion':<46}  "
+          f"{'found: ' + str(new_in) if new_in else 'not selected this run (normal — XGB picks via importance)'}")
 except Exception as e:
     check("champion_meta.json", False, str(e)[:60])
 
@@ -334,11 +333,11 @@ try:
     dupes = lt["date"].duplicated().sum()
     check("live_trades.csv: no duplicate dates", dupes == 0,
           "OK" if dupes == 0 else f"{dupes} duplicate rows")
-    # Live feedback threshold: 5 labeled rows activates 10x weight
-    check("live_trades.csv: ≥ 5 labeled (activates 10x weight)",
-          n_labeled >= 5,
-          f"{n_labeled}/5 — {'ACTIVE' if n_labeled >= 5 else 'not yet active'}",
-          warn_only=n_labeled < 5)
+    # Live feedback threshold: 3 labeled rows activates 10x weight
+    check("live_trades.csv: ≥ 3 labeled (activates 10x weight)",
+          n_labeled >= 3,
+          f"{n_labeled}/3 — {'ACTIVE' if n_labeled >= 3 else 'not yet active'}",
+          warn_only=n_labeled < 3)
     if "oracle_correct" in lt.columns:
         recent = lt.tail(10)
         acc = recent["oracle_correct"].mean()

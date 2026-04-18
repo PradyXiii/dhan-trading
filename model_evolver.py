@@ -323,7 +323,7 @@ MIDDAY_CHECKPOINTS  = f"{DATA_DIR}/midday_checkpoints.csv"
 LIVE_INJECT_WEIGHT  = 10.0  # live trade rows are 10× more valuable than synthetic labels
 MIDDAY_MISS_WEIGHT  = 5.0   # midday reversal rows: confirmed wrong direction mid-session
 MISS_BOOST          = 3.0   # historical rows matching miss patterns get 3× weight
-MIN_LIVE_TRADES     = 5     # minimum labeled trades before feedback kicks in
+MIN_LIVE_TRADES     = 3     # minimum labeled trades before feedback kicks in
 MIN_MISSES          = 2     # minimum misses before boosting historical rows
 
 
