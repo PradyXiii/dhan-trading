@@ -344,6 +344,18 @@ def compute_features(df):
         d["vix_open_chg"] = 0.0
     d["vix_open_chg"] = d["vix_open_chg"].fillna(0.0)
 
+    # ── Base features — ALL computed before interaction section ──────────────
+    # Moved here so any interaction feature (including autoloop-added ones) can
+    # safely reference vix_pct_chg, vix_hv_ratio, bn_ret1/20, dow, dte, etc.
+    d["vix_pct_chg"]   = d["vix_dir"] / _vix.shift(1) * 100
+    d["vix_hv_ratio"]  = _vix / d["hv20"].replace(0, np.nan)
+    d["bn_ret1"]        = (_c / _c.shift(1) - 1) * 100
+    d["bn_ret20"]       = (_c / _c.shift(20) - 1) * 100
+    d["bn_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
+    d["dow"]           = d["date"].dt.weekday
+    d["dte"]           = d["date"].apply(
+                             lambda x: get_dte(x.date() if hasattr(x, "date") else x))
+
     # ── Interaction features ───────────────────────────────────────────────
     # NOTE FOR AUTOLOOP: add NEW features AFTER the final ADX block (line ~479),
     # just before the return statement. Never insert in the middle of this section.
@@ -368,15 +380,6 @@ def compute_features(df):
 
     # 52-week high regime × EMA trend: near highs + bullish EMA = strong CALL
     d["high52_ema_interact"] = d["bn_dist_high52"] * d["s_ema20"]
-
-    d["vix_pct_chg"]  = d["vix_dir"] / _vix.shift(1) * 100
-    d["vix_hv_ratio"] = _vix / d["hv20"].replace(0, np.nan)
-    d["bn_ret1"]       = (_c / _c.shift(1) - 1) * 100
-    d["bn_ret20"]      = (_c / _c.shift(20) - 1) * 100
-    d["bn_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
-    d["dow"]          = d["date"].dt.weekday
-    d["dte"]          = d["date"].apply(
-                            lambda x: get_dte(x.date() if hasattr(x, "date") else x))
 
     # ── NEW: PCR momentum signals ─────────────────────────────────────────────
     # pcr_ma5: 5-day smoothed PCR. Trend in sentiment is more reliable than
