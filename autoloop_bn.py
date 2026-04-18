@@ -71,11 +71,17 @@ def _send(message: str) -> bool:
 # ── Git helpers ───────────────────────────────────────────────────────────────
 
 def _git(*args: str) -> tuple[int, str]:
+    # GIT_TERMINAL_PROMPT=0 makes git fail fast instead of blocking on a
+    # credential prompt — critical for autoloop which runs unattended and
+    # would otherwise hang on `git push` when no PAT/SSH key is configured.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     result = subprocess.run(
         ["git", *args],
         cwd=str(_HERE),
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
     )
     return result.returncode, (result.stdout + result.stderr).strip()
 
