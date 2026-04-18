@@ -3,24 +3,24 @@
 autoexperiment_bn.py — Fast single-experiment metric runner for BN autoresearch.
 
 Imports ml_engine.py so any code changes there take effect immediately.
-Trains a fixed-param classifier on all data except the last 252 days,
-evaluates on the holdout, and prints composite score as a single JSON line.
+Trains all 4 fixed-param classifiers (CatBoost, XGBoost, LightGBM, RandomForest),
+combines their predictions via majority vote (exactly as production does), and
+prints composite score as a single JSON line.
 
-Model selection: reads models/champion_meta.json and trains a fresh model of
-the SAME family (CatBoost / XGBoost / LightGBM / RandomForest) with fixed
-deterministic params. This keeps research aligned with production — a feature
-that helps the live champion is kept; one that only helps RF is discarded.
-Falls back to RandomForest if champion_meta is missing.
+This mirrors the live ensemble: a feature that only helps RF but not the
+other 3 models will show no improvement in ensemble vote, and gets discarded.
 
-No Optuna, no HPO — deterministic. Runtime: ~15–60 seconds depending on model.
+No Optuna, no HPO — deterministic. Runtime: ~30–90 seconds for all 4 models.
 
 Usage:
     python3 autoexperiment_bn.py
-    → {"composite": 0.734, "pnl_proxy": 0.68, "n_val": 252, "n_train": 1423, "model": "CatBoost"}
+    → {"composite": 0.734, "pnl_proxy": 0.68, "n_val": 252, "n_train": 1423,
+       "model": "Ensemble(CAT+XGB+LGB+RF)", "scores": {"CatBoost": 0.71, ...}}
 
 Used by: autoloop_bn.py (reads stdout, parses JSON)
 """
 
+import argparse
 import argparse
 import importlib
 import json
@@ -28,65 +28,58 @@ import sys
 import os
 import warnings
 
+import numpy as np
+
 warnings.filterwarnings("ignore")
 os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 
 HOLDOUT_DAYS = 252  # ~1 year temporal holdout — must match model_evolver.py
 
 
-def _build_eval_model():
-    """Return (model, name) — match current champion type for research↔production alignment.
-
-    Reads models/champion_meta.json. Falls back to RF if meta is missing or
-    the required package isn't installed. All models use fixed deterministic
-    params (random_state=42) so experiment-to-experiment scores are comparable.
+def _build_all_models() -> list[tuple]:
+    """Return list of (model, name) for all 4 model families with fixed deterministic params.
+    Skips any package that isn't installed. Always includes RandomForest as fallback.
     """
     from sklearn.ensemble import RandomForestClassifier
+    models = []
 
     try:
-        with open("models/champion_meta.json") as f:
-            champ = json.load(f).get("model_type", "").lower()
-    except Exception:
-        champ = ""
+        from catboost import CatBoostClassifier
+        models.append((CatBoostClassifier(
+            iterations=300, depth=6, learning_rate=0.05,
+            l2_leaf_reg=3.0, random_seed=42, thread_count=-1,
+            auto_class_weights="Balanced", verbose=False,
+        ), "CatBoost"))
+    except ImportError:
+        pass
 
-    if "cat" in champ:
-        try:
-            from catboost import CatBoostClassifier
-            return CatBoostClassifier(
-                iterations=300, depth=6, learning_rate=0.05,
-                l2_leaf_reg=3.0, random_seed=42, thread_count=-1,
-                auto_class_weights="Balanced", verbose=False,
-            ), "CatBoost"
-        except ImportError:
-            pass
+    try:
+        from xgboost import XGBClassifier
+        models.append((XGBClassifier(
+            n_estimators=300, max_depth=6, learning_rate=0.05,
+            reg_lambda=1.0, random_state=42, n_jobs=-1,
+            tree_method="hist", eval_metric="logloss",
+        ), "XGBoost"))
+    except ImportError:
+        pass
 
-    if "xgb" in champ or "xgboost" in champ:
-        try:
-            from xgboost import XGBClassifier
-            return XGBClassifier(
-                n_estimators=300, max_depth=6, learning_rate=0.05,
-                reg_lambda=1.0, random_state=42, n_jobs=-1,
-                tree_method="hist", eval_metric="logloss",
-            ), "XGBoost"
-        except ImportError:
-            pass
+    try:
+        from lightgbm import LGBMClassifier
+        models.append((LGBMClassifier(
+            n_estimators=300, max_depth=6, learning_rate=0.05,
+            num_leaves=31, random_state=42, n_jobs=-1,
+            class_weight="balanced", verbose=-1,
+        ), "LightGBM"))
+    except ImportError:
+        pass
 
-    if "lgb" in champ or "light" in champ:
-        try:
-            from lightgbm import LGBMClassifier
-            return LGBMClassifier(
-                n_estimators=300, max_depth=6, learning_rate=0.05,
-                num_leaves=31, random_state=42, n_jobs=-1,
-                class_weight="balanced", verbose=-1,
-            ), "LightGBM"
-        except ImportError:
-            pass
-
-    return RandomForestClassifier(
+    models.append((RandomForestClassifier(
         n_estimators=200, max_depth=8, min_samples_leaf=3,
         max_features="sqrt", class_weight="balanced",
         random_state=42, n_jobs=-1,
-    ), "RandomForest"
+    ), "RandomForest"))
+
+    return models
 
 
 def _composite(y_true, y_pred) -> float:
@@ -161,7 +154,6 @@ def run():
     # ── Leakage guard: reject any feature with absurd |corr| with the label ──
     # The label depends on today's close-open sign, so same-day close/high/low
     # features can leak. Compute on TRAIN only so holdout stays untouched.
-    import numpy as np
     leaks = []
     for i, col in enumerate(feat_cols):
         x = X_train[:, i]
@@ -177,25 +169,34 @@ def run():
         }))
         sys.exit(1)
 
-    # ── Model: match current champion so research aligns with production ─────
-    # Reads models/champion_meta.json → uses same model family (CatBoost/XGB/LGB/RF)
-    # with deterministic fixed params. If a feature helps the live champion, keep
-    # it; if it only helps RF but not the ensemble, discard. Falls back to RF if
-    # champion_meta is missing or the required package isn't installed.
-    model, model_name = _build_eval_model()
-    model.fit(X_train, y_train)
-    y_pred       = model.predict(X_val)
-    y_train_pred = model.predict(X_train)
+    # ── Ensemble: train all 4 models, combine via majority vote ──────────────
+    # Mirrors production exactly: all 4 models vote, majority wins.
+    # A feature that only helps RF but not the other 3 won't move the ensemble
+    # composite — so the autoloop correctly discards it.
+    all_models = _build_all_models()
+    val_preds   = []   # shape: (n_models, n_val)
+    train_preds = []
+    individual_scores = {}
+
+    for model, name in all_models:
+        model.fit(X_train, y_train)
+        vp = model.predict(X_val)
+        tp = model.predict(X_train)
+        val_preds.append(vp)
+        train_preds.append(tp)
+        individual_scores[name] = _composite(y_val, vp)
+
+    # Majority vote (ties go to 1 = CALL, matching production tie-break)
+    val_votes   = np.array(val_preds)    # (n_models, n_val)
+    train_votes = np.array(train_preds)
+    y_pred       = (val_votes.sum(axis=0) >= len(all_models) / 2).astype(int)
+    y_train_pred = (train_votes.sum(axis=0) >= len(all_models) / 2).astype(int)
 
     composite       = _composite(y_val, y_pred)
     train_composite = _composite(y_train, y_train_pred)
+    model_name      = f"Ensemble({'|'.join(n for _, n in all_models)})"
 
     # ── Leakage guard ────────────────────────────────────────────────────────
-    # True leakage: model peeks at same-day close/high/low that don't exist
-    # at 9:30 AM entry. Signature: BOTH train AND holdout are anomalously high
-    # (leaky features inflate BOTH splits since holdout is also historical data).
-    # Pure overfitting: train high, holdout near-random (0.50-0.55). That is NOT
-    # leakage — it just means features are weak; the autoloop discards it anyway.
     leak_reason = None
     if composite > 0.90:
         leak_reason = (
@@ -208,7 +209,6 @@ def run():
         leak_reason = (
             f"train composite {train_composite:.4f} exceeds cap 0.98 "
             f"with holdout {composite:.4f} > 0.70 — "
-            f"RF memorising leaked signal. "
             "Find the feature missing .shift(1) before rolling/pct_change/ewm."
         )
     if leak_reason:
@@ -223,6 +223,7 @@ def run():
         "n_val":     int(len(y_val)),
         "n_train":   int(len(y_train)),
         "model":     model_name,
+        "scores":    {k: round(v, 4) for k, v in individual_scores.items()},
     }))
 
 
