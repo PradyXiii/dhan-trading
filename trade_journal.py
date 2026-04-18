@@ -82,7 +82,7 @@ def _load_intent():
 def _get_tradebook():
     """Fetch today's tradebook from Dhan. Returns list of trades or []."""
     try:
-        resp = requests.get("https://api.dhan.co/v2/tradebook",
+        resp = requests.get("https://api.dhan.co/v2/trades",
                             headers=HEADERS, timeout=10)
     except Exception as e:
         notify.log(f"Tradebook API unreachable: {e}")
