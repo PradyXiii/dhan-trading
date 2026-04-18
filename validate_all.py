@@ -285,7 +285,7 @@ try:
     lines = [l for l in output.strip().splitlines() if l.strip()]
     for line in lines[-15:]:
         # Skip the "Add funds" dry-run footer — not an error
-        if "Add funds to your Dhan" in line:
+        if "Add funds" in line:
             continue
         # Flag 429 as a known rate-limit artifact (validate runs many API calls at once)
         if "429" in line or "Too many requests" in line:
