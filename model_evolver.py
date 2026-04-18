@@ -1108,7 +1108,8 @@ def main():
         today_signal = "CALL" if call_v >= put_v else "PUT"
         agreed_confs = [c for v, c in zip(votes, confs) if v == today_signal]
         today_conf   = sum(agreed_confs) / len(agreed_confs) if agreed_confs else 0.5
-        print(f"  Ensemble tomorrow: {call_v}/3 CALL  {put_v}/3 PUT → {today_signal}  "
+        n_models = len(votes)
+        print(f"  Ensemble tomorrow: {call_v}/{n_models} CALL  {put_v}/{n_models} PUT → {today_signal}  "
               f"(avg conf {today_conf:.1%})")
     else:
         # Fallback to single champion for tomorrow preview
