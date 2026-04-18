@@ -485,9 +485,11 @@ except Exception as e:
 try:
     r = subprocess.run(["git", "status", "--short"],
                        capture_output=True, text=True)
+    # Only flag M (modified) or D (deleted) — not ?? (untracked, can't affect live code)
     dirty = [l for l in r.stdout.splitlines()
-             if any(f in l for f in ["ml_engine", "auto_trader", "model_evolver",
-                                     "autoloop_bn", "trade_journal", "midday_conviction"])]
+             if not l.startswith("??") and
+             any(f in l for f in ["ml_engine", "auto_trader", "model_evolver",
+                                  "autoloop_bn", "trade_journal", "midday_conviction"])]
     check("No uncommitted changes to key files", not dirty,
           "clean" if not dirty else f"uncommitted: {', '.join(dirty)}")
 except Exception as e:
