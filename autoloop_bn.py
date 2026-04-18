@@ -1276,6 +1276,16 @@ def main():
     print(f"  Live score:  {b_live:.4f} → {best_live:.4f}")
     print(f"{'='*60}\n")
 
+    # Push any local commits from this run (paper experiments, promotion, etc.)
+    # so GitHub mirrors the VM. Non-interactive: fails fast if auth isn't set up.
+    if not args.dry_run and (kept_paper_count + kept_immediate_count) > 0:
+        branch = _current_branch()
+        rc, out = _git("push", "origin", branch)
+        if rc == 0:
+            print(f"[Git] Pushed new commits to origin/{branch}.")
+        else:
+            print(f"[Git] Push skipped/failed (not fatal): {out.splitlines()[0] if out else 'no output'}")
+
     kept_total = kept_paper_count + kept_immediate_count
     discarded = n_experiments - kept_total
     claude_cost = _get_claude_cost_yesterday()
