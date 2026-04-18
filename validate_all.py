@@ -336,7 +336,7 @@ try:
     # Live feedback threshold: 3 labeled rows activates 10x weight
     check("live_trades.csv: ≥ 3 labeled (activates 10x weight)",
           n_labeled >= 3,
-          f"{n_labeled}/3 — {'ACTIVE' if n_labeled >= 3 else 'not yet active'}",
+          f"{n_labeled} labeled (need ≥3) — {'ACTIVE' if n_labeled >= 3 else 'not yet active'}",
           warn_only=n_labeled < 3)
     if "oracle_correct" in lt.columns:
         recent = lt.tail(10)
