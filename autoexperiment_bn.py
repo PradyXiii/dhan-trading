@@ -3,14 +3,20 @@
 autoexperiment_bn.py — Fast single-experiment metric runner for BN autoresearch.
 
 Imports ml_engine.py so any code changes there take effect immediately.
-Trains a fixed-param RF on all data except the last 252 days, evaluates on
-the holdout, and prints composite score as a single JSON line.
+Trains a fixed-param classifier on all data except the last 252 days,
+evaluates on the holdout, and prints composite score as a single JSON line.
 
-No Optuna, no HPO — deterministic. Runtime: ~30–60 seconds.
+Model selection: reads models/champion_meta.json and trains a fresh model of
+the SAME family (CatBoost / XGBoost / LightGBM / RandomForest) with fixed
+deterministic params. This keeps research aligned with production — a feature
+that helps the live champion is kept; one that only helps RF is discarded.
+Falls back to RandomForest if champion_meta is missing.
+
+No Optuna, no HPO — deterministic. Runtime: ~15–60 seconds depending on model.
 
 Usage:
     python3 autoexperiment_bn.py
-    → {"composite": 0.734, "pnl_proxy": 0.68, "n_val": 252, "n_train": 1423}
+    → {"composite": 0.734, "pnl_proxy": 0.68, "n_val": 252, "n_train": 1423, "model": "CatBoost"}
 
 Used by: autoloop_bn.py (reads stdout, parses JSON)
 """
@@ -26,6 +32,61 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 
 HOLDOUT_DAYS = 252  # ~1 year temporal holdout — must match model_evolver.py
+
+
+def _build_eval_model():
+    """Return (model, name) — match current champion type for research↔production alignment.
+
+    Reads models/champion_meta.json. Falls back to RF if meta is missing or
+    the required package isn't installed. All models use fixed deterministic
+    params (random_state=42) so experiment-to-experiment scores are comparable.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+
+    try:
+        with open("models/champion_meta.json") as f:
+            champ = json.load(f).get("model_type", "").lower()
+    except Exception:
+        champ = ""
+
+    if "cat" in champ:
+        try:
+            from catboost import CatBoostClassifier
+            return CatBoostClassifier(
+                iterations=300, depth=6, learning_rate=0.05,
+                l2_leaf_reg=3.0, random_seed=42, thread_count=-1,
+                auto_class_weights="Balanced", verbose=False,
+            ), "CatBoost"
+        except ImportError:
+            pass
+
+    if "xgb" in champ or "xgboost" in champ:
+        try:
+            from xgboost import XGBClassifier
+            return XGBClassifier(
+                n_estimators=300, max_depth=6, learning_rate=0.05,
+                reg_lambda=1.0, random_state=42, n_jobs=-1,
+                tree_method="hist", eval_metric="logloss",
+            ), "XGBoost"
+        except ImportError:
+            pass
+
+    if "lgb" in champ or "light" in champ:
+        try:
+            from lightgbm import LGBMClassifier
+            return LGBMClassifier(
+                n_estimators=300, max_depth=6, learning_rate=0.05,
+                num_leaves=31, random_state=42, n_jobs=-1,
+                class_weight="balanced", verbose=-1,
+            ), "LightGBM"
+        except ImportError:
+            pass
+
+    return RandomForestClassifier(
+        n_estimators=200, max_depth=8, min_samples_leaf=3,
+        max_features="sqrt", class_weight="balanced",
+        random_state=42, n_jobs=-1,
+    ), "RandomForest"
 
 
 def _composite(y_true, y_pred) -> float:
@@ -116,20 +177,15 @@ def run():
         }))
         sys.exit(1)
 
-    # ── Fixed RF — same params as walk-forward training in ml_engine.py ──────
-    from sklearn.ensemble import RandomForestClassifier
-    rf = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=8,
-        min_samples_leaf=3,
-        max_features="sqrt",
-        class_weight="balanced",
-        random_state=42,
-        n_jobs=-1,
-    )
-    rf.fit(X_train, y_train)
-    y_pred       = rf.predict(X_val)
-    y_train_pred = rf.predict(X_train)
+    # ── Model: match current champion so research aligns with production ─────
+    # Reads models/champion_meta.json → uses same model family (CatBoost/XGB/LGB/RF)
+    # with deterministic fixed params. If a feature helps the live champion, keep
+    # it; if it only helps RF but not the ensemble, discard. Falls back to RF if
+    # champion_meta is missing or the required package isn't installed.
+    model, model_name = _build_eval_model()
+    model.fit(X_train, y_train)
+    y_pred       = model.predict(X_val)
+    y_train_pred = model.predict(X_train)
 
     composite       = _composite(y_val, y_pred)
     train_composite = _composite(y_train, y_train_pred)
@@ -166,6 +222,7 @@ def run():
         "pnl_proxy": pnl_proxy,
         "n_val":     int(len(y_val)),
         "n_train":   int(len(y_train)),
+        "model":     model_name,
     }))
 
 
