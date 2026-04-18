@@ -312,6 +312,12 @@ def compute_features(df):
     # Gap-momentum alignment: gap in same direction as 5-day momentum → continuation
     d["gap_mom_align"]    = d["bn_gap"] * d["bn_ret5"]
 
+    # VIX-trend interaction: VIX falling + bullish trend = strong CALL signal
+    d["vix_trend_interact"] = d["vix_dir"] * d["s_ema20"]
+
+    # Prev-day body conviction aligned with short-term momentum
+    d["prev_body_momentum"] = d["prev_body_pct"] * d["bn_ret5"]
+
     # IV × SPF gap: when IV is high, global overnight signal is more decisive
     # iv_proxy is computed later, so we compute a local version here
     _call_p = d.get("call_premium", pd.Series(np.nan, index=d.index))
@@ -486,6 +492,13 @@ FEATURE_COLS = [
     "gap_mom_align",        # bn_gap × bn_ret5 — gap aligned with momentum
     "iv_spf_interaction",   # iv_proxy × spf_gap — IV amplifies global signal
     "high52_ema_interact",  # dist_high52 × s_ema20 — regime × trend
+    # VIX-trend interaction
+    "vix_trend_interact",   # vix_dir × s_ema20 — VIX decline + bullish trend
+    # Prev-day conviction × momentum
+    "prev_body_momentum",   # prev_body_pct × bn_ret5 — candle conviction + momentum
+    # Options/flow features (already computed)
+    "pcr_ma5",              # 5-day smoothed put-call ratio
+    "fii_net_cash_z",       # z-scored FII net cash flow
 ]
 
 
