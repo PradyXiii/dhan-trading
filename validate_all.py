@@ -317,6 +317,184 @@ except Exception as e:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  10. LIVE TRADES — journal health
+# ─────────────────────────────────────────────────────────────────────────────
+section("10. LIVE TRADES  (data/live_trades.csv)")
+
+try:
+    lt = pd.read_csv("data/live_trades.csv", parse_dates=["date"])
+    n_rows  = len(lt)
+    n_labeled = lt["oracle_correct"].notna().sum() if "oracle_correct" in lt.columns else 0
+    last_date = str(lt["date"].iloc[-1])[:10]
+    check("live_trades.csv exists", True, f"{n_rows} rows  |  {n_labeled} labeled")
+    check("live_trades.csv: ≥ 3 rows", n_rows >= 3, str(n_rows))
+    check("live_trades.csv: recent row ≤ 7 days old",
+          (TODAY - pd.to_datetime(last_date).date()).days <= 7, last_date)
+    # Check no duplicate dates
+    dupes = lt["date"].duplicated().sum()
+    check("live_trades.csv: no duplicate dates", dupes == 0,
+          "OK" if dupes == 0 else f"{dupes} duplicate rows")
+    # Live feedback threshold: 5 labeled rows activates 10x weight
+    check("live_trades.csv: ≥ 5 labeled (activates 10x weight)",
+          n_labeled >= 5,
+          f"{n_labeled}/5 — {'ACTIVE' if n_labeled >= 5 else 'not yet active'}",
+          warn_only=n_labeled < 5)
+    if "oracle_correct" in lt.columns:
+        recent = lt.tail(10)
+        acc = recent["oracle_correct"].mean()
+        check("Recent 10-trade accuracy", True, f"{acc:.0%}")
+except FileNotFoundError:
+    check("data/live_trades.csv", False, "FILE MISSING — run backfill_live_trades.py")
+except Exception as e:
+    check("live_trades.csv", False, str(e)[:80])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  11. MIDDAY & PAPER MODEL STATE
+# ─────────────────────────────────────────────────────────────────────────────
+section("11. MIDDAY CHECKPOINTS & PAPER MODEL")
+
+# midday_checkpoints.csv
+try:
+    mc = pd.read_csv("data/midday_checkpoints.csv", parse_dates=["date"])
+    n_rev = (mc["reversal_detected"].astype(str).str.lower() == "true").sum()
+    last_mc = str(mc["date"].iloc[-1])[:10]
+    check("data/midday_checkpoints.csv", True,
+          f"{len(mc)} rows  |  {n_rev} reversals  |  last={last_mc}")
+except FileNotFoundError:
+    check("data/midday_checkpoints.csv", True,
+          "not yet created — will be written at next 11 AM cron", warn_only=False)
+except Exception as e:
+    check("data/midday_checkpoints.csv", False, str(e)[:60])
+
+# paper_performance.csv
+try:
+    pp = pd.read_csv("data/paper_performance.csv")
+    n = len(pp)
+    if n > 0:
+        streak = pp.get("streak", pd.Series([0])).iloc[-1] if "streak" in pp.columns else "?"
+        adv    = pp.get("combined_advantage", pd.Series([0])).iloc[-1] if "combined_advantage" in pp.columns else "?"
+        check("data/paper_performance.csv", True,
+              f"{n} rows  |  streak={streak}/3  |  last_advantage={adv}")
+    else:
+        check("data/paper_performance.csv", True, "empty (fresh start after promotion)")
+except FileNotFoundError:
+    check("data/paper_performance.csv", True,
+          "not yet created — written on first autoloop run", warn_only=False)
+except Exception as e:
+    check("data/paper_performance.csv", False, str(e)[:60])
+
+# paper model diff vs live
+try:
+    import filecmp
+    same = filecmp.cmp("ml_engine.py", "ml_engine_paper.py", shallow=False)
+    check("paper ≠ live model (diverged)", not same,
+          "SAME FILE — paper will diverge on next autoloop run" if same else "diverged OK",
+          warn_only=same)
+except Exception as e:
+    check("paper vs live model", False, str(e)[:60])
+
+# trade_journal endpoint sanity (grep check — no API call)
+try:
+    with open("trade_journal.py") as f:
+        tj_src = f.read()
+    has_correct = "/v2/trades" in tj_src
+    has_wrong   = "/v2/tradebook" in tj_src
+    check("trade_journal.py uses /v2/trades",
+          has_correct and not has_wrong,
+          "OK" if (has_correct and not has_wrong) else
+          "/v2/tradebook still present — endpoint fix not applied!")
+except Exception as e:
+    check("trade_journal.py endpoint", False, str(e)[:60])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  12. CRON — jobs installed
+# ─────────────────────────────────────────────────────────────────────────────
+section("12. CRON JOBS")
+
+try:
+    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    cron_txt = r.stdout
+    jobs = {
+        "auto_trader.py":        "0  4   * * 1-5",
+        "model_evolver.py":      "30 17  * * 1-5",
+        "autoloop_bn.py":        "30 18  * * 1-5",
+        "midday_conviction.py":  "30 5   * * 1-5",
+        "trade_journal.py":      "0  10  * * 1-5",
+        "health_ping.py":        "35 3   * * 1-5",
+        "renew_token.py":        "*/5 *  * * *",
+    }
+    for script, expected_time in jobs.items():
+        present = script in cron_txt
+        check(f"cron: {script}", present,
+              "installed" if present else "MISSING from crontab")
+except FileNotFoundError:
+    check("crontab", False, "crontab command not found — not on the trading VM?")
+except Exception as e:
+    check("cron jobs", False, str(e)[:60])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  13. GIT AUTH — SSH key, remote, push capability
+# ─────────────────────────────────────────────────────────────────────────────
+section("13. GIT / AUTORESEARCH PUSH")
+
+# SSH key present
+ssh_key = os.path.expanduser("~/.ssh/id_ed25519")
+check("SSH key exists (~/.ssh/id_ed25519)", os.path.exists(ssh_key),
+      "present" if os.path.exists(ssh_key) else "MISSING — autoloop can't push to GitHub")
+
+# Remote uses SSH (not HTTPS, which needs password)
+try:
+    r = subprocess.run(["git", "remote", "get-url", "origin"],
+                       capture_output=True, text=True)
+    remote = r.stdout.strip()
+    uses_ssh = remote.startswith("git@")
+    check("git remote uses SSH (not HTTPS)", uses_ssh,
+          remote if uses_ssh else f"HTTPS remote — push will hang: {remote}")
+except Exception as e:
+    check("git remote", False, str(e)[:60])
+
+# SSH auth to GitHub (non-blocking, 5s timeout)
+try:
+    r = subprocess.run(
+        ["ssh", "-T", "-o", "StrictHostKeyChecking=no",
+         "-o", "ConnectTimeout=5", "git@github.com"],
+        capture_output=True, text=True, timeout=10
+    )
+    auth_ok = "successfully authenticated" in (r.stdout + r.stderr).lower()
+    check("SSH auth to github.com works", auth_ok,
+          "OK" if auth_ok else (r.stdout + r.stderr).strip()[:80])
+except subprocess.TimeoutExpired:
+    check("SSH auth to github.com", False, "TIMED OUT — network issue?")
+except Exception as e:
+    check("SSH auth to github.com", False, str(e)[:60])
+
+# Current branch
+try:
+    r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                       capture_output=True, text=True)
+    branch = r.stdout.strip()
+    check("git branch (not detached HEAD)", branch != "HEAD",
+          branch if branch != "HEAD" else "DETACHED HEAD — autoloop push will fail")
+except Exception as e:
+    check("git branch", False, str(e)[:60])
+
+# Uncommitted changes to key files
+try:
+    r = subprocess.run(["git", "status", "--short"],
+                       capture_output=True, text=True)
+    dirty = [l for l in r.stdout.splitlines()
+             if any(f in l for f in ["ml_engine", "auto_trader", "model_evolver",
+                                     "autoloop_bn", "trade_journal", "midday_conviction"])]
+    check("No uncommitted changes to key files", not dirty,
+          "clean" if not dirty else f"uncommitted: {', '.join(dirty)}")
+except Exception as e:
+    check("git status", False, str(e)[:60])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
 section("SUMMARY")
