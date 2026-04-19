@@ -486,6 +486,149 @@ def fetch_rollingoption(from_date, to_date):
     return new_df
 
 
+def fetch_iv_skew(from_date, to_date):
+    """
+    Fetch BankNifty IV skew: ATM and OTM (ATM±3) implied volatilities.
+
+    Four series fetched per chunk:
+      call_iv_atm  — ATM CALL IV at 9:15 AM open
+      put_iv_atm   — ATM PUT  IV at 9:15 AM open
+      call_iv_otm  — ATM+3 CALL IV (≈ 0.5% OTM)
+      put_iv_otm   — ATM-3 PUT  IV (≈ 0.5% OTM)
+
+    Skew features derived in ml_engine.compute_features():
+      call_skew   = call_iv_otm − call_iv_atm   (OTM call premium expansion)
+      put_skew    = put_iv_otm  − put_iv_atm    (OTM put premium expansion — normally +ve)
+      skew_spread = put_skew − call_skew         (net downside fear; +ve = bearish)
+      skew_chg    = skew_spread.diff()           (fear momentum)
+
+    Saved to: data/options_iv_skew.csv
+    Run via:  python3 data_fetcher.py --fetch-options
+    """
+    from datetime import date as _dt
+    out_path = f"{DATA_DIR}/options_iv_skew.csv"
+
+    start    = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end      = datetime.strptime(to_date,   "%Y-%m-%d").date()
+    boundary = _WEEKLY_DISCONTINUED.date()
+
+    # (strike_str, opt_type, col_name)
+    SERIES = [
+        ("ATM",   "CALL", "call_iv_atm"),
+        ("ATM",   "PUT",  "put_iv_atm"),
+        ("ATM+3", "CALL", "call_iv_otm"),
+        ("ATM-3", "PUT",  "put_iv_otm"),
+    ]
+
+    all_rows = []
+    current  = start
+
+    while current < end:
+        if current < boundary:
+            expiry_flag = "WEEK"
+            chunk_end   = min(current + timedelta(days=28),
+                              min(end, boundary - timedelta(days=1)))
+        else:
+            expiry_flag = "MONTH"
+            chunk_end   = min(current + timedelta(days=28), end)
+
+        chunk_data: dict = {}   # date → {col: value}
+
+        for strike_str, opt_type, col_name in SERIES:
+            payload = {
+                "exchangeSegment": "NSE_FNO",
+                "interval":        15,
+                "securityId":      25,
+                "instrument":      "OPTIDX",
+                "expiryFlag":      expiry_flag,
+                "expiryCode":      1,
+                "strike":          strike_str,
+                "drvOptionType":   opt_type,
+                "requiredData":    ["iv"],
+                "fromDate":        current.strftime("%Y-%m-%d"),
+                "toDate":          chunk_end.strftime("%Y-%m-%d"),
+            }
+            try:
+                resp = requests.post(
+                    "https://api.dhan.co/v2/charts/rollingoption",
+                    headers=HEADERS,
+                    json=payload,
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    print(f"  iv_skew {col_name} [{current}→{chunk_end}]: "
+                          f"HTTP {resp.status_code} — {resp.text[:200]}")
+                    time.sleep(0.4)
+                    continue
+
+                d        = resp.json().get("data", {})
+                opt_data = (d.get("ce") if opt_type == "CALL" else d.get("pe")) or \
+                           d.get("ce") or {}
+
+                if not opt_data or not opt_data.get("timestamp") or "iv" not in opt_data:
+                    print(f"  iv_skew {col_name} [{current}→{chunk_end}]: empty or no iv field")
+                    time.sleep(0.4)
+                    continue
+
+                ts_ist = (pd.to_datetime(opt_data["timestamp"], unit="s")
+                          + pd.Timedelta(hours=5, minutes=30))
+                df_c   = pd.DataFrame({"dt": ts_ist, "iv": opt_data["iv"]})
+                df_c["date"] = df_c["dt"].dt.normalize()
+                daily  = (df_c.groupby("date", sort=True)
+                               .first()
+                               .reset_index()[["date", "iv"]])
+
+                for _, r in daily.iterrows():
+                    if r["date"] not in chunk_data:
+                        chunk_data[r["date"]] = {}
+                    chunk_data[r["date"]][col_name] = r["iv"]
+
+                print(f"  iv_skew {col_name} [{current}→{chunk_end}]: "
+                      f"{len(daily)} days  (flag={expiry_flag})")
+
+            except Exception as e:
+                print(f"  iv_skew {col_name} [{current}→{chunk_end}]: error — {e}")
+
+            time.sleep(0.5)
+
+        for d_key in sorted(chunk_data.keys()):
+            row = {"date": d_key}
+            row.update(chunk_data[d_key])
+            all_rows.append(row)
+
+        current = chunk_end + timedelta(days=1)
+
+    if not all_rows:
+        print("  iv_skew: no data fetched — check Dhan credentials/subscription")
+        return pd.DataFrame()
+
+    cols   = ["date", "call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]
+    new_df = pd.DataFrame(all_rows)
+    for c in cols[1:]:
+        if c not in new_df.columns:
+            new_df[c] = None
+    new_df = (new_df.reindex(columns=cols)
+                    .drop_duplicates("date")
+                    .sort_values("date")
+                    .reset_index(drop=True))
+
+    if os.path.exists(out_path):
+        existing = pd.read_csv(out_path, parse_dates=["date"])
+        combined = (pd.concat([existing, new_df])
+                      .drop_duplicates("date")
+                      .sort_values("date")
+                      .reset_index(drop=True))
+    else:
+        combined = new_df
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    combined.to_csv(out_path, index=False)
+    real_count = combined["call_iv_atm"].notna().sum()
+    print(f"  → Saved options_iv_skew.csv  ({len(combined)} rows, "
+          f"{real_count} with ATM CALL IV)")
+    return new_df
+
+
 def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
     """
     Fetch BankNifty historical ATM PCR from Dhan /v2/charts/rollingoption.
@@ -744,13 +887,17 @@ def main():
         fix_dhan_dates()
         return
 
-    # Handle --fetch-options: fetch historical ATM option premiums only
+    # Handle --fetch-options: fetch historical ATM option premiums + IV skew
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-options":
         print("=== Historical ATM Option Premiums (Dhan rollingoption) ===")
         os.makedirs(DATA_DIR, exist_ok=True)
         df = fetch_rollingoption(FROM_DATE, TO_DATE)
         if not df.empty:
             print(f"  Done. {len(df)} new rows fetched.")
+        print("\n=== Historical IV Skew (ATM vs ATM±3, Dhan rollingoption) ===")
+        df_iv = fetch_iv_skew(FROM_DATE, TO_DATE)
+        if not df_iv.empty:
+            print(f"  Done. {len(df_iv)} new rows fetched.")
         return
 
     # Handle --fetch-pcr-historical flag

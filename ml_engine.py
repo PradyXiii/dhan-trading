@@ -184,6 +184,22 @@ def load_all_data():
         df["call_premium"] = np.nan
         df["put_premium"]  = np.nan
 
+    # ── IV skew (optional) — ATM + OTM implied volatilities ─────────────────
+    iv_skew_path = f"{DATA_DIR}/options_iv_skew.csv"
+    if os.path.exists(iv_skew_path):
+        try:
+            iv_skew = pd.read_csv(iv_skew_path, parse_dates=["date"])[
+                ["date", "call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]]
+            df = df.merge(iv_skew, on="date", how="left")
+            for _col in ["call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]:
+                df[_col] = df[_col].ffill(limit=2)
+        except Exception:
+            for _col in ["call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]:
+                df[_col] = np.nan
+    else:
+        for _col in ["call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]:
+            df[_col] = np.nan
+
     # ── FII net cash (optional) ───────────────────────────────────────────────
     fii_path = f"{DATA_DIR}/fii_dii.csv"
     if os.path.exists(fii_path):
@@ -486,6 +502,27 @@ def compute_features(df):
     # Two consecutive strong rule_score days = sustained institutional momentum.
     d["rule_score_lag1"] = d["rule_score"].shift(1).fillna(0.0)
 
+    # ── IV skew features ──────────────────────────────────────────────────────
+    # call_skew:   OTM (ATM+3) call IV − ATM call IV. +ve = upside tail priced in.
+    # put_skew:    OTM (ATM-3) put  IV − ATM put  IV. +ve = downside tail priced (normal).
+    # skew_spread: put_skew − call_skew. +ve = market fears downside more → bearish.
+    # skew_chg:    day-over-day change in skew_spread — fear momentum.
+    # All shifted by 1 so training/live see identical prior-day values at 9:30 AM.
+    for _iv_col in ["call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]:
+        if _iv_col not in d.columns:
+            d[_iv_col] = np.nan
+    _c_iv_atm  = d["call_iv_atm"].shift(1)
+    _p_iv_atm  = d["put_iv_atm"].shift(1)
+    _c_iv_otm  = d["call_iv_otm"].shift(1)
+    _p_iv_otm  = d["put_iv_otm"].shift(1)
+    _call_sk   = (_c_iv_otm - _c_iv_atm).fillna(0.0)
+    _put_sk    = (_p_iv_otm - _p_iv_atm).fillna(0.0)
+    _sk_spread = (_put_sk - _call_sk).fillna(0.0)
+    d["call_skew"]   = _call_sk
+    d["put_skew"]    = _put_sk
+    d["skew_spread"] = _sk_spread
+    d["skew_chg"]    = _sk_spread.diff().fillna(0.0)
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -539,6 +576,11 @@ FEATURE_COLS = [
     "adx14",                # trend strength 0-100
     "adx_trend_interact",   # ADX × s_ema20 — strong trend amplifies direction
     "adx_gap_interact",     # ADX × bn_gap — strong trend + gap = continuation
+    # IV skew dynamics (from options_iv_skew.csv — populated by data_fetcher.py --fetch-options)
+    "call_skew",    # OTM call IV − ATM call IV — upside tail risk pricing
+    "put_skew",     # OTM put IV  − ATM put IV  — downside tail risk pricing (normally +ve)
+    "skew_spread",  # put_skew − call_skew — net downside fear signal
+    "skew_chg",     # day-over-day Δ skew_spread — fear momentum
 ]
 
 

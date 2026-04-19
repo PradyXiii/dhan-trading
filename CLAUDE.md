@@ -205,6 +205,7 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/signals.csv` | Rule-based signals (signal_engine.py output) |
 | `data/signals_ml.csv` | ML-overridden signals (ml_engine.py output) |
 | `data/options_atm_daily.csv` | Real ATM option opens from Dhan rollingoption (date, call_premium, put_premium) |
+| `data/options_iv_skew.csv` | Daily ATM + OTM±3 implied volatilities (date, call_iv_atm, put_iv_atm, call_iv_otm, put_iv_otm) |
 | `data/live_trades.csv` | Daily live-trade outcomes (written by trade_journal.py + backfill_live_trades.py) |
 | `data/today_trade.json` | What auto_trader placed today (read by trade_journal) |
 | `data/midday_checkpoints.csv` | Midday conviction snapshots — reversal detection, fed to model_evolver + autoloop |
@@ -263,8 +264,8 @@ python3 backtest_engine.py --real-premium-ml # real-premium ML backtest
 python3 backtest_engine.py --ml              # ML backtest (formula premium)
 python3 backtest_live_context.py             # research: intraday live-context rules
 
-# Fetch historical ATM option premiums (one-time, then incremental)
-python3 data_fetcher.py --fetch-options
+# Fetch historical ATM option premiums + IV skew (one-time, then incremental)
+python3 data_fetcher.py --fetch-options  # fetches options_atm_daily.csv + options_iv_skew.csv
 
 # Live test
 python3 auto_trader.py --dry-run

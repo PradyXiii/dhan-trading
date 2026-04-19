@@ -75,6 +75,7 @@ bn_dist_high20, bn_dist_high52          (% below rolling high)
 prev_range_pct, prev_body_pct           (prev-day candle structure)
 put_call_skew, iv_proxy                 (real options market signals)
 straddle_expansion                       (today's ATM straddle vs 20d mean — IV expansion)
+call_skew, put_skew, skew_spread, skew_chg  (IV skew dynamics — requires options_iv_skew.csv)
 ```
 
 ### signal_engine.py — score_row()
@@ -137,7 +138,17 @@ Constraints:
 
 These have the strongest theoretical basis for predicting intraday BN direction:
 
-1. **Volatility regime interactions**: When iv_proxy is high (IV elevated), intraday
+1. **IV skew dynamics**: `call_skew` / `put_skew` measure how much more expensive OTM
+   options are vs ATM. `skew_spread` = put_skew − call_skew captures net downside fear —
+   elevated put skew on a CALL day = market pricing in crash risk, historically associated
+   with reversals. `skew_chg` captures momentum: a sudden put skew expansion is a bearish
+   leading signal even if spot hasn't moved yet.
+   Try: `skew_spread * s_ema20` (skew aligned with trend = stronger signal),
+        `skew_chg * vix_dir` (skew expanding + VIX rising = high-conviction PUT),
+        `skew_spread * pcr` (skew and flow agree → higher accuracy).
+   NOTE: populate `data/options_iv_skew.csv` first: `python3 data_fetcher.py --fetch-options`
+
+2. **Volatility regime interactions**: When iv_proxy is high (IV elevated), intraday
    range is wide — both SL and TP are more likely to be hit. On these days, direction
    signals (s_ema20, spf_gap, vix_dir) are more decisive. Try: `iv_proxy * s_ema20`,
    `iv_proxy * spf_gap`, `iv_proxy * vix_dir`.
