@@ -200,6 +200,26 @@ def load_all_data():
         for _col in ["call_iv_atm", "put_iv_atm", "call_iv_otm", "put_iv_otm"]:
             df[_col] = np.nan
 
+    # ── OI surface (optional) — ATM±3 CE/PE open interest ───────────────────
+    oi_path = f"{DATA_DIR}/options_oi_surface.csv"
+    _OI_COLS = [f"{t}_oi_{s}" for t in ("ce", "pe")
+                               for s in ("m3","m2","m1","atm","p1","p2","p3")]
+    if os.path.exists(oi_path):
+        try:
+            oi_df = pd.read_csv(oi_path, parse_dates=["date"])
+            keep  = ["date"] + [c for c in _OI_COLS if c in oi_df.columns]
+            df    = df.merge(oi_df[keep], on="date", how="left")
+            for _c in _OI_COLS:
+                if _c not in df.columns:
+                    df[_c] = np.nan
+                df[_c] = df[_c].ffill(limit=2)
+        except Exception:
+            for _c in _OI_COLS:
+                df[_c] = np.nan
+    else:
+        for _c in _OI_COLS:
+            df[_c] = np.nan
+
     # ── FII net cash (optional) ───────────────────────────────────────────────
     fii_path = f"{DATA_DIR}/fii_dii.csv"
     if os.path.exists(fii_path):
@@ -523,6 +543,47 @@ def compute_features(df):
     d["skew_spread"] = _sk_spread
     d["skew_chg"]    = _sk_spread.diff().fillna(0.0)
 
+    # ── Skew interactions ────────────────────────────────────────────────────
+    # skew_trend_interact: skew_spread × s_ema20.
+    #   +ve on bearish-trend day with put skew expanding → high-conviction PUT
+    #   +ve on bullish-trend day with call skew expanding → high-conviction CALL
+    #   Signs the skew reading by the underlying trend regime.
+    # skew_vix_regime: skew_chg × vix_dir.
+    #   +ve = both rising (fear momentum accelerating → strongest reversal signal)
+    #   -ve = divergence (one easing while the other tightens → weak/noisy signal)
+    d["skew_trend_interact"] = d["skew_spread"] * d["s_ema20"]
+    d["skew_vix_regime"]     = d["skew_chg"] * d["vix_dir"]
+
+    # ── OI surface features (from options_oi_surface.csv) ─────────────────────
+    # oi_pcr_wide:       Σpe_oi / Σce_oi across ATM±3 — broader, more robust than ATM PCR
+    # oi_imbalance_atm:  (ce_oi_atm − pe_oi_atm) / total — directional bias at ATM
+    # call_wall_offset:  offset (-3..+3) of max CE OI strike — resistance position
+    # put_wall_offset:   offset (-3..+3) of max PE OI strike — support position
+    # All shifted by 1 (prior day's EOD OI is what's known at 9:30 AM).
+    _CE_OI_COLS = ["ce_oi_m3","ce_oi_m2","ce_oi_m1","ce_oi_atm","ce_oi_p1","ce_oi_p2","ce_oi_p3"]
+    _PE_OI_COLS = ["pe_oi_m3","pe_oi_m2","pe_oi_m1","pe_oi_atm","pe_oi_p1","pe_oi_p2","pe_oi_p3"]
+    _OFFSETS    = [-3, -2, -1, 0, 1, 2, 3]
+    for _c in _CE_OI_COLS + _PE_OI_COLS:
+        if _c not in d.columns:
+            d[_c] = np.nan
+    # Prior-day OI (known at 9:30 AM) — pandas shift on DataFrame returns DataFrame
+    _ce_oi = d[_CE_OI_COLS].shift(1).fillna(0.0)
+    _pe_oi = d[_PE_OI_COLS].shift(1).fillna(0.0)
+    _ce_sum = _ce_oi.sum(axis=1).replace(0, np.nan)
+    _pe_sum = _pe_oi.sum(axis=1).replace(0, np.nan)
+    d["oi_pcr_wide"] = (_pe_sum / _ce_sum).fillna(1.0)
+    _ce_atm = _ce_oi["ce_oi_atm"]
+    _pe_atm = _pe_oi["pe_oi_atm"]
+    _atm_tot = (_ce_atm + _pe_atm).replace(0, np.nan)
+    d["oi_imbalance_atm"] = ((_ce_atm - _pe_atm) / _atm_tot).fillna(0.0)
+    # Argmax of OI across offsets — returns index (0..6); map to offset (-3..+3)
+    _ce_max_idx = _ce_oi.values.argmax(axis=1)
+    _pe_max_idx = _pe_oi.values.argmax(axis=1)
+    d["call_wall_offset"] = [_OFFSETS[i] if _ce_sum.iloc[n] > 0 else 0
+                              for n, i in enumerate(_ce_max_idx)]
+    d["put_wall_offset"]  = [_OFFSETS[i] if _pe_sum.iloc[n] > 0 else 0
+                              for n, i in enumerate(_pe_max_idx)]
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -580,6 +641,14 @@ FEATURE_COLS = [
     "put_skew",     # OTM put IV  − ATM put IV  — downside tail risk pricing (normally +ve)
     "skew_spread",  # put_skew − call_skew — net downside fear signal
     "skew_chg",     # day-over-day Δ skew_spread — fear momentum
+    # Skew interactions
+    "skew_trend_interact",  # skew_spread × s_ema20 — skew signed by trend regime
+    "skew_vix_regime",      # skew_chg × vix_dir — fear momentum × vol regime
+    # OI surface (from options_oi_surface.csv — populated by data_fetcher.py --fetch-options)
+    "oi_pcr_wide",       # Σpe_oi / Σce_oi across ATM±3 — broader PCR
+    "oi_imbalance_atm",  # ATM CE vs PE OI imbalance — directional bias
+    "call_wall_offset",  # offset (-3..+3) of max CE OI strike — resistance position
+    "put_wall_offset",   # offset (-3..+3) of max PE OI strike — support position
 ]
 
 

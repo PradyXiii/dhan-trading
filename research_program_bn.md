@@ -76,6 +76,9 @@ prev_range_pct, prev_body_pct           (prev-day candle structure)
 put_call_skew, iv_proxy                 (real options market signals)
 straddle_expansion                       (today's ATM straddle vs 20d mean — IV expansion)
 call_skew, put_skew, skew_spread, skew_chg  (IV skew dynamics — requires options_iv_skew.csv)
+skew_trend_interact, skew_vix_regime        (skew interactions with trend and vol regime)
+oi_pcr_wide, oi_imbalance_atm               (OI surface — requires options_oi_surface.csv)
+call_wall_offset, put_wall_offset           (max OI strike position vs ATM)
 ```
 
 ### signal_engine.py — score_row()

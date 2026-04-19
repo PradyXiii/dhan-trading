@@ -628,6 +628,167 @@ def fetch_iv_skew(from_date, to_date):
     return new_df
 
 
+def fetch_oi_surface(from_date, to_date):
+    """
+    Fetch BankNifty open-interest surface: 7 strikes (ATM±3) × CE and PE.
+
+    For each trading day, captures 9:15 AM open OI at:
+      CE: ATM-3, ATM-2, ATM-1, ATM, ATM+1, ATM+2, ATM+3
+      PE: ATM-3, ATM-2, ATM-1, ATM, ATM+1, ATM+2, ATM+3
+    14 API calls per 28-day chunk. ~7 minutes for 5 years of history.
+
+    Saved to data/options_oi_surface.csv (wide format, 16 columns):
+      date, atm_strike,
+      ce_oi_m3..ce_oi_p3   (7 CE OI values)
+      pe_oi_m3..pe_oi_p3   (7 PE OI values)
+
+    OI features derived in ml_engine.compute_features():
+      oi_pcr_wide       = Σpe_oi / Σce_oi across 7 strikes (robust PCR)
+      oi_imbalance_atm  = (ce_oi_atm − pe_oi_atm) / total — directional bias at ATM
+      call_wall_offset  = offset (-3..+3) of max CE OI — resistance position
+      put_wall_offset   = offset (-3..+3) of max PE OI — support position
+
+    Note: Dhan's rollingoption caps strike range at ATM±3 for monthly
+    contracts (Nov 2024+). This function uses that max across all history
+    for consistency.
+    """
+    out_path = f"{DATA_DIR}/options_oi_surface.csv"
+
+    start    = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end      = datetime.strptime(to_date,   "%Y-%m-%d").date()
+    boundary = _WEEKLY_DISCONTINUED.date()
+
+    # (strike_str, opt_type, col_prefix)
+    OFFSETS = [-3, -2, -1, 0, 1, 2, 3]
+    def _strike_code(off):
+        if off == 0: return "ATM"
+        return f"ATM{'+' if off > 0 else ''}{off}"
+    def _col(opt_type, off):
+        suffix = "atm" if off == 0 else (f"p{off}" if off > 0 else f"m{abs(off)}")
+        return f"{'ce' if opt_type == 'CALL' else 'pe'}_oi_{suffix}"
+
+    SERIES = [(_strike_code(off), opt, _col(opt, off))
+              for off in OFFSETS
+              for opt in ("CALL", "PUT")]
+
+    all_rows = []
+    current  = start
+
+    while current < end:
+        if current < boundary:
+            expiry_flag = "WEEK"
+            chunk_end   = min(current + timedelta(days=28),
+                              min(end, boundary - timedelta(days=1)))
+        else:
+            expiry_flag = "MONTH"
+            chunk_end   = min(current + timedelta(days=28), end)
+
+        # date → {col: oi_value, "atm_strike": price}
+        chunk_data: dict = {}
+
+        for strike_str, opt_type, col_name in SERIES:
+            payload = {
+                "exchangeSegment": "NSE_FNO",
+                "interval":        15,
+                "securityId":      25,
+                "instrument":      "OPTIDX",
+                "expiryFlag":      expiry_flag,
+                "expiryCode":      1,
+                "strike":          strike_str,
+                "drvOptionType":   opt_type,
+                "requiredData":    ["oi", "strike"],
+                "fromDate":        current.strftime("%Y-%m-%d"),
+                "toDate":          chunk_end.strftime("%Y-%m-%d"),
+            }
+            try:
+                resp = requests.post(
+                    "https://api.dhan.co/v2/charts/rollingoption",
+                    headers=HEADERS,
+                    json=payload,
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    print(f"  oi_surface {col_name} [{current}→{chunk_end}]: "
+                          f"HTTP {resp.status_code} — {resp.text[:200]}")
+                    time.sleep(0.4)
+                    continue
+
+                d        = resp.json().get("data", {})
+                opt_data = (d.get("ce") if opt_type == "CALL" else d.get("pe")) or \
+                           d.get("ce") or {}
+
+                if not opt_data or not opt_data.get("timestamp") or "oi" not in opt_data:
+                    print(f"  oi_surface {col_name} [{current}→{chunk_end}]: empty or no oi field")
+                    time.sleep(0.4)
+                    continue
+
+                ts_ist = (pd.to_datetime(opt_data["timestamp"], unit="s")
+                          + pd.Timedelta(hours=5, minutes=30))
+                df_c   = pd.DataFrame({
+                    "dt":     ts_ist,
+                    "oi":     opt_data["oi"],
+                    "strike": opt_data.get("strike") or [None] * len(ts_ist),
+                })
+                df_c["date"] = df_c["dt"].dt.normalize()
+                daily = (df_c.groupby("date", sort=True)
+                              .first()
+                              .reset_index()[["date", "oi", "strike"]])
+
+                for _, r in daily.iterrows():
+                    if r["date"] not in chunk_data:
+                        chunk_data[r["date"]] = {}
+                    chunk_data[r["date"]][col_name] = r["oi"]
+                    # Capture ATM strike price from the ATM CALL fetch
+                    if strike_str == "ATM" and opt_type == "CALL" and r["strike"] is not None:
+                        chunk_data[r["date"]]["atm_strike"] = r["strike"]
+
+                print(f"  oi_surface {col_name} [{current}→{chunk_end}]: "
+                      f"{len(daily)} days  (flag={expiry_flag})")
+
+            except Exception as e:
+                print(f"  oi_surface {col_name} [{current}→{chunk_end}]: error — {e}")
+
+            time.sleep(0.5)
+
+        for d_key in sorted(chunk_data.keys()):
+            row = {"date": d_key}
+            row.update(chunk_data[d_key])
+            all_rows.append(row)
+
+        current = chunk_end + timedelta(days=1)
+
+    if not all_rows:
+        print("  oi_surface: no data fetched — check Dhan credentials/subscription")
+        return pd.DataFrame()
+
+    cols = (["date", "atm_strike"]
+            + [_col(opt, off) for off in OFFSETS for opt in ("CALL", "PUT")])
+    new_df = pd.DataFrame(all_rows)
+    for c in cols:
+        if c not in new_df.columns:
+            new_df[c] = None
+    new_df = (new_df.reindex(columns=cols)
+                    .drop_duplicates("date")
+                    .sort_values("date")
+                    .reset_index(drop=True))
+
+    if os.path.exists(out_path):
+        existing = pd.read_csv(out_path, parse_dates=["date"])
+        combined = (pd.concat([existing, new_df])
+                      .drop_duplicates("date")
+                      .sort_values("date")
+                      .reset_index(drop=True))
+    else:
+        combined = new_df
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    combined.to_csv(out_path, index=False)
+    real_count = combined["ce_oi_atm"].notna().sum()
+    print(f"  → Saved options_oi_surface.csv  ({len(combined)} rows, "
+          f"{real_count} with ATM CE OI)")
+    return new_df
+
+
 def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
     """
     Fetch BankNifty historical ATM PCR from Dhan /v2/charts/rollingoption.
@@ -897,6 +1058,10 @@ def main():
         df_iv = fetch_iv_skew(FROM_DATE, TO_DATE)
         if not df_iv.empty:
             print(f"  Done. {len(df_iv)} new rows fetched.")
+        print("\n=== Historical OI Surface (ATM±3 CE & PE, Dhan rollingoption) ===")
+        df_oi = fetch_oi_surface(FROM_DATE, TO_DATE)
+        if not df_oi.empty:
+            print(f"  Done. {len(df_oi)} new rows fetched.")
         return
 
     # Handle --fetch-pcr-historical flag
