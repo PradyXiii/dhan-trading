@@ -154,7 +154,14 @@ def load_all_data():
     for _col, _file in [("crude_close",  "crude.csv"),
                          ("dxy_close",    "dxy.csv"),
                          ("us10y_close",  "us10y.csv"),
-                         ("usdinr_close", "usdinr.csv")]:
+                         ("usdinr_close", "usdinr.csv"),
+                         # Bank sector ETF + top-5 BN constituents (yfinance NS tickers)
+                         ("bankbees_close", "bankbees.csv"),
+                         ("hdfc_close",     "hdfcbank.csv"),
+                         ("icici_close",    "icicibank.csv"),
+                         ("kotak_close",    "kotakbank.csv"),
+                         ("sbi_close",      "sbin.csv"),
+                         ("axis_close",     "axisbank.csv")]:
         _path = f"{DATA_DIR}/{_file}"
         if os.path.exists(_path):
             try:
@@ -167,22 +174,62 @@ def load_all_data():
         else:
             df[_col] = np.nan
 
+    # BANKBEES volume (for ETF flow z-score)
+    _bb_path = f"{DATA_DIR}/bankbees.csv"
+    if os.path.exists(_bb_path):
+        try:
+            _bb = pd.read_csv(_bb_path, parse_dates=["date"])
+            if "volume" in _bb.columns:
+                df = df.merge(_bb[["date","volume"]].rename(columns={"volume":"bankbees_vol"}),
+                              on="date", how="left")
+                df["bankbees_vol"] = df["bankbees_vol"].ffill(limit=5)
+            else:
+                df["bankbees_vol"] = np.nan
+        except Exception:
+            df["bankbees_vol"] = np.nan
+    else:
+        df["bankbees_vol"] = np.nan
+
+    # BN 15-min intraday for ORB (9:15 candle) — optional
+    _orb_path = f"{DATA_DIR}/banknifty_15m_orb.csv"
+    _ORB_COLS = ["orb_high", "orb_low", "orb_close"]
+    if os.path.exists(_orb_path):
+        try:
+            _orb = pd.read_csv(_orb_path, parse_dates=["date"])
+            keep = ["date"] + [c for c in _ORB_COLS if c in _orb.columns]
+            df = df.merge(_orb[keep], on="date", how="left")
+            for _c in _ORB_COLS:
+                if _c not in df.columns:
+                    df[_c] = np.nan
+        except Exception:
+            for _c in _ORB_COLS:
+                df[_c] = np.nan
+    else:
+        for _c in _ORB_COLS:
+            df[_c] = np.nan
+
     # ── Real ATM option premiums (optional) ─────────────────────────────────
-    # options_atm_daily.csv: date, call_premium, put_premium (ATM open prices).
+    # options_atm_daily.csv: date, call_premium, put_premium, max_pain_dist,
+    # gex_positive, straddle (ATM open prices + chain signals written by auto_trader).
     # Used in compute_labels (better SL/TP simulation) and as features.
     opt_path = f"{DATA_DIR}/options_atm_daily.csv"
+    _OPT_COLS = ["call_premium", "put_premium", "max_pain_dist",
+                 "gex_positive", "straddle"]
     if os.path.exists(opt_path):
         try:
-            opt = pd.read_csv(opt_path, parse_dates=["date"])[["date","call_premium","put_premium"]]
-            df  = df.merge(opt, on="date", how="left")
-            df["call_premium"] = df["call_premium"].ffill(limit=2)
-            df["put_premium"]  = df["put_premium"].ffill(limit=2)
+            opt_full = pd.read_csv(opt_path, parse_dates=["date"])
+            keep     = ["date"] + [c for c in _OPT_COLS if c in opt_full.columns]
+            df       = df.merge(opt_full[keep], on="date", how="left")
+            for _c in _OPT_COLS:
+                if _c not in df.columns:
+                    df[_c] = np.nan
+                df[_c] = df[_c].ffill(limit=2)
         except Exception:
-            df["call_premium"] = np.nan
-            df["put_premium"]  = np.nan
+            for _c in _OPT_COLS:
+                df[_c] = np.nan
     else:
-        df["call_premium"] = np.nan
-        df["put_premium"]  = np.nan
+        for _c in _OPT_COLS:
+            df[_c] = np.nan
 
     # ── IV skew (optional) — ATM + OTM implied volatilities ─────────────────
     iv_skew_path = f"{DATA_DIR}/options_iv_skew.csv"
@@ -584,6 +631,96 @@ def compute_features(df):
     d["put_wall_offset"]  = [_OFFSETS[i] if _pe_sum.iloc[n] > 0 else 0
                               for n, i in enumerate(_pe_max_idx)]
 
+    # ── Max pain + GEX (from options_atm_daily.csv, written by auto_trader) ──
+    # max_pain_dist_prev: prior-day spot vs max-pain strike as %. Spot tends to
+    #   drift toward max pain near expiry; large absolute values flag mean-revert setups.
+    # gex_flag_prev:    1 if gamma exposure positive (ranging regime), -1 if negative
+    #   (trend regime), 0 if unknown. Dealer hedging flow signal.
+    if "max_pain_dist" in d.columns:
+        d["max_pain_dist_prev"] = d["max_pain_dist"].shift(1).fillna(0.0)
+    else:
+        d["max_pain_dist_prev"] = 0.0
+    if "gex_positive" in d.columns:
+        _gex = d["gex_positive"].shift(1)
+        # Handle bool/int/string representations gracefully
+        d["gex_flag_prev"] = _gex.map(lambda x: 1 if str(x).lower() in ("true","1","1.0")
+                                                  else (-1 if str(x).lower() in ("false","0","0.0")
+                                                        else 0)).fillna(0).astype(int)
+    else:
+        d["gex_flag_prev"] = 0
+
+    # ── VIX percentile (IVP — 252d rank) ─────────────────────────────────────
+    # Raw VIX level is regime-dependent (14 in calm vs stressed era means different things).
+    # Percentile rank 0-1 normalizes across regimes. Uses yesterday's VIX (_vix already shifted).
+    d["vix_pct_rank_252"] = _vix.rolling(252, min_periods=60).rank(pct=True).fillna(0.5)
+
+    # ── BN-Nifty relative strength ───────────────────────────────────────────
+    # bn_nifty_rs:        BN / Nifty ratio (prior-day closes) — absolute leadership
+    # bn_nifty_rs_slope5: 5-day % change in that ratio — leadership momentum
+    # Different from bn_nf_div (which is single-day Δ% diff): this captures sustained
+    # outperformance/underperformance rather than one-day swings.
+    _rs = _c / _c_nf.replace(0, np.nan)
+    d["bn_nifty_rs"]        = _rs.fillna(method="ffill").fillna(1.0)
+    d["bn_nifty_rs_slope5"] = ((_rs / _rs.shift(5) - 1) * 100).fillna(0.0)
+
+    # ── Bank ETF flow (BANKBEES) ─────────────────────────────────────────────
+    # bankbees_ret1: prior-day BANKBEES return — domestic institutional bank-sector flow
+    # bankbees_vol_z: volume z-score over 60d — unusual flow detection
+    if "bankbees_close" in d.columns:
+        _bb_c = d["bankbees_close"].shift(1)
+        d["bankbees_ret1"] = ((_bb_c / _bb_c.shift(1) - 1) * 100).fillna(0.0)
+    else:
+        d["bankbees_ret1"] = 0.0
+    if "bankbees_vol" in d.columns:
+        _bb_v = d["bankbees_vol"].shift(1)
+        _bb_mu  = _bb_v.rolling(60, min_periods=10).mean()
+        _bb_std = _bb_v.rolling(60, min_periods=10).std().replace(0, np.nan)
+        d["bankbees_vol_z"] = ((_bb_v - _bb_mu) / _bb_std).fillna(0.0)
+    else:
+        d["bankbees_vol_z"] = 0.0
+
+    # ── Bank breadth (top-5 BN constituents) ─────────────────────────────────
+    # bank_breadth_d1: fraction of top-5 (HDFC/ICICI/KOTAK/SBI/AXIS) with +ve return
+    #   yesterday. Proxy for how broad-based any BN move was — narrow moves (1-2 stocks
+    #   carrying the index) often reverse; broad moves persist.
+    # bank_breadth_z:  60d z-score of breadth — regime detector.
+    _stock_cols = ["hdfc_close","icici_close","kotak_close","sbi_close","axis_close"]
+    _returns = []
+    for _sc in _stock_cols:
+        if _sc in d.columns:
+            _sc_s = d[_sc].shift(1)
+            _ret  = (_sc_s / _sc_s.shift(1) - 1)
+            _returns.append(_ret)
+    if _returns:
+        _ret_df = pd.concat(_returns, axis=1)
+        d["bank_breadth_d1"] = (_ret_df > 0).sum(axis=1).fillna(0) / max(len(_returns), 1)
+        _br_mu  = d["bank_breadth_d1"].rolling(60, min_periods=10).mean()
+        _br_std = d["bank_breadth_d1"].rolling(60, min_periods=10).std().replace(0, np.nan)
+        d["bank_breadth_z"] = ((d["bank_breadth_d1"] - _br_mu) / _br_std).fillna(0.0)
+    else:
+        d["bank_breadth_d1"] = 0.5
+        d["bank_breadth_z"]  = 0.0
+
+    # ── Opening Range Breakout (9:15-9:30 15-min candle, prior day) ──────────
+    # orb_range_pct:  prior-day 9:15-9:30 candle range as % of spot — volatility proxy
+    # orb_break_side: +1 if prior-day close > prior-day 9:15 candle high,
+    #                 -1 if prior-day close < prior-day 9:15 candle low,
+    #                  0 if closed inside the opening range.
+    # Training uses prior day's ORB because today's 9:15-9:30 candle isn't known
+    # until 9:30 AM (auto_trader would need to fetch live for today's value —
+    # a separate task; for now, training + live both use shift(1)).
+    if "orb_high" in d.columns and "orb_low" in d.columns:
+        _orb_h = d["orb_high"].shift(1)
+        _orb_l = d["orb_low"].shift(1)
+        _bn_prev_close = _c  # _c is already shift(1)
+        _range = (_orb_h - _orb_l).replace(0, np.nan)
+        d["orb_range_pct"] = (_range / _c * 100).fillna(0.0)
+        d["orb_break_side"] = np.where(_bn_prev_close > _orb_h, 1,
+                              np.where(_bn_prev_close < _orb_l, -1, 0))
+    else:
+        d["orb_range_pct"]  = 0.0
+        d["orb_break_side"] = 0
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -649,6 +786,21 @@ FEATURE_COLS = [
     "oi_imbalance_atm",  # ATM CE vs PE OI imbalance — directional bias
     "call_wall_offset",  # offset (-3..+3) of max CE OI strike — resistance position
     "put_wall_offset",   # offset (-3..+3) of max PE OI strike — support position
+    # Max pain + GEX (written daily by auto_trader into options_atm_daily.csv)
+    "max_pain_dist_prev",  # % distance spot vs max-pain strike (prior day)
+    "gex_flag_prev",       # +1 ranging / -1 trending / 0 unknown (dealer gamma regime)
+    # VIX percentile + relative strength
+    "vix_pct_rank_252",    # VIX 252-day percentile — regime-normalized fear level
+    "bn_nifty_rs",         # BN/Nifty ratio — sector leadership level
+    "bn_nifty_rs_slope5",  # 5-day % change in BN/Nifty ratio — leadership momentum
+    # Bank sector ETF flow + breadth (requires yfinance BANKBEES + top-5 stocks)
+    "bankbees_ret1",       # BANKBEES prior-day return — domestic bank ETF flow
+    "bankbees_vol_z",      # BANKBEES volume z-score (60d) — unusual flow detection
+    "bank_breadth_d1",     # % of top-5 BN constituents up yesterday — move conviction
+    "bank_breadth_z",      # 60d z-score of breadth — regime detector
+    # Opening range breakout (prior day's 9:15 candle — from banknifty_15m_orb.csv)
+    "orb_range_pct",       # prior-day 9:15 candle range as % of spot — vol proxy
+    "orb_break_side",      # +1/-1/0 — did prev close break above/below/inside 9:15 range
 ]
 
 

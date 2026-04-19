@@ -79,7 +79,17 @@ call_skew, put_skew, skew_spread, skew_chg  (IV skew dynamics — requires optio
 skew_trend_interact, skew_vix_regime        (skew interactions with trend and vol regime)
 oi_pcr_wide, oi_imbalance_atm               (OI surface — requires options_oi_surface.csv)
 call_wall_offset, put_wall_offset           (max OI strike position vs ATM)
+max_pain_dist_prev, gex_flag_prev           (max pain distance + dealer gamma regime)
+vix_pct_rank_252                            (VIX 252-day percentile — regime-normalized)
+bn_nifty_rs, bn_nifty_rs_slope5             (BN/Nifty leadership ratio + momentum)
+bankbees_ret1, bankbees_vol_z               (bank ETF flow + unusual volume — yfinance)
+bank_breadth_d1, bank_breadth_z             (top-5 BN constituent breadth + regime)
+orb_range_pct, orb_break_side               (prior-day 9:15 opening-range breakout)
 ```
+
+**Note: GIFT Nifty pre-open not implemented** — no stable public API. Would need
+investing.com scraping or paid feed. S&P 500 futures gap (`spf_gap`) serves as
+the closest overnight proxy for now.
 
 ### signal_engine.py — score_row()
 

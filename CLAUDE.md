@@ -207,6 +207,8 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/options_atm_daily.csv` | Real ATM option opens from Dhan rollingoption (date, call_premium, put_premium) |
 | `data/options_iv_skew.csv` | Daily ATM + OTM±3 implied volatilities (date, call_iv_atm, put_iv_atm, call_iv_otm, put_iv_otm) |
 | `data/options_oi_surface.csv` | Daily OI at ATM±3 strikes × CE/PE (date, atm_strike, ce_oi_m3..p3, pe_oi_m3..p3) |
+| `data/banknifty_15m_orb.csv` | BN 9:15-9:30 opening range candles (date, orb_open/high/low/close) for ORB features |
+| `data/bankbees.csv` + `hdfcbank.csv` + `icicibank.csv` + `kotakbank.csv` + `sbin.csv` + `axisbank.csv` | Bank ETF + top-5 BN constituents (yfinance daily OHLCV) for breadth + flow features |
 | `data/live_trades.csv` | Daily live-trade outcomes (written by trade_journal.py + backfill_live_trades.py) |
 | `data/today_trade.json` | What auto_trader placed today (read by trade_journal) |
 | `data/midday_checkpoints.csv` | Midday conviction snapshots — reversal detection, fed to model_evolver + autoloop |
@@ -266,7 +268,10 @@ python3 backtest_engine.py --ml              # ML backtest (formula premium)
 python3 backtest_live_context.py             # research: intraday live-context rules
 
 # Fetch historical ATM option premiums + IV skew + OI surface (one-time, then incremental)
-python3 data_fetcher.py --fetch-options  # options_atm_daily.csv + options_iv_skew.csv + options_oi_surface.csv
+python3 data_fetcher.py --fetch-options   # options_atm_daily.csv + options_iv_skew.csv + options_oi_surface.csv
+
+# Fetch historical BN 9:15-9:30 opening range candles (one-time, ~2 min for 5y)
+python3 data_fetcher.py --fetch-intraday  # banknifty_15m_orb.csv (90-day chunks via Dhan intraday)
 
 # Live test
 python3 auto_trader.py --dry-run

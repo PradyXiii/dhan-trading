@@ -789,6 +789,107 @@ def fetch_oi_surface(from_date, to_date):
     return new_df
 
 
+def fetch_bn_intraday_15m(from_date, to_date):
+    """
+    Fetch BankNifty index 15-minute intraday candles for Opening Range Breakout.
+
+    Extracts only the 9:15-9:30 AM (first) candle of each trading day and saves:
+      date, orb_open, orb_high, orb_low, orb_close  → data/banknifty_15m_orb.csv
+
+    The Dhan /v2/charts/intraday endpoint caps each request at 90 days, so this
+    chunks the range and retries gently on rate limits. ~2 min for 5 years.
+
+    Used by ml_engine.compute_features() to derive:
+      orb_range_pct   = (orb_high − orb_low) / spot × 100 (prior-day, shift(1))
+      orb_break_side  = +1 if prev close > orb_high, −1 if < orb_low, 0 inside
+    """
+    out_path = f"{DATA_DIR}/banknifty_15m_orb.csv"
+
+    start  = datetime.strptime(from_date, "%Y-%m-%d").date()
+    end    = datetime.strptime(to_date,   "%Y-%m-%d").date()
+    rows   = []
+    current = start
+
+    while current < end:
+        chunk_end = min(current + timedelta(days=85), end)
+        payload = {
+            "securityId":      "25",
+            "exchangeSegment": "IDX_I",
+            "instrument":      "INDEX",
+            "interval":        "15",
+            "oi":              False,
+            "fromDate":        f"{current.strftime('%Y-%m-%d')} 09:00:00",
+            "toDate":          f"{chunk_end.strftime('%Y-%m-%d')} 15:35:00",
+        }
+        try:
+            resp = requests.post(
+                "https://api.dhan.co/v2/charts/intraday",
+                headers=HEADERS,
+                json=payload,
+                timeout=45,
+            )
+            if resp.status_code != 200:
+                print(f"  bn_15m [{current}→{chunk_end}]: "
+                      f"HTTP {resp.status_code} — {resp.text[:200]}")
+                time.sleep(0.6)
+                current = chunk_end + timedelta(days=1)
+                continue
+
+            d = resp.json()
+            if not d.get("timestamp"):
+                print(f"  bn_15m [{current}→{chunk_end}]: empty response")
+                time.sleep(0.4)
+                current = chunk_end + timedelta(days=1)
+                continue
+
+            ts_ist = (pd.to_datetime(d["timestamp"], unit="s")
+                      + pd.Timedelta(hours=5, minutes=30))
+            bars   = pd.DataFrame({
+                "dt":    ts_ist,
+                "open":  d.get("open",  []),
+                "high":  d.get("high",  []),
+                "low":   d.get("low",   []),
+                "close": d.get("close", []),
+            })
+            bars["date"] = bars["dt"].dt.normalize()
+            bars["hhmm"] = bars["dt"].dt.strftime("%H:%M")
+            # First bar of each day = 9:15 AM open candle (covers 9:15-9:30)
+            orb = bars[bars["hhmm"] == "09:15"][["date", "open", "high", "low", "close"]]
+            orb = orb.rename(columns={"open":"orb_open","high":"orb_high",
+                                       "low":"orb_low","close":"orb_close"})
+            rows.extend(orb.to_dict("records"))
+            print(f"  bn_15m [{current}→{chunk_end}]: {len(orb)} ORB candles")
+
+        except Exception as e:
+            print(f"  bn_15m [{current}→{chunk_end}]: error — {e}")
+
+        time.sleep(0.5)
+        current = chunk_end + timedelta(days=1)
+
+    if not rows:
+        print("  bn_15m: no data fetched")
+        return pd.DataFrame()
+
+    new_df = (pd.DataFrame(rows)
+                .drop_duplicates("date")
+                .sort_values("date")
+                .reset_index(drop=True))
+
+    if os.path.exists(out_path):
+        existing = pd.read_csv(out_path, parse_dates=["date"])
+        combined = (pd.concat([existing, new_df])
+                      .drop_duplicates("date")
+                      .sort_values("date")
+                      .reset_index(drop=True))
+    else:
+        combined = new_df
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    combined.to_csv(out_path, index=False)
+    print(f"  → Saved banknifty_15m_orb.csv  ({len(combined)} rows)")
+    return new_df
+
+
 def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
     """
     Fetch BankNifty historical ATM PCR from Dhan /v2/charts/rollingoption.
@@ -1064,6 +1165,15 @@ def main():
             print(f"  Done. {len(df_oi)} new rows fetched.")
         return
 
+    # Handle --fetch-intraday: fetch BN 15-min bars for ORB features
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-intraday":
+        print("=== Historical BN 15-min Intraday (ORB 9:15 candles, Dhan) ===")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        df_orb = fetch_bn_intraday_15m(FROM_DATE, TO_DATE)
+        if not df_orb.empty:
+            print(f"  Done. {len(df_orb)} new rows fetched.")
+        return
+
     # Handle --fetch-pcr-historical flag
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-pcr-historical":
         from_date = _sys.argv[2] if len(_sys.argv) >= 3 else "2022-01-01"
@@ -1114,6 +1224,12 @@ def main():
             ("USDINR=X",  "USD/INR",     "usdinr.csv"),
             ("DX-Y.NYB",  "DXY",         "dxy.csv"),
             ("^TNX",      "US 10Y",      "us10y.csv"),
+            ("BANKBEES.NS",  "BankBees ETF", "bankbees.csv"),
+            ("HDFCBANK.NS",  "HDFC Bank",    "hdfcbank.csv"),
+            ("ICICIBANK.NS", "ICICI Bank",   "icicibank.csv"),
+            ("KOTAKBANK.NS", "Kotak Bank",   "kotakbank.csv"),
+            ("SBIN.NS",      "SBI",          "sbin.csv"),
+            ("AXISBANK.NS",  "Axis Bank",    "axisbank.csv"),
         ]
         for ticker, name, csv_file in yf_backfill:
             path    = f"{DATA_DIR}/{csv_file}"
@@ -1160,6 +1276,13 @@ def main():
         ("USDINR=X",  "USD/INR",     "usdinr.csv"),
         ("DX-Y.NYB",  "DXY",         "dxy.csv"),
         ("^TNX",      "US 10Y",      "us10y.csv"),
+        # Bank sector ETF + top-5 BN constituents (for breadth + flow features)
+        ("BANKBEES.NS",  "BankBees ETF", "bankbees.csv"),
+        ("HDFCBANK.NS",  "HDFC Bank",    "hdfcbank.csv"),
+        ("ICICIBANK.NS", "ICICI Bank",   "icicibank.csv"),
+        ("KOTAKBANK.NS", "Kotak Bank",   "kotakbank.csv"),
+        ("SBIN.NS",      "SBI",          "sbin.csv"),
+        ("AXISBANK.NS",  "Axis Bank",    "axisbank.csv"),
     ]
 
     def _update_yf(ticker, name, csv_file):
