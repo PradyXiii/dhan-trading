@@ -1,6 +1,6 @@
 # BankNifty Options Auto-Trader
 
-Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Every Saturday night it runs an AI-driven experiment loop that tries to improve its own model — keeping what works, reverting what doesn't. Nothing to do during market hours.
+Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Every weeknight at midnight it runs an AI-driven experiment loop that tries to improve its own model — keeping what works, reverting what doesn't. Nothing to do during market hours.
 
 ---
 
