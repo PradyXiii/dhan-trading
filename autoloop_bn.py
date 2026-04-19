@@ -54,6 +54,7 @@ _ALLOWED_FILES   = _PAPER_FILES | _IMMEDIATE_FILES
 _PAPER_FILE      = _HERE / "ml_engine_paper.py"
 _PAPER_PERF_CSV  = _HERE / "data" / "paper_performance.csv"
 _PAPER_CHANGES   = _HERE / "data" / "paper_changes.json"
+_EXP_HISTORY     = _HERE / "data" / "experiment_history.json"  # never reset
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -358,6 +359,39 @@ def _clear_paper_changes() -> None:
     # on the next run (files are identical post-promotion, nothing to commit).
     if _PAPER_PERF_CSV.exists():
         _PAPER_PERF_CSV.unlink()
+
+
+def _record_experiment(description: str, kept: bool, score_before: float, score_after: float) -> None:
+    """Append every experiment (kept or discarded) to the lifetime history. Never reset."""
+    _EXP_HISTORY.parent.mkdir(exist_ok=True)
+    history = json.loads(_EXP_HISTORY.read_text()) if _EXP_HISTORY.exists() else []
+    history.append({
+        "date": datetime.now(_IST).strftime("%Y-%m-%d"),
+        "description": description,
+        "kept": kept,
+        "before": round(score_before, 4),
+        "after": round(score_after, 4),
+    })
+    _EXP_HISTORY.write_text(json.dumps(history, indent=2))
+
+
+def _load_experiment_history(n: int = 40) -> str:
+    """Return last n experiments as a prompt-ready string."""
+    if not _EXP_HISTORY.exists():
+        return ""
+    history = json.loads(_EXP_HISTORY.read_text())
+    if not history:
+        return ""
+    recent = history[-n:]
+    lines = [
+        f"  {e['date']}  {'✅ KEPT' if e['kept'] else '❌ DISCARD'}  "
+        f"{e['before']:.4f}→{e['after']:.4f}  {e['description'][:120]}"
+        for e in recent
+    ]
+    return (
+        f"\n\n### Lifetime experiment history (last {len(recent)} — DO NOT repeat these):\n"
+        + "\n".join(lines)
+    )
 
 
 def _promote_paper_to_live(streak: int, avg_advantage: float) -> None:
@@ -719,6 +753,7 @@ def _call_claude(
         + _build_column_inventory()
         + "\n\n"
         + log_str
+        + _load_experiment_history()
         + _reversal_summary()
         + "\n\n"
         "### Your task\n"
@@ -1214,6 +1249,7 @@ def main():
                         "kept": True,
                     }
                 )
+                _record_experiment(description, kept=True, score_before=prev_best, score_after=new_composite)
                 delta = new_composite - prev_best
                 delta_str = f"+{delta:.2%}" if delta > 0 else "no change"
 
@@ -1275,6 +1311,7 @@ def main():
             experiment_log.append(
                 {"n": i, "description": description, "before": cur_best, "after": new_composite, "kept": False}
             )
+            _record_experiment(description, kept=False, score_before=cur_best, score_after=new_composite)
             _send(
                 f"❌ <b>Idea #{i} of {n_experiments} didn't help</b>\n\n"
                 f"💡 {plain_eng}\n\n"
