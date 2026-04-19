@@ -335,11 +335,12 @@ def compute_features(df):
     # Shift BN and NF close by 1: yesterday's close is what's known at 9:15 AM.
     # Every rolling/ewm/pct_change on price must operate on _c, not bn_close,
     # to avoid training on data that leaks the same-day close into the label.
-    _c    = d["bn_close"].shift(1)   # yesterday's BN close
-    _c_nf = d["nf_close"].shift(1)   # yesterday's NF close
-    _vix  = d["vix_close"].shift(1).clip(8, 85)  # yesterday's India VIX; clip outliers from yfinance data errors
-    _sp   = d["sp_close"].shift(1)   # yesterday's S&P — closes 1:30 AM IST, not known at 9:30 AM IST
-    _nk   = d["nk_close"].shift(1)   # yesterday's Nikkei — full-day close is noon IST, after trade entry
+    # Coerce to numeric — incremental CSV writes can leave object dtype, which breaks arithmetic.
+    _c    = pd.to_numeric(d["bn_close"],  errors="coerce").shift(1)   # yesterday's BN close
+    _c_nf = pd.to_numeric(d["nf_close"],  errors="coerce").shift(1)   # yesterday's NF close
+    _vix  = pd.to_numeric(d["vix_close"], errors="coerce").shift(1).clip(8, 85)  # yesterday's India VIX; clip outliers from yfinance data errors
+    _sp   = pd.to_numeric(d["sp_close"],  errors="coerce").shift(1)   # yesterday's S&P — closes 1:30 AM IST, not known at 9:30 AM IST
+    _nk   = pd.to_numeric(d["nk_close"],  errors="coerce").shift(1)   # yesterday's Nikkei — full-day close is noon IST, after trade entry
 
     # ── Core technicals ───────────────────────────────────────────────────────
     d["ema20"]      = _c.ewm(span=20, adjust=False).mean()
@@ -659,9 +660,7 @@ def compute_features(df):
     # bn_nifty_rs_slope5: 5-day % change in that ratio — leadership momentum
     # Different from bn_nf_div (which is single-day Δ% diff): this captures sustained
     # outperformance/underperformance rather than one-day swings.
-    _c_f   = pd.to_numeric(_c,    errors="coerce")
-    _cnf_f = pd.to_numeric(_c_nf, errors="coerce").replace(0, np.nan)
-    _rs = _c_f / _cnf_f
+    _rs = _c / _c_nf.replace(0, np.nan)
     d["bn_nifty_rs"]        = _rs.ffill().fillna(1.0)
     d["bn_nifty_rs_slope5"] = ((_rs / _rs.shift(5) - 1) * 100).fillna(0.0)
 
@@ -712,8 +711,8 @@ def compute_features(df):
     # until 9:30 AM (auto_trader would need to fetch live for today's value —
     # a separate task; for now, training + live both use shift(1)).
     if "orb_high" in d.columns and "orb_low" in d.columns:
-        _orb_h = d["orb_high"].shift(1)
-        _orb_l = d["orb_low"].shift(1)
+        _orb_h = pd.to_numeric(d["orb_high"], errors="coerce").shift(1)
+        _orb_l = pd.to_numeric(d["orb_low"],  errors="coerce").shift(1)
         _bn_prev_close = _c  # _c is already shift(1)
         _range = (_orb_h - _orb_l).replace(0, np.nan)
         d["orb_range_pct"] = (_range / _c * 100).fillna(0.0)
