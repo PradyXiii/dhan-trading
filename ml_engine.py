@@ -572,8 +572,7 @@ FEATURE_COLS = [
     # Options/flow features (already computed)
     "pcr_ma5",              # 5-day smoothed put-call ratio
     "fii_net_cash_z",       # z-scored FII net cash flow
-    # ADX-based features (trend strength)
-    "adx14",                # trend strength 0-100
+    # ADX interaction features (adx14 itself is already listed above)
     "adx_trend_interact",   # ADX × s_ema20 — strong trend amplifies direction
     "adx_gap_interact",     # ADX × bn_gap — strong trend + gap = continuation
     # IV skew dynamics (from options_iv_skew.csv — populated by data_fetcher.py --fetch-options)

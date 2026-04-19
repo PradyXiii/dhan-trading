@@ -505,7 +505,6 @@ def fetch_iv_skew(from_date, to_date):
     Saved to: data/options_iv_skew.csv
     Run via:  python3 data_fetcher.py --fetch-options
     """
-    from datetime import date as _dt
     out_path = f"{DATA_DIR}/options_iv_skew.csv"
 
     start    = datetime.strptime(from_date, "%Y-%m-%d").date()
