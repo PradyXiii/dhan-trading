@@ -1147,7 +1147,7 @@ def predict_today():
             p_call    = sum(pcalls) / len(pcalls)   # avg across ensemble
             p_put     = 1.0 - p_call
             ml_trained = True
-            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB"}
+            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB", "cat": "CAT"}
             vote_str = "  ".join(
                 f"{names.get(m[1]['model_type'], '?')}:{v}"
                 for m, v in zip(ensemble_members, votes)
