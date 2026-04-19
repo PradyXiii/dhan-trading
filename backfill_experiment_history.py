@@ -121,7 +121,7 @@ def backfill_mcx():
     history = []
 
     result = subprocess.run(
-        ["git", "log", "--all", "--pretty=format:%ad %s", "--date=short"],
+        ["git", "log", "--pretty=format:%ad %s", "--date=short"],
         capture_output=True, text=True, cwd=HERE
     )
     kept_pat = re.compile(
