@@ -51,21 +51,21 @@ def send(message: str, silent: bool = False) -> bool:
     Send a message to Telegram AND print to console.
     silent=True → print to console only, skip Telegram (for debug/intermediate steps).
 
-    Critical alerts (containing 🚨 ❌ ⚠️) are ALWAYS written to
-    data/critical_alerts.log as a fallback if Telegram is unreachable.
+    Critical alerts (containing 🚨 ❌ ⚠️) are written to data/critical_alerts.log
+    ONLY when Telegram is unreachable — it is a failure-mode audit trail, not a
+    mirror of every message. health_ping.py treats any recent write to this file
+    as evidence of a Telegram outage.
     """
     timestamp = datetime.now(_IST).strftime("%H:%M:%S IST")
     print(f"[{timestamp}] {_strip_html(message)[:120]}")
-
-    # Always persist critical messages locally regardless of Telegram status
-    if any(m in message for m in _CRITICAL_MARKERS):
-        _write_alert_log(message)
 
     if silent:
         return True   # console-only; do not send to Telegram
 
     if not _BOT_TOKEN or not _CHAT_ID:
         return True   # Telegram not configured — silent no-op
+
+    is_critical = any(m in message for m in _CRITICAL_MARKERS)
 
     try:
         resp = requests.post(
@@ -77,7 +77,13 @@ def send(message: str, silent: bool = False) -> bool:
             },
             timeout=10,
         )
-        return resp.status_code == 200
+        if resp.status_code == 200:
+            return True
+        if is_critical:
+            _write_alert_log(message)
+        return False
     except Exception as e:
-        print(f"  Telegram send failed: {e}  → saved to data/critical_alerts.log")
+        print(f"  Telegram send failed: {e}")
+        if is_critical:
+            _write_alert_log(message)
         return False
