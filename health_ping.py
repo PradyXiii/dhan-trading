@@ -147,14 +147,19 @@ def _check_critical_log() -> str | None:
     """
     Return a summary if data/critical_alerts.log was written today or yesterday
     (indicates Telegram was down during a previous session).
+    Empty files are ignored — truncation leaves a fresh mtime on a 0-byte file
+    and would otherwise false-alarm.
     """
     log_path = os.path.join(_HERE, DATA_DIR, "critical_alerts.log")
     if not os.path.exists(log_path):
         return None
+    size_bytes = os.path.getsize(log_path)
+    if size_bytes == 0:
+        return None
     mtime = os.path.getmtime(log_path)
     age_hours = (time.time() - mtime) / 3600
     if age_hours <= 48:
-        size_kb = os.path.getsize(log_path) / 1024
+        size_kb = size_bytes / 1024
         return (f"critical_alerts.log was updated {age_hours:.0f}h ago "
                 f"({size_kb:.1f} KB) — Telegram may have been down during a recent session.")
     return None
