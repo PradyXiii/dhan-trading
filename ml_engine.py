@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
+# ─── BEFORE EDITING THIS FILE ────────────────────────────────────────────────
+# Read "ML FEATURE RULE" and "Known Gotchas" sections in CLAUDE.md first.
+# Reserved loop-variable names (never reuse): _c  _c_nf  _vix  _sp  _nk
+# Every new feature needs .shift(1) on price inputs — no same-day values.
+# After editing FEATURE_COLS: verify len(FEATURE_COLS) == len(set(FEATURE_COLS))
+# Gate every change with: python3 autoexperiment_bn.py — keep only if >= 0.6175
+# ─────────────────────────────────────────────────────────────────────────────
 """
 ml_engine.py — Walk-forward ML direction engine for BankNifty options.
 

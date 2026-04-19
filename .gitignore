@@ -9,10 +9,28 @@ __pycache__/
 # CatBoost training artifacts (auto-created when model trains)
 catboost_info/
 
-# Data files generated during backtest
+# Data files generated during backtest / live trading
+# SECURITY: These files contain trade history, P&L, credentials — never commit
 *.csv
 *.json
 data/
+data/live_trades.csv
+data/paper_performance.csv
+data/midday_checkpoints.csv
+data/news_sentiment.json
+data/today_trade.json
+data/vix_threshold.json
+models/
+models/*.pkl
+models/*.json
+
+# Claude Code project config — negation MUST come after the *.json rule above
+# These .claude/ files are safe to commit (no credentials, no P&L data)
+!.claude/settings.json
+!.claude/commands/
+!.claude/commands/*.md
+!.claude/hooks/
+!.claude/hooks/*.sh
 
 # Local-only scripts (VM only, never published)
 portfolio_tracker.py

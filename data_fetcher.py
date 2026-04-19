@@ -1,4 +1,9 @@
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
+# ─── BEFORE EDITING THIS FILE ────────────────────────────────────────────────
+# Read "ML FEATURE RULE" and "Known Gotchas" sections in CLAUDE.md first.
+# New yfinance tickers: run --backfill after first fetch (default gets 1 row only).
+# Dhan intraday data (ORB) available only from Aug 2021 onward — earlier = empty.
+# ─────────────────────────────────────────────────────────────────────────────
 import requests
 import pandas as pd
 import numpy as np

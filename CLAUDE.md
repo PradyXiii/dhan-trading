@@ -43,6 +43,72 @@ The docs have the exact answer. Read them first, always.
 
 ---
 
+## ⚠️ BUG FIX RULE — EVERY DEBUG SESSION
+
+**Before writing any bug fix — search first, code second.**
+
+1. Copy the exact error message (the last line of the traceback)
+2. WebSearch it — look at GitHub issues, Stack Overflow, pandas/scikit-learn docs
+3. Explain what you found in **plain English** (what caused the bug, why it happened, how the fix works)
+4. Only then write the fix
+
+**Plain English means:** no jargon. If the word "dtype", "coerce", "shadow", or "shift" appears in the explanation to the user, explain what it means in brackets. Every number needs a unit and context. Never paste a raw error traceback at the user — one sentence summary is enough.
+
+---
+
+## ⚠️ ML FEATURE RULE — BEFORE EDITING ml_engine.py OR data_fetcher.py
+
+**Checklist — follow in order, every time:**
+
+1. Add computation inside `compute_features()` in `ml_engine.py`, using `.shift(1)` on all price columns (yesterday's values only — today's prices would be cheating)
+2. **Reserved variable names — never use as loop variables:** `_c`, `_c_nf`, `_vix`, `_sp`, `_nk` — these hold price series; if overwritten, every downstream calculation silently breaks
+3. Add the feature name once to `FEATURE_COLS` — then check: `len(FEATURE_COLS) == len(set(FEATURE_COLS))` (duplicates inflate importance silently)
+4. If feature needs a new data file: `python3 data_fetcher.py` then `python3 data_fetcher.py --backfill` (new CSVs start with 1 row — zero importance until backfilled)
+5. Run `python3 ml_engine.py --analyze` — feature importance must be > 0
+6. Run `python3 autoexperiment_bn.py` — **keep only if composite >= 0.6175** (current best)
+7. Commit + push to `claude/banknifty-options-backtest-JoxCW`
+
+---
+
+## ⚠️ PLAIN ENGLISH RULE — ALL USER-FACING OUTPUT
+
+**Every message to the user must pass this test: would a non-programmer understand it?**
+
+- Numbers need context: "composite score 0.617 — that's 10 points above our 0.515 starting point and above the 0.60 target"
+- Verdicts not metrics: "the model improved" not "accuracy delta +1.1pp"
+- Error summaries in one sentence: "A variable name conflict in the code caused a text string to end up where a price number was expected" — not the raw Python traceback
+- Status reports in plain terms: "Today's signal is CALL — model says markets will go up" not "model output: P(CALL)=0.62"
+
+---
+
+## ⚠️ SECURITY RULE — BEFORE EVERY GIT COMMIT
+
+**Always run `git status` before committing. Never commit:**
+
+- Anything inside `data/` — this includes all CSV files with trade history, backtest results, P&L records
+- `models/` — trained ML model files
+- `logs/` — cron job output
+- `.env` — API tokens and credentials
+- Any file containing actual trade P&L numbers, win rates from live trading, or account balances
+
+The `.gitignore` already blocks most of these automatically, but **always visually scan `git status` output** before running `git commit`. If a data file appears in the staging area, remove it immediately.
+
+---
+
+## Known Gotchas — Session-Discovered Bugs
+
+This table grows every session. Each entry = a bug that was debugged and must never be debugged again.
+
+| Bug | What you'll see | Fix |
+|---|---|---|
+| `_c` used as loop variable inside `compute_features()` | Error: `could not convert string to float: 'pe_oi_p3'` — a column name ends up where a price number should be | Rename the loop variable to `_oi_col` or `_col` — `_c` is reserved for the BN close price series |
+| New yfinance ticker CSV has only 1 row of data | Feature shows 0.000 importance in `--analyze` output | Run `python3 data_fetcher.py --backfill` to fetch full 7-year history |
+| Same feature name appears twice in `FEATURE_COLS` | That feature's importance appears doubled; model wastes capacity | After any `FEATURE_COLS` edit: `python3 -c "from ml_engine import FEATURE_COLS; print(len(FEATURE_COLS), len(set(FEATURE_COLS)))"` — both numbers must match |
+| `options_iv_skew.csv` doesn't exist yet | Skew features (`call_skew`, `put_skew`, `skew_spread`) all show as zero | Run `python3 data_fetcher.py --fetch-options` once to create the file |
+| Opening range breakout (ORB) data is missing before August 2021 | `orb_range_pct` shows 0.000 for 2019–2021 rows | Normal — Dhan's intraday data API only goes back to mid-2021; the feature works correctly from that date forward |
+
+---
+
 ## What This System Does
 
 Fully automated BankNifty options trading. Cron fires at 9:30 AM IST on trading days:
