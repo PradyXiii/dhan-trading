@@ -43,42 +43,60 @@ def backfill_bn():
     kept.reverse()  # oldest first
     print(f"  Kept from git log:       {len(kept)}")
 
-    # ── 2. Discarded experiments from log file ─────────────────────────────────
+    # ── 2. Discarded/failed experiments from log file ─────────────────────────
+    # Parse each experiment block individually: find Proposal line then outcome.
     discarded = []
     if log_path.exists():
+        from datetime import datetime
         text = log_path.read_text(encoding="utf-8", errors="replace")
-        # Pattern: date line followed by proposal line followed by discard line
-        # [HH:MM:SS IST] ❌ Idea #N...
-        # Lines just above: "  Proposal: [file] description"
-        # And score line:   "  Score: X → Y"
-        blocks = re.split(r"={60,}", text)
-        for block in blocks:
-            proposals = re.findall(
-                r"Proposal:\s*\[[\w_.]+\]\s*(.+?)\n",
-                block
-            )
-            discards = re.findall(
-                r"❌ DISCARDED \(composite (\d+\.\d+) not > (\d+\.\d+)",
-                block
-            )
-            # Find the date of this block
-            date_m = re.search(r"(\d{2} \w{3} \d{4})", block)
+
+        # Split into per-session chunks on the header separator
+        sessions = re.split(r"={58,}", text)
+        for session in sessions:
+            # Get session date from header e.g. "18 Apr 2026"
+            date_m = re.search(r"(\d{1,2} \w{3} \d{4})", session)
             date_str = ""
             if date_m:
-                from datetime import datetime
                 try:
                     date_str = datetime.strptime(date_m.group(1), "%d %b %Y").strftime("%Y-%m-%d")
                 except ValueError:
                     pass
 
-            for desc, (after, before) in zip(proposals, discards):
-                discarded.append({
-                    "date": date_str,
-                    "description": desc.strip()[:200],
-                    "kept": False,
-                    "before": float(before),
-                    "after": float(after),
-                })
+            # Split session into per-experiment chunks on "[Exp N/..."
+            exp_blocks = re.split(r"\[Exp \d+/\d+\]", session)
+            for exp in exp_blocks[1:]:  # skip preamble before first [Exp
+                desc_m = re.search(r"Proposal:\s*\[[\w_.]+\]\s*(.+?)\n", exp)
+                if not desc_m:
+                    continue
+                desc = desc_m.group(1).strip()[:200]
+
+                # Outcome: DISCARDED
+                d_m = re.search(
+                    r"DISCARDED \(composite ([\d.]+) not > ([\d.]+)",
+                    exp
+                )
+                if d_m:
+                    discarded.append({
+                        "date": date_str,
+                        "description": desc,
+                        "kept": False,
+                        "before": float(d_m.group(2)),
+                        "after": float(d_m.group(1)),
+                    })
+                    continue
+
+                # Outcome: crashed / pre-flight / apply failed (also discard)
+                if re.search(r"Pre-flight:|Apply failed:|Experiment failed:|incomplete change", exp):
+                    score_m = re.search(r"Score: ([\d.]+) .*?([\d.]+)", exp)
+                    before = float(score_m.group(1)) if score_m else 0.0
+                    discarded.append({
+                        "date": date_str,
+                        "description": desc + " [CRASHED/FAILED]",
+                        "kept": False,
+                        "before": before,
+                        "after": before,
+                    })
+
     print(f"  Discarded from log file: {len(discarded)}")
 
     # ── 3. Merge: sort by date, deduplicate by description ─────────────────────
@@ -125,29 +143,36 @@ def backfill_mcx():
 
     discarded = []
     if log_path.exists():
+        from datetime import datetime
         text = log_path.read_text(encoding="utf-8", errors="replace")
-        blocks = re.split(r"={60,}", text)
-        for block in blocks:
-            proposals = re.findall(r"Proposal:\s*\[[\w_.]+\]\s*(.+?)\n", block)
-            discards = re.findall(
-                r"❌ DISCARDED \(composite (\d+\.\d+) not > (\d+\.\d+)", block
-            )
-            date_m = re.search(r"(\d{2} \w{3} \d{4})", block)
+        sessions = re.split(r"={58,}", text)
+        for session in sessions:
+            date_m = re.search(r"(\d{1,2} \w{3} \d{4})", session)
             date_str = ""
             if date_m:
-                from datetime import datetime
                 try:
                     date_str = datetime.strptime(date_m.group(1), "%d %b %Y").strftime("%Y-%m-%d")
                 except ValueError:
                     pass
-            for desc, (after, before) in zip(proposals, discards):
-                discarded.append({
-                    "date": date_str,
-                    "description": desc.strip()[:200],
-                    "kept": False,
-                    "before": float(before),
-                    "after": float(after),
-                })
+            exp_blocks = re.split(r"\[Exp \d+/\d+\]", session)
+            for exp in exp_blocks[1:]:
+                desc_m = re.search(r"Proposal:\s*\[[\w_.]+\]\s*(.+?)\n", exp)
+                if not desc_m:
+                    continue
+                desc = desc_m.group(1).strip()[:200]
+                d_m = re.search(r"DISCARDED \(composite ([\d.]+) not > ([\d.]+)", exp)
+                if d_m:
+                    discarded.append({
+                        "date": date_str, "description": desc, "kept": False,
+                        "before": float(d_m.group(2)), "after": float(d_m.group(1)),
+                    })
+                elif re.search(r"Pre-flight:|Apply failed:|Experiment failed:|incomplete change", exp):
+                    score_m = re.search(r"Score: ([\d.]+)", exp)
+                    before = float(score_m.group(1)) if score_m else 0.0
+                    discarded.append({
+                        "date": date_str, "description": desc + " [CRASHED/FAILED]",
+                        "kept": False, "before": before, "after": before,
+                    })
     print(f"  Discarded from log file: {len(discarded)}")
 
     all_entries = kept + discarded
