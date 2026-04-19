@@ -6,6 +6,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# CatBoost training artifacts (auto-created when model trains)
+catboost_info/
+
 # Data files generated during backtest
 *.csv
 *.json
