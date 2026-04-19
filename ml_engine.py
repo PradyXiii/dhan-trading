@@ -1153,7 +1153,8 @@ def predict_today():
                 for m, v in zip(ensemble_members, votes)
             )
             print(f"  Ensemble ({len(votes)} models, trained {(ensemble_trained_at or '')[:10]}):")
-            print(f"  {vote_str}  →  {call_v}/3 CALL  {put_v}/3 PUT")
+            n_models = len(votes)
+            print(f"  {vote_str}  →  {call_v}/{n_models} CALL  {put_v}/{n_models} PUT")
             print(f"  → {ml_signal}  (avg agreed conf {ml_conf:.1%})")
 
     # ── Fast path B: single champion model (fallback if ensemble not ready) ───
