@@ -4,6 +4,15 @@ Quick reference for Claude Code. Read this before touching any file.
 
 ---
 
+## 🗜️ RESPONSE STYLE — CAVEMAN MODE
+
+**All responses in this project use `/caveman full` style** to save tokens.
+Drop articles, filler, pleasantries. Keep all technical facts, code, file paths,
+numbers. Invoke `/caveman-commit` for commit messages and `/caveman-review`
+for PR reviews. Full mode = default; escalate to `/caveman ultra` on request.
+
+---
+
 ## ⚠️ DHAN API RULE — READ THIS FIRST, EVERY SESSION
 
 **Before writing, debugging, or modifying ANY Dhan API call — read the docs first:**
