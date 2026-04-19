@@ -13,6 +13,19 @@ for PR reviews. Full mode = default; escalate to `/caveman ultra` on request.
 
 ---
 
+## 🔍 CODE REVIEW TOOLS
+
+Two review surfaces, different stages:
+
+| Tool | When | Cost | Who triggers |
+|---|---|---|---|
+| `/review` | Quick local pass while iterating on a change | Normal session usage | Either — fast feedback |
+| `/ultrareview` | Pre-merge on substantial PRs — multi-agent cloud review, independently verifies every finding | 3 free runs/account (one-time), then ~$5–$20/run as extra usage | **User only** — Claude cannot auto-invoke |
+
+`/ultrareview` runs 5–10 min in a remote sandbox, returns verified bugs as notifications. Needs Claude.ai login (not API key). Use it before merging — not on every commit.
+
+---
+
 ## ⚠️ DHAN API RULE — READ THIS FIRST, EVERY SESSION
 
 **Before writing, debugging, or modifying ANY Dhan API call — read the docs first:**
