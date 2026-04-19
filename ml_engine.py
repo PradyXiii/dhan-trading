@@ -611,9 +611,9 @@ def compute_features(df):
     _CE_OI_COLS = ["ce_oi_m3","ce_oi_m2","ce_oi_m1","ce_oi_atm","ce_oi_p1","ce_oi_p2","ce_oi_p3"]
     _PE_OI_COLS = ["pe_oi_m3","pe_oi_m2","pe_oi_m1","pe_oi_atm","pe_oi_p1","pe_oi_p2","pe_oi_p3"]
     _OFFSETS    = [-3, -2, -1, 0, 1, 2, 3]
-    for _c in _CE_OI_COLS + _PE_OI_COLS:
-        if _c not in d.columns:
-            d[_c] = np.nan
+    for _oi_col in _CE_OI_COLS + _PE_OI_COLS:
+        if _oi_col not in d.columns:
+            d[_oi_col] = np.nan
     # Prior-day OI (known at 9:30 AM) — pandas shift on DataFrame returns DataFrame
     _ce_oi = d[_CE_OI_COLS].shift(1).fillna(0.0)
     _pe_oi = d[_PE_OI_COLS].shift(1).fillna(0.0)
@@ -660,9 +660,7 @@ def compute_features(df):
     # bn_nifty_rs_slope5: 5-day % change in that ratio — leadership momentum
     # Different from bn_nf_div (which is single-day Δ% diff): this captures sustained
     # outperformance/underperformance rather than one-day swings.
-    _c_arr    = pd.Series(_c,    dtype="float64")
-    _c_nf_arr = pd.Series(_c_nf, dtype="float64").replace(0, np.nan)
-    _rs = _c_arr / _c_nf_arr
+    _rs = _c / _c_nf.replace(0, np.nan)
     d["bn_nifty_rs"]        = _rs.ffill().fillna(1.0)
     d["bn_nifty_rs_slope5"] = ((_rs / _rs.shift(5) - 1) * 100).fillna(0.0)
 
