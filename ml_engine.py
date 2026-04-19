@@ -660,7 +660,9 @@ def compute_features(df):
     # bn_nifty_rs_slope5: 5-day % change in that ratio — leadership momentum
     # Different from bn_nf_div (which is single-day Δ% diff): this captures sustained
     # outperformance/underperformance rather than one-day swings.
-    _rs = _c / _c_nf.replace(0, np.nan)
+    _c_arr    = pd.Series(_c,    dtype="float64")
+    _c_nf_arr = pd.Series(_c_nf, dtype="float64").replace(0, np.nan)
+    _rs = _c_arr / _c_nf_arr
     d["bn_nifty_rs"]        = _rs.ffill().fillna(1.0)
     d["bn_nifty_rs_slope5"] = ((_rs / _rs.shift(5) - 1) * 100).fillna(0.0)
 
