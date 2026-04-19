@@ -22,6 +22,12 @@ Every 5 minutes (all 7 days)
           stale lock-file, critical alert log
         — Sends a single "all clear" (or alarm) to Telegram
 
+9:15 AM IST, Mon–Fri
+  └── morning_brief.py
+        — Fetches BankNifty news headlines, asks Claude for sentiment
+          (bullish / bearish / neutral), writes data/news_sentiment.json
+        — Consumed by auto_trader.py as one additional vote
+
 9:30 AM IST, Mon–Fri
   └── auto_trader.py
         1. Pull latest market data
@@ -34,7 +40,10 @@ Every 5 minutes (all 7 days)
 11:00 AM IST, Mon–Fri
   └── midday_conviction.py
         — Reassesses the morning thesis using intraday BN spot, option LTP,
-          and macro tape. Sends a Telegram conviction summary.
+          and macro tape (S&P futures, DXY, VIX, crude oil intraday)
+        — Detects reversals and writes data/midday_checkpoints.csv
+          (the evolver uses reversal days to boost miss-pattern training)
+        — Sends a Telegram conviction summary in plain English
 
 3:15 PM IST, Mon–Fri
   └── exit_positions.py
@@ -58,14 +67,14 @@ Every 5 minutes (all 7 days)
         — Also saves 4-model ensemble at models/ensemble/*.pkl
         — Sends a plain-English brain-training report to Telegram
 
-11:30 PM IST, every Saturday
+Midnight IST, Mon–Fri
   └── autoloop_bn.py  (Autoresearch)
         — Claude AI proposes one small code change per experiment (feature or signal tweak)
         — autoexperiment_bn.py evaluates it: trains RF on all data, tests on last 252 days
         — If score improves: change is committed to git
         — If score drops: change is reverted, next idea tried
-        — Runs 20 experiments overnight; sends Telegram after each + a morning summary
-        — On completion, triggers model_evolver.py to retrain the 4 models on improved code
+        — Paper model accumulates wins across 3 nights before auto-promoting to live
+        — Sends Telegram summary after each run
 
 1st of every month, 10:00 AM IST
   └── lot_expiry_scanner.py
@@ -113,41 +122,55 @@ Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT
 
 An ensemble of walk-forward models (RF / XGBoost / LightGBM / CatBoost) votes on direction. The champion is the single best model; the full ensemble is used for live prediction agreement. It always outputs CALL or PUT — never skips a trade day.
 
-31 features across five layers: rule signals, global markets (S&P 500, Nikkei, S&P futures), macro drivers (crude oil, DXY, US 10Y yield, USD/INR), options sentiment (PCR, VIX), and institutional flow (FII net cash, z-scored).
+63 features across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro drivers (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile rank, HV ratio), options sentiment (PCR, IV skew — call/put skew spread and momentum, OI surface at ATM±3, max pain, straddle expansion), flow (FII net cash, BankBees ETF, top-5 bank constituents breadth), momentum (BN/Nifty relative strength + 5-day slope, 52-week high distance, ORB range), and calendar (DOW, DTE).
 
-**Step 3 — Autoresearch (weekly, Saturday night):**
+Current holdout composite score: **0.6175** (target was 0.60+, baseline was 0.515). The composite formula is `0.50 × accuracy + 0.25 × recall_CALL + 0.25 × recall_PUT` evaluated on the last 252 trading days.
 
-Claude AI iterates over the feature engineering and signal logic. Each proposed change is evaluated on a 252-day out-of-sample holdout. Improvements are committed to git; regressions are reverted. The 4-model ensemble is retrained on Sunday morning using the improved code. The model gets smarter every week without any human input.
+**Step 3 — Autoresearch (nightly, Mon–Fri midnight):**
+
+Claude AI iterates over the feature engineering and signal logic. Each proposed change is evaluated on a 252-day out-of-sample holdout. Improvements are tested in a paper model first; after 3 nights of consistent outperformance they auto-promote to the live model. Regressions are reverted. The 4-model ensemble retrains nightly using the current best code. The model gets smarter without any human input.
 
 **Step 4 — Live feedback loop:**
 
-After each live trade, `trade_journal.py` records the actual outcome. Every night the evolver injects those real outcomes back into training and boosts historical rows that match "miss-day" market conditions, so the model incrementally corrects its own mistakes.
+After each live trade, `trade_journal.py` records the actual outcome. At 11 AM each day, `midday_conviction.py` detects if the morning thesis has reversed and writes a checkpoint. Every night the evolver injects both signals back into training — live outcomes at 10× weight, midday reversals at 5× weight — and boosts historical rows that match miss-pattern conditions, so the model incrementally corrects its own mistakes.
 
 ---
 
 ## Architecture
 
 ```
-auto_trader.py           Morning runner — orchestrates everything, places the order
-signal_engine.py         Rule-based indicators → data/signals.csv
-ml_engine.py             Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast predict
-model_evolver.py         Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → models/champion.pkl + ensemble/
-backtest_engine.py       Historical P&L simulation with full cost model
-backtest_live_context.py Research backtest — tests intraday live-context overrides
-data_fetcher.py          Downloads OHLCV + global data → data/ (incremental, parallel)
-health_ping.py           Pre-market (8:50 AM) heartbeat: token + capital + freshness checks
-midday_conviction.py     Midday (11 AM) thesis reassessment + Telegram update
-exit_positions.py        EOD 3:15 PM — closes any open NRML positions before market close
-trade_journal.py         EOD 3:30 PM — captures actual fills vs oracle, builds live_trades.csv
-lot_expiry_scanner.py    Monthly check: BankNifty lot size / expiry day changes
-replay_today.py          Post-mortem tool — runs after evolver to replay today with new ensemble
-renew_token.py           Dynamic token renewal — 23h50m interval, 7 days a week
-notify.py                Telegram send helper
-dhan_mcp.py              MCP server — query live Dhan positions/P&L from Claude Code
-autoloop_bn.py           Saturday autoresearch loop — Claude API experiments → git keep/revert
-autoexperiment_bn.py     Fast 252-day holdout evaluator used by autoloop
-research_program_bn.md   Research brief — defines what autoresearch may and may not change
-setup_automation.sh      One-shot VM setup: install deps, set up all cron jobs, dry-run test
+auto_trader.py              Morning runner — orchestrates everything, places the order
+signal_engine.py            Rule-based indicators → data/signals.csv
+ml_engine.py                Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast predict
+ml_engine_paper.py          Paper copy of ml_engine — autoresearcher tests here before promoting to live
+model_evolver.py            Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → models/champion.pkl + ensemble/
+backtest_engine.py          Historical P&L simulation with full cost model
+backtest_live_context.py    Research backtest — tests intraday live-context overrides
+data_fetcher.py             Downloads OHLCV + global data → data/ (incremental, parallel)
+                            Also fetches options IV skew, OI surface, ORB candles
+morning_brief.py            9:15 AM news sentiment — Claude API → data/news_sentiment.json
+health_ping.py              Pre-market (8:50 AM) heartbeat: token + capital + freshness checks
+midday_conviction.py        Midday (11 AM) thesis reassessment + reversal detection + checkpoint CSV
+exit_positions.py           EOD 3:15 PM — closes any open NRML positions before market close
+trade_journal.py            EOD 3:30 PM — captures actual fills vs oracle, builds live_trades.csv
+lot_expiry_scanner.py       Monthly check: BankNifty lot size / expiry day changes
+replay_today.py             Post-mortem tool — runs after evolver to replay today with new ensemble
+analyze_confidence.py       Confidence bucket + VIX regime diagnostics; writes dynamic VIX threshold
+renew_token.py              Dynamic token renewal — 23h50m interval, 7 days a week
+notify.py                   Telegram send helper
+dhan_mcp.py                 MCP server — query live Dhan positions/P&L from Claude Code
+autoloop_bn.py              Nightly autoresearch loop — Claude API experiments → paper model → promote after 3 wins
+autoexperiment_bn.py        Fast 252-day holdout evaluator used by autoloop (composite score)
+autoexperiment_backtest.py  Backtest evaluator for auto_trader.py constant changes
+validate_all.py             Pre-deployment validation pass
+backfill_live_trades.py     Periodic utility — import Dhan trade history into live_trades.csv
+backfill_experiment_history.py  One-time migration utility for experiment logs
+research_program_bn.md      Research brief — defines what autoresearch may and may not change
+CLAUDE.md                   Architecture map + standing rules (bug fix protocol, ML feature rule,
+                            known gotchas table) — auto-loaded by Claude Code every session
+setup_automation.sh         One-shot VM setup: install deps, set up all cron jobs, dry-run test
+.claude/hooks/              SessionStart hook auto-pulls the repo on every new Claude Code session
+                            (keeps CLAUDE.md rules and gotchas fresh without manual action)
 ```
 
 ---
@@ -190,10 +213,13 @@ ANTHROPIC_API_KEY=your_key         # from console.anthropic.com → API keys
 ### 3. First-time data fetch and ML training
 
 ```bash
-python3 data_fetcher.py       # downloads all market data → data/
-python3 signal_engine.py      # generates data/signals.csv
-python3 ml_engine.py          # walk-forward training (~2 min) → data/signals_ml.csv
-python3 model_evolver.py      # first HPO run — takes 8–12 min, saves models/champion.pkl
+python3 data_fetcher.py                  # downloads all market data → data/
+python3 data_fetcher.py --backfill       # full history for yfinance tickers (bank stocks, ETF, macro)
+python3 data_fetcher.py --fetch-options  # ATM option premiums + IV skew + OI surface (~5 min)
+python3 data_fetcher.py --fetch-intraday # BN 9:15–9:30 opening-range candles for ORB features (~2 min)
+python3 signal_engine.py                 # generates data/signals.csv
+python3 ml_engine.py                     # walk-forward training (~2 min) → data/signals_ml.csv
+python3 model_evolver.py                 # first HPO run — takes 8–12 min, saves models/champion.pkl
 ```
 
 ### 4. Install cron and test
@@ -218,10 +244,14 @@ crontab -l                             # confirm all cron jobs are listed
 
 ```bash
 # Data and signals
-python3 data_fetcher.py                      # fetch latest market data
+python3 data_fetcher.py                      # fetch latest market data (incremental)
+python3 data_fetcher.py --backfill           # fill historical gaps for any new yfinance ticker
+python3 data_fetcher.py --fetch-options      # refresh IV skew, OI surface, ATM option premiums
+python3 data_fetcher.py --fetch-intraday     # refresh opening-range candles
 python3 signal_engine.py                     # recompute rule signals
 python3 ml_engine.py --predict-today         # fast single ML prediction (<10 sec)
-python3 ml_engine.py --analyze               # feature importance report
+python3 ml_engine.py --analyze               # feature importance report (all 63 features)
+python3 autoexperiment_bn.py                 # get current composite score
 
 # Backtesting
 python3 backtest_engine.py                   # rule-based backtest
@@ -306,16 +336,39 @@ Add to `~/.claude/settings.json`:
 
 ---
 
+## Self-maintaining documentation (Claude Code integration)
+
+`CLAUDE.md` holds the architecture map plus five standing rule sections that Claude Code reads automatically at the start of every session — no manual invocation needed:
+
+- **Dhan API Rule** — read `docs/DHAN_API_V2_REFERENCE.md` before any API change
+- **Bug Fix Rule** — WebSearch the error message first; explain in plain English before writing code
+- **ML Feature Rule** — `.shift(1)` on all price inputs; reserved variable names; `FEATURE_COLS` dedup check; autoexperiment gate before commit
+- **Plain English Rule** — no jargon in any user-facing output
+- **Security Rule** — visual `git status` scan before every commit (no data files, no credentials)
+
+A **Known Gotchas table** in CLAUDE.md records every bug that has ever taken more than one debug round to solve. When a new one is found, it gets added and committed — next session auto-pulls it and never debugs it again.
+
+A SessionStart hook in `.claude/hooks/session-start.sh` silently runs `git pull` at the start of every new Claude Code session, so these rules and the gotchas table stay fresh without any manual action. `ml_engine.py` and `data_fetcher.py` also carry 5-line gotcha headers at the top — visible when reading the code on GitHub.
+
+---
+
 ## What is NOT in this repo
 
 Gitignored for safety — these live only on the VM, never in version control:
 
 - `.env` — Dhan token, client ID, Telegram bot token, chat ID, Anthropic API key
 - `data/` — all fetched OHLCV, signal CSVs, live trade journal, today_trade.json
+- `data/live_trades.csv`, `data/paper_performance.csv`, `data/midday_checkpoints.csv` — P&L and trade outcome history
+- `data/options_atm_daily.csv`, `data/options_iv_skew.csv`, `data/options_oi_surface.csv` — ATM premiums, IV skew, OI surface
+- `data/banknifty_15m_orb.csv` — opening-range candles for ORB features
+- `data/news_sentiment.json` — daily news sentiment
+- `data/vix_threshold.json` — dynamic VIX filter state
 - `models/` — trained champion.pkl, champion_meta.json, ensemble/*.pkl
 - `logs/` — cron log output for every scheduled job
-- `__pycache__/`, `*.pyc` — Python bytecode
+- `__pycache__/`, `*.pyc`, `catboost_info/` — Python bytecode and training artefacts
 - `token_meta.json` — token renewal state
+
+**No backtest numbers or trade-level results are ever committed to this repo. Only source code, configuration templates, and documentation.**
 
 ---
 
