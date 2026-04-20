@@ -44,6 +44,9 @@ HEADERS = {
 DATA_DIR        = "data"
 INTENT_FILE     = f"{DATA_DIR}/today_trade.json"
 JOURNAL_CSV     = f"{DATA_DIR}/live_trades.csv"
+SPREAD_CSV      = f"{DATA_DIR}/live_spread_trades.csv"
+
+SPREAD_STRATEGIES = {"bear_call_credit", "bull_put_credit"}
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -58,6 +61,17 @@ JOURNAL_FIELDS = [
     "actual_exit", "exit_reason", "actual_pnl", "actual_pnl_pct",
     "oracle_correct",
     "signal_score", "iv_at_entry",
+]
+
+SPREAD_FIELDS = [
+    "date", "strategy", "signal",
+    "short_strike", "long_strike", "spread_width",
+    "lots", "lot_size", "dte", "spot_at_signal",
+    "short_entry", "long_entry", "net_credit",
+    "short_exit", "long_exit", "exit_spread",
+    "exit_reason", "exit_time",
+    "pnl_inr", "pnl_pct_of_credit",
+    "oracle_correct", "signal_score", "ml_conf",
 ]
 
 
@@ -217,6 +231,125 @@ def _journal_stats():
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _append_spread_row(row: dict):
+    """Append one row to live_spread_trades.csv."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    file_exists = os.path.exists(SPREAD_CSV)
+    with open(SPREAD_CSV, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SPREAD_FIELDS, extrasaction="ignore")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _journal_spread(intent: dict, today_label: str):
+    """
+    Journal a credit-spread trade.
+    For LIVE trades: fetch actual fills from tradebook (entry + exit).
+    For PAPER trades: use fields already written by auto_trader + spread_monitor.
+    """
+    strategy = intent["strategy"]
+    paper    = (intent.get("order_mode") == "PAPER" or
+                intent.get("mode") == "PAPER")
+
+    signal        = intent["signal"]
+    short_strike  = float(intent["short_strike"])
+    long_strike   = float(intent["long_strike"])
+    lots          = int(intent["lots"])
+    lot_size      = int(intent.get("lot_size", 30))
+    dte           = float(intent.get("dte", 0))
+    spot          = float(intent.get("spot_at_signal", 0))
+    net_credit    = float(intent["net_credit"])
+    short_entry   = float(intent.get("short_entry", 0))
+    long_entry    = float(intent.get("long_entry", 0))
+    score         = int(intent.get("signal_score", 0))
+    ml_conf       = float(intent.get("ml_conf", 0))
+
+    # Exit fields — written by spread_monitor.py OR exit_positions.py
+    short_exit    = float(intent.get("exit_short_ltp", 0))
+    long_exit     = float(intent.get("exit_long_ltp", 0))
+    exit_spread   = float(intent.get("exit_spread", 0))
+    exit_reason   = intent.get("exit_reason", "")
+    exit_time     = intent.get("exit_time", "")
+    pnl_inr       = float(intent.get("pnl_inr", 0))
+
+    # If no exit recorded yet (trade still open at 3:30 PM journal run),
+    # estimate: assume EOD squareoff close at last known spread cost.
+    # Mark exit_reason=OPEN so it's visible in the Telegram report.
+    if not exit_reason:
+        exit_reason = "OPEN"
+
+    pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
+
+    oracle_correct = None
+    if exit_reason == "TP":
+        oracle_correct = True
+    elif exit_reason == "SL":
+        oracle_correct = False
+    elif exit_reason in ("EOD", "OPEN"):
+        oracle_correct = pnl_inr > 0
+
+    row = {
+        "date":              date.today().isoformat(),
+        "strategy":          strategy,
+        "signal":            signal,
+        "short_strike":      short_strike,
+        "long_strike":       long_strike,
+        "spread_width":      abs(long_strike - short_strike),
+        "lots":              lots,
+        "lot_size":          lot_size,
+        "dte":               dte,
+        "spot_at_signal":    spot,
+        "short_entry":       short_entry,
+        "long_entry":        long_entry,
+        "net_credit":        net_credit,
+        "short_exit":        short_exit,
+        "long_exit":         long_exit,
+        "exit_spread":       exit_spread,
+        "exit_reason":       exit_reason,
+        "exit_time":         exit_time,
+        "pnl_inr":           pnl_inr,
+        "pnl_pct_of_credit": round(pnl_pct, 1),
+        "oracle_correct":    oracle_correct if oracle_correct is not None else "",
+        "signal_score":      score,
+        "ml_conf":           round(ml_conf, 4),
+    }
+    _append_spread_row(row)
+    notify.log(
+        f"Spread journal appended: {strategy} | credit ₹{net_credit:.0f} | "
+        f"exit ₹{exit_spread:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}"
+    )
+
+    # Telegram report
+    strategy_name = ("Bear Call Spread" if strategy == "bear_call_credit"
+                     else "Bull Put Spread")
+    emoji = {"TP": "🟢", "SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
+    pnl_sign = "+" if pnl_inr >= 0 else ""
+    mode_tag = "[PAPER] " if paper else ""
+
+    lines = [
+        f"📓 <b>{mode_tag}Spread Journal · {today_label}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Strategy      {strategy_name}",
+        f"Legs          SELL {int(short_strike)} / BUY {int(long_strike)}  ({signal})",
+        f"Lots          {lots}  ·  {lots * lot_size} shares",
+        "",
+        f"Entry credit  ₹{net_credit:.0f} / share",
+    ]
+    if exit_spread > 0:
+        lines.append(f"Exit cost     ₹{exit_spread:.0f} / share   {emoji} {exit_reason}")
+        if exit_time:
+            lines.append(f"Exit time     {exit_time} IST")
+    else:
+        lines.append(f"Exit          {emoji} {exit_reason} — no exit data yet")
+    lines += [
+        "",
+        f"<b>P&amp;L          {pnl_sign}₹{pnl_inr:,.0f}  ({pnl_sign}{pnl_pct:.0f}% of max credit)</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    notify.send("\n".join(lines))
+
+
 def main():
     today_label = date.today().strftime("%d %b %Y")
     notify.log(f"Trade journal — {today_label}")
@@ -225,6 +358,11 @@ def main():
     intent = _load_intent()
     if intent is None:
         notify.log("No today_trade.json found — no trade was placed today or file is missing. Nothing to journal.")
+        return
+
+    # Branch: credit spread trades have their own journal + schema
+    if intent.get("strategy") in SPREAD_STRATEGIES:
+        _journal_spread(intent, today_label)
         return
 
     signal         = intent["signal"]

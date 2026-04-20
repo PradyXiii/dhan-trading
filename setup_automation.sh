@@ -108,6 +108,12 @@ EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 EXIT_CMD="45 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/exit.log 2>&1"
 EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, closes open NRML positions before market close"
 
+# Intraday spread monitor — every 5 min during market hours, Mon–Fri
+# Checks credit-spread SL/TP triggers; closes both legs if hit. No-op for naked options.
+# Runs 9:30 AM–3:10 PM IST = 4:00–9:40 UTC
+SPREAD_MON_CMD="*/5 4-9 * * 1-5 cd $SCRIPT_DIR && python3 spread_monitor.py >> $LOG_DIR/spread_monitor.log 2>&1"
+SPREAD_MON_COMMENT="# Spread monitor — every 5 min 9:30 AM–3:10 PM IST, checks SL/TP on credit spreads"
+
 # Trade journal — 3:30 PM IST = 10:00 AM UTC, Mon–Fri
 # Captures actual fills vs oracle intent, appends to data/live_trades.csv
 JOURNAL_CMD="0 10 * * 1-5 cd $SCRIPT_DIR && python3 trade_journal.py >> $LOG_DIR/journal.log 2>&1"
@@ -149,6 +155,7 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "refresh_token" \
   | grep -v "token_refresh" \
   | grep -v "exit_positions" \
+  | grep -v "spread_monitor" \
   | grep -v "trade_journal" \
   | grep -v "midday_conviction" \
   | grep -v "health_ping" \
@@ -159,6 +166,7 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "ML Model Evolver" \
   | grep -v "Token renewer" \
   | grep -v "EOD squareoff" \
+  | grep -v "Spread monitor" \
   | grep -v "Trade journal" \
   | grep -v "Midday conviction" \
   | grep -v "Pre-market health" \
@@ -178,6 +186,8 @@ $BRIEF_COMMENT
 $BRIEF_CMD
 $CRON_COMMENT
 $CRON_CMD
+$SPREAD_MON_COMMENT
+$SPREAD_MON_CMD
 $EXIT_COMMENT
 $EXIT_CMD
 $JOURNAL_COMMENT
@@ -220,6 +230,9 @@ echo "  Ping log       : $LOG_DIR/health_ping.log"
 echo ""
 echo "  Auto trader    : 9:30 AM IST every weekday (Mon–Fri)"
 echo "  Trader log     : $LOG_DIR/auto_trader.log"
+echo ""
+echo "  Spread monitor : every 5 min, 9:30 AM–3:10 PM IST (Mon–Fri)"
+echo "  Monitor log    : $LOG_DIR/spread_monitor.log"
 echo ""
 echo "  EOD squareoff  : 3:15 PM IST every weekday (Mon–Fri)"
 echo "  Exit log       : $LOG_DIR/exit.log"

@@ -200,7 +200,11 @@ def _send_exit_telegram(today_trade: dict, sells: list):
 
 
 def get_open_bn_positions():
-    """Return list of open BankNifty F&O positions (netQty > 0) from Dhan."""
+    """
+    Return all open BankNifty F&O positions from Dhan (netQty != 0).
+    Includes both long (netQty > 0) AND short (netQty < 0) legs — spread trades
+    have a negative-qty short leg that must ALSO be squared off (BUY to cover).
+    """
     try:
         resp = requests.get("https://api.dhan.co/v2/positions",
                             headers=HEADERS, timeout=10)
@@ -221,7 +225,7 @@ def get_open_bn_positions():
 
     return [
         p for p in positions
-        if int(p.get("netQty", 0)) > 0
+        if int(p.get("netQty", 0)) != 0
         and p.get("exchangeSegment", "") == "NSE_FNO"
         and "BANKNIFTY" in str(
             p.get("tradingSymbol", p.get("securityId", ""))
@@ -230,24 +234,36 @@ def get_open_bn_positions():
 
 
 def square_off(pos) -> dict:
-    """Place a MARKET SELL to close one open position. Returns API response."""
+    """
+    Close one open position with a MARKET order.
+    netQty > 0 (long leg)  → SELL to close
+    netQty < 0 (short leg) → BUY  to cover (critical for spread short legs)
+    Returns Dhan API response.
+    """
     security_id  = str(pos.get("securityId", pos.get("security_id", "")))
     net_qty      = int(pos.get("netQty", 0))
     product_type = pos.get("productType", "MARGIN")
 
+    if net_qty == 0:
+        return {"status": "FLAT", "securityId": security_id}
+
+    txn_type = "SELL" if net_qty > 0 else "BUY"
+    abs_qty  = abs(net_qty)
+
     if DRY_RUN:
-        return {"status": "DRY_RUN", "securityId": security_id, "qty": net_qty}
+        return {"status": "DRY_RUN", "securityId": security_id,
+                "qty": abs_qty, "txn": txn_type}
 
     payload = {
         "dhanClientId":      CLIENT_ID,
         "correlationId":     f"eod_{date.today().strftime('%Y%m%d')}_{security_id[-6:]}",
-        "transactionType":   "SELL",
+        "transactionType":   txn_type,
         "exchangeSegment":   "NSE_FNO",
         "productType":       product_type,
         "orderType":         "MARKET",
         "validity":          "DAY",
         "securityId":        security_id,
-        "quantity":          net_qty,
+        "quantity":          abs_qty,
         "price":             0,
         "triggerPrice":      0,
         "disclosedQuantity": 0,

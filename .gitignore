@@ -13,17 +13,25 @@ catboost_info/
 # SECURITY: These files contain trade history, P&L, credentials — never commit
 *.csv
 *.json
+*.pkl
 data/
 data/live_trades.csv
+data/live_spread_trades.csv
 data/paper_trades.csv
 data/paper_performance.csv
 data/midday_checkpoints.csv
 data/news_sentiment.json
 data/today_trade.json
 data/vix_threshold.json
+data/intraday_options_cache/
+data/exit_completed_*.marker
 models/
 models/*.pkl
 models/*.json
+models/ensemble/
+backtest_results/
+*.backtest
+*.bak
 
 # Claude Code project config — negation MUST come after the *.json rule above
 # These .claude/ files are safe to commit (no credentials, no P&L data)

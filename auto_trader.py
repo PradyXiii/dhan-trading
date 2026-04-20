@@ -109,7 +109,7 @@ def _check_exit_marker():
             positions = data if isinstance(data, list) else data.get("data", [])
             bn_open = [
                 p for p in positions
-                if int(p.get("netQty", 0)) > 0
+                if int(p.get("netQty", 0)) != 0
                 and p.get("exchangeSegment", "") == "NSE_FNO"
                 and "BANKNIFTY" in str(
                     p.get("tradingSymbol", p.get("securityId", ""))
@@ -162,9 +162,10 @@ def _check_no_existing_position() -> bool:
 
     data = resp.json()
     positions = data if isinstance(data, list) else data.get("data", [])
+    # Include short legs (netQty < 0) — a spread leaves one short-open position
     bn_open = [
         p for p in positions
-        if int(p.get("netQty", 0)) > 0
+        if int(p.get("netQty", 0)) != 0
         and p.get("exchangeSegment", "") == "NSE_FNO"
         and "BANKNIFTY" in str(
             p.get("tradingSymbol", p.get("securityId", ""))
@@ -693,6 +694,51 @@ def place_credit_spread(short_sid: str, long_sid: str, signal: str, lots: int,
         "sell_oid":   sell_oid,
         "net_credit": net_credit,
     }
+
+
+def _write_today_spread_trade(signal, short_sid, long_sid, short_strike, long_strike,
+                              short_ltp, long_ltp, net_credit, lots, dte, spot,
+                              score, expiry, ml_conf, order_mode,
+                              buy_oid=None, sell_oid=None):
+    """
+    Write spread-trade intent to data/today_trade.json.
+    Read by spread_monitor.py (intraday SL/TP), exit_positions.py (EOD),
+    trade_journal.py (EOD journal).
+    """
+    strategy = "bear_call_credit" if signal == "CALL" else "bull_put_credit"
+    payload = {
+        "date":           date.today().isoformat(),
+        "strategy":       strategy,
+        "signal":         signal,
+        "short_sid":      str(short_sid),
+        "long_sid":       str(long_sid),
+        "short_strike":   float(short_strike),
+        "long_strike":    float(long_strike),
+        "short_entry":    float(short_ltp),
+        "long_entry":     float(long_ltp),
+        "net_credit":     float(net_credit),
+        "spread_width":   float(abs(long_strike - short_strike)),
+        "sl_frac":        CREDIT_SL_FRAC,
+        "tp_frac":        CREDIT_TP_FRAC,
+        "lots":           int(lots),
+        "lot_size":       int(LOT_SIZE),
+        "dte":            float(dte),
+        "expiry":         expiry.isoformat() if expiry else None,
+        "spot_at_signal": float(spot),
+        "signal_score":   int(score),
+        "ml_conf":        round(float(ml_conf), 4),
+        "order_mode":     str(order_mode) if order_mode else None,
+        "buy_oid":        str(buy_oid) if buy_oid else None,
+        "sell_oid":       str(sell_oid) if sell_oid else None,
+        "exit_done":      False,
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(f"{DATA_DIR}/today_trade.json", "w") as f:
+            json.dump(payload, f, indent=2)
+        notify.log("Spread intent written → data/today_trade.json")
+    except Exception as e:
+        notify.log(f"Could not write today_trade.json: {e}")
 
 
 def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
@@ -1831,6 +1877,20 @@ def main():
             net_credit, short_strike, long_strike,
             short_ltp, long_ltp, spot
         )
+
+        # Write intent for spread_monitor.py + exit_positions.py + trade_journal.py
+        if not DRY_RUN:
+            _write_today_spread_trade(
+                signal=signal,
+                short_sid=short_sid, long_sid=long_sid,
+                short_strike=short_strike, long_strike=long_strike,
+                short_ltp=short_ltp, long_ltp=long_ltp,
+                net_credit=net_credit, lots=lots, dte=dte, spot=spot,
+                score=score, expiry=expiry, ml_conf=ml_conf,
+                order_mode=result.get("mode", "CREDIT_SPREAD"),
+                buy_oid=result.get("buy_oid"),
+                sell_oid=result.get("sell_oid"),
+            )
 
         # 8. Result handling
         if DRY_RUN:
