@@ -111,6 +111,37 @@ STRATEGIES = {
         "sl_frac":       0.50,
         "tp_frac":       1.00,                    # straddle has no defined max
     },
+    # ── Credit spreads: SELL ATM + BUY OTM wing — theta-positive ──────────────
+    # These trade AGAINST the signal direction (premium fade).
+    # On a CALL signal day, BN is expected to rise — but ATM CE premium is rich.
+    # Selling it (Bear Call) profits if BN stays below ATM+300pts by EOD.
+    # Historical WR target: >71% (breakeven at credit=87, max_loss=213, 300pt spread).
+    "bear_call_credit": {
+        "name":          "Bear Call Spread (credit)",
+        "direction":     "FADE_CALL",
+        "signal_match":  ["CALL"],
+        "spread_width":  300,
+        "legs": [
+            ("CE",  0, "SELL",  None, None),      # Short ATM CE  (collect premium)
+            ("CE", +3, "BUY",   "p3", None),      # Long ATM+3 CE (protection wing)
+        ],
+        "entry_debit":   False,                   # net credit (we receive money)
+        "sl_frac":       1.0,                     # stop if unrealized loss = 100% of credit
+        "tp_frac":       0.50,                    # take profit at 50% of credit retained
+    },
+    "bull_put_credit": {
+        "name":          "Bull Put Spread (credit)",
+        "direction":     "FADE_PUT",
+        "signal_match":  ["PUT"],
+        "spread_width":  300,
+        "legs": [
+            ("PE",  0, "SELL",  None, None),      # Short ATM PE  (collect premium)
+            ("PE", -3, "BUY",   None, "m3"),      # Long ATM-3 PE (protection wing)
+        ],
+        "entry_debit":   False,
+        "sl_frac":       1.0,
+        "tp_frac":       0.50,
+    },
 }
 
 
@@ -286,38 +317,59 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
         sign = +1 if leg["action"] == "BUY" else -1
         net_debit += sign * entry_prices[i]
 
-    if net_debit <= 0 and strategy.get("entry_debit", True):
+    # SL / TP on spread value — debit vs credit logic differs
+    sl_frac      = strategy.get("sl_frac", 0.60)
+    tp_frac      = strategy.get("tp_frac", 0.50)
+    spread_width = strategy.get("spread_width")
+    is_credit    = (not strategy.get("entry_debit", True)) and (net_debit < 0)
+
+    if is_credit:
+        # Credit spread: we received |net_debit| as premium. Theta helps us.
+        # SL fires if unrealized loss exceeds sl_frac × credit (spread expanded).
+        # TP fires if we've retained (1 - tp_frac) × credit or less of exposure.
+        net_credit       = abs(net_debit)
+        max_loss_per_lot = net_credit * sl_frac * ls
+        if max_loss_per_lot <= 0:
+            return {**zero_result, "result": "SKIPPED_ZERO_RISK"}
+        lots = min(int((capital * RISK_PCT) / max_loss_per_lot), MAX_LOTS)
+        if lots < 1:
+            if max_loss_per_lot <= capital * 0.85:
+                lots = 1
+            else:
+                return {**zero_result, "result": "SKIPPED_LOW_CAPITAL",
+                        "entry_debit": round(net_debit, 2),
+                        "long_entry": round(entry_prices[0], 2),
+                        "short_entry": (round(entry_prices[1], 2) if len(entry_prices) > 1 else 0),
+                        "legs_real": n_real, "legs_estimated": n_est}
+        # net_debit is negative; more-negative = larger loss; less-negative = profit
+        sl_value = net_debit * (1.0 + sl_frac)   # more negative threshold (worse)
+        tp_value = net_debit * (1.0 - tp_frac)   # less negative threshold (profit)
+
+    elif net_debit <= 0:
+        # Debit spread where legs are inverted (short more than long) — data issue
         return {**zero_result, "result": "SKIPPED_INVERTED_DEBIT"}
 
-    # Position sizing: risk RISK_PCT of capital against max loss per lot
-    # For debit spread: max loss = net_debit × lot_size
-    max_loss_per_lot = net_debit * ls
-    if max_loss_per_lot <= 0:
-        return {**zero_result, "result": "SKIPPED_ZERO_RISK"}
-    lots = min(int((capital * RISK_PCT) / max_loss_per_lot), MAX_LOTS)
-    if lots < 1:
-        # Fallback: 1 lot if margin-affordable (net_debit × ls < 85% of capital)
-        if max_loss_per_lot <= capital * 0.85:
-            lots = 1
-        else:
-            return {**zero_result, "result": "SKIPPED_LOW_CAPITAL",
-                    "entry_debit": round(net_debit, 2),
-                    "long_entry": round(entry_prices[0], 2),
-                    "short_entry": (round(entry_prices[1], 2) if len(entry_prices) > 1 else 0),
-                    "legs_real": n_real, "legs_estimated": n_est}
-
-    # SL / TP on spread value
-    sl_frac = strategy.get("sl_frac", 0.60)
-    tp_frac = strategy.get("tp_frac", 0.50)
-    spread_width = strategy.get("spread_width")
-
-    sl_value = net_debit * (1.0 - sl_frac)   # exit if spread drops to this
-    if spread_width is not None:
-        max_profit = spread_width - net_debit
-        tp_value   = net_debit + max_profit * tp_frac
     else:
-        # Straddle: TP when spread gains tp_frac × net_debit (since no cap)
-        tp_value   = net_debit * (1.0 + tp_frac)
+        # Debit spread: we paid net_debit. Max loss = full debit. Theta works against.
+        max_loss_per_lot = net_debit * ls
+        if max_loss_per_lot <= 0:
+            return {**zero_result, "result": "SKIPPED_ZERO_RISK"}
+        lots = min(int((capital * RISK_PCT) / max_loss_per_lot), MAX_LOTS)
+        if lots < 1:
+            if max_loss_per_lot <= capital * 0.85:
+                lots = 1
+            else:
+                return {**zero_result, "result": "SKIPPED_LOW_CAPITAL",
+                        "entry_debit": round(net_debit, 2),
+                        "long_entry": round(entry_prices[0], 2),
+                        "short_entry": (round(entry_prices[1], 2) if len(entry_prices) > 1 else 0),
+                        "legs_real": n_real, "legs_estimated": n_est}
+        sl_value = net_debit * (1.0 - sl_frac)
+        if spread_width is not None:
+            max_profit = spread_width - net_debit
+            tp_value   = net_debit + max_profit * tp_frac
+        else:
+            tp_value   = net_debit * (1.0 + tp_frac)
 
     # Walk bars: compute spread value each minute, check SL/TP
     exit_value = None
@@ -504,7 +556,11 @@ def print_spread_summary(trade_df, strategy_name):
     print(f"  Total P&L:        {fmt_inr(total_pnl)}  (end cap: {fmt_inr(cap.iloc[-1])})")
     print(f"  1-lot P&L:        {fmt_inr(pnl_1lot)}  (sum of pnl/lots)")
     print(f"  Max drawdown:     {dd:.1f}%")
-    print(f"  Avg debit/trade:  ₹{avg_debit:.1f}  ×  {avg_lots:.1f} lots avg")
+    is_credit_strat = avg_debit < 0
+    if is_credit_strat:
+        print(f"  Avg credit/trade: ₹{abs(avg_debit):.1f}  ×  {avg_lots:.1f} lots avg")
+    else:
+        print(f"  Avg debit/trade:  ₹{avg_debit:.1f}  ×  {avg_lots:.1f} lots avg")
     print(f"  Real-leg coverage: {real_pct:.0f}%  ({total_real} real / {total_est} estimated)")
     if total_est > 0:
         print(f"  ⚠️  ESTIMATED LEGS BIAS RESULTS — BS understates debit ~10-20×")
@@ -519,9 +575,11 @@ def print_spread_summary(trade_df, strategy_name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--strategy", choices=list(STRATEGIES.keys()) + ["all"],
+    ap.add_argument("--strategy",
+                    choices=list(STRATEGIES.keys()) + ["all", "credit", "debit"],
                     default="all",
-                    help="Strategy to backtest (default: all)")
+                    help="Strategy to backtest. 'credit'=credit spreads only, "
+                         "'debit'=debit spreads only, 'all'=all (default)")
     ap.add_argument("--ml", action="store_true",
                     help="Use signals_ml.csv instead of signals.csv")
     ap.add_argument("--adaptive", action="store_true",
@@ -554,8 +612,16 @@ def main():
             print(f"  Trade log: {args.save}")
         return
 
-    strategies = (list(STRATEGIES.keys()) if args.strategy == "all"
-                  else [args.strategy])
+    DEBIT_KEYS  = [k for k, v in STRATEGIES.items() if v.get("entry_debit", True)]
+    CREDIT_KEYS = [k for k, v in STRATEGIES.items() if not v.get("entry_debit", True)]
+    if args.strategy == "all":
+        strategies = list(STRATEGIES.keys())
+    elif args.strategy == "credit":
+        strategies = CREDIT_KEYS
+    elif args.strategy == "debit":
+        strategies = DEBIT_KEYS
+    else:
+        strategies = [args.strategy]
     for key in strategies:
         df = run_spread_backtest(key, ml=args.ml,
                                  entry_time=args.entry, exit_time=args.exit,
