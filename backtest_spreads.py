@@ -402,31 +402,27 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
     # Walk bars: compute spread value each minute, check SL/TP
     exit_value = None
     result     = "EOD"
-    for _, bar in aligned.iterrows():
-        # Intra-bar high/low of the spread — approximate as high-of-longs + low-of-shorts etc.
-        # Simpler: use close-of-bar as spread value (conservative, 1-min granularity).
-        bar_value = 0.0
-        for i, leg in enumerate(leg_bars):
-            sign = +1 if leg["action"] == "BUY" else -1
-            bar_value += sign * float(bar[f"c{i}"])
+    # Vectorized SL/TP scan (replaces iterrows loop — 100× faster)
+    bar_values = pd.Series(0.0, index=aligned.index)
+    for i, leg in enumerate(leg_bars):
+        sign = +1 if leg["action"] == "BUY" else -1
+        bar_values += sign * aligned[f"c{i}"]
 
-        if bar_value <= sl_value:
-            exit_value = bar_value
-            result     = "SL"
-            break
-        if bar_value >= tp_value:
-            exit_value = bar_value
-            result     = "TP"
-            break
+    sl_mask = bar_values <= sl_value
+    tp_mask = bar_values >= tp_value
 
-    if exit_value is None:
-        # EOD forced exit
-        last = aligned.iloc[-1]
-        exit_value = 0.0
-        for i, leg in enumerate(leg_bars):
-            sign = +1 if leg["action"] == "BUY" else -1
-            exit_value += sign * float(last[f"c{i}"])
-        result = "EOD"
+    first_sl = int(sl_mask.idxmax()) if sl_mask.any() else None
+    first_tp = int(tp_mask.idxmax()) if tp_mask.any() else None
+
+    if first_sl is not None and (first_tp is None or first_sl <= first_tp):
+        exit_value = float(bar_values.iloc[first_sl])
+        result     = "SL"
+    elif first_tp is not None:
+        exit_value = float(bar_values.iloc[first_tp])
+        result     = "TP"
+    else:
+        exit_value = float(bar_values.iloc[-1])
+        result     = "EOD"
 
     # P&L: (exit_value - entry_value) × lots × lot_size
     # For debit: entry_value > 0 (paid), exit_value > entry → profit, < entry → loss
@@ -469,8 +465,12 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
     adaptive=True ignores strategy_key and dispatches each day to the
     strategy matching its signal + VIX regime.
     """
-    signals  = _DATA_CACHE.setdefault(("signals", ml), load_signals(ml=ml))
-    bn_ohlcv = _DATA_CACHE.setdefault("bn_ohlcv", load_bn_ohlcv())
+    if ("signals", ml) not in _DATA_CACHE:
+        _DATA_CACHE[("signals", ml)] = load_signals(ml=ml)
+    signals = _DATA_CACHE[("signals", ml)]
+    if "bn_ohlcv" not in _DATA_CACHE:
+        _DATA_CACHE["bn_ohlcv"] = load_bn_ohlcv()
+    bn_ohlcv = _DATA_CACHE["bn_ohlcv"]
 
     vix_path = f"{DATA_DIR}/india_vix.csv"
     if "vix_df" not in _DATA_CACHE:
