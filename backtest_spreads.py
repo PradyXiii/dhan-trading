@@ -163,16 +163,25 @@ def _leg_cache_path(date, signal, opt_type, cache_suffix_call, cache_suffix_put)
         return os.path.join(INTRADAY_CACHE_DIR, f"{date_str}_{opt_type}.csv")
     return os.path.join(INTRADAY_CACHE_DIR, f"{date_str}_{opt_type}_{suffix}.csv")
 
+_LEG_BAR_CACHE: dict = {}   # path → DataFrame (or None); persists for process lifetime
+_DATA_CACHE:    dict = {}   # keyed by ("signals", ml) / "bn_ohlcv" / "vix_df"
+
 
 def _load_leg_bars(path):
     """Load 1-min bars for one leg. Returns DataFrame or None if missing."""
-    if not path or not os.path.exists(path):
+    if not path:
         return None
-    try:
-        df = pd.read_csv(path, parse_dates=["dt"])
-        return df if not df.empty else None
-    except Exception:
-        return None
+    if path in _LEG_BAR_CACHE:
+        return _LEG_BAR_CACHE[path]
+    result = None
+    if os.path.exists(path):
+        try:
+            df = pd.read_csv(path, parse_dates=["dt"])
+            result = df if not df.empty else None
+        except Exception:
+            pass
+    _LEG_BAR_CACHE[path] = result
+    return result
 
 
 def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
@@ -460,13 +469,14 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
     adaptive=True ignores strategy_key and dispatches each day to the
     strategy matching its signal + VIX regime.
     """
-    signals  = load_signals(ml=ml)
-    bn_ohlcv = load_bn_ohlcv()
+    signals  = _DATA_CACHE.setdefault(("signals", ml), load_signals(ml=ml))
+    bn_ohlcv = _DATA_CACHE.setdefault("bn_ohlcv", load_bn_ohlcv())
 
-    # VIX for regime routing
     vix_path = f"{DATA_DIR}/india_vix.csv"
-    vix_df   = pd.read_csv(vix_path, parse_dates=["date"]) \
-                 .set_index("date") if os.path.exists(vix_path) else None
+    if "vix_df" not in _DATA_CACHE:
+        _DATA_CACHE["vix_df"] = (pd.read_csv(vix_path, parse_dates=["date"])
+                                 .set_index("date") if os.path.exists(vix_path) else None)
+    vix_df = _DATA_CACHE["vix_df"]
 
     capital       = STARTING_CAPITAL
     current_month = None
