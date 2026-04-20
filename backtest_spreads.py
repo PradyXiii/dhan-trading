@@ -176,7 +176,7 @@ def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
 
 def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
                           entry_time="09:30", exit_time="15:15",
-                          lot_size=None):
+                          lot_size=None, allow_estimate=False):
     """
     Simulate one spread trade using real 1-min bars for each leg (or
     delta-scaled estimates when OTM cache missing).
@@ -224,15 +224,20 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
 
         if bars is not None:
             n_real += 1
-        else:
-            # Estimate from real ATM anchor of same option type
+        elif allow_estimate:
+            # Estimate from real ATM anchor — UNRELIABLE.
+            # BS formula understates skew; debit comes out 10-20× too low.
+            # Only used when --allow-estimate explicitly passed.
             anchor = atm_ce_bars if opt_type == "CE" else atm_pe_bars
             bars   = _estimate_leg_from_atm(anchor, offset, bn_open, dte)
             if bars is not None:
                 n_est += 1
+        else:
+            # Default: refuse to fabricate. Skip day until OTM cache built.
+            return {**zero_result, "result": "SKIPPED_NO_OTM_CACHE",
+                    "legs_real": n_real, "legs_estimated": n_est}
 
         if bars is None:
-            # No real data and no anchor to estimate from — skip day
             return {**zero_result, "result": "SKIPPED_NO_CACHE"}
 
         leg_bars.append({
@@ -376,7 +381,8 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
 def run_spread_backtest(strategy_key, ml=False, adaptive=False,
-                        entry_time="09:30", exit_time="15:15"):
+                        entry_time="09:30", exit_time="15:15",
+                        allow_estimate=False):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
@@ -418,6 +424,7 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
         trade = simulate_spread_trade(
             row, bn_ohlcv, capital, strategy,
             entry_time=entry_time, exit_time=exit_time,
+            allow_estimate=allow_estimate,
         )
         trade["capital_before"] = round(capital, 2)
         capital += trade["pnl"]
@@ -447,9 +454,19 @@ def _route_strategy(signal, vix_val):
 # ── Summary printer ───────────────────────────────────────────────────────────
 
 def print_spread_summary(trade_df, strategy_name):
-    active = trade_df[trade_df["result"].isin(["SL", "TP", "EOD"])].copy()
+    active     = trade_df[trade_df["result"].isin(["SL", "TP", "EOD"])].copy()
+    n_no_otm   = (trade_df["result"] == "SKIPPED_NO_OTM_CACHE").sum()
+    n_no_cache = (trade_df["result"] == "SKIPPED_NO_CACHE").sum()
     if active.empty:
-        print(f"\n  {strategy_name}: no active trades (all skipped)")
+        print(f"\n{'='*80}")
+        print(f"  {strategy_name}: no active trades")
+        print(f"  Skipped: {len(trade_df)} total")
+        if n_no_otm > 0:
+            print(f"    - {n_no_otm} skipped: OTM cache missing")
+            print(f"      Run: python3 fetch_intraday_options.py --spreads --start 2021-08-01")
+        if n_no_cache > 0:
+            print(f"    - {n_no_cache} skipped: ATM anchor missing")
+        print(f"{'='*80}")
         return
 
     n         = len(active)
@@ -489,9 +506,12 @@ def print_spread_summary(trade_df, strategy_name):
     print(f"  Max drawdown:     {dd:.1f}%")
     print(f"  Avg debit/trade:  ₹{avg_debit:.1f}  ×  {avg_lots:.1f} lots avg")
     print(f"  Real-leg coverage: {real_pct:.0f}%  ({total_real} real / {total_est} estimated)")
-    if real_pct < 90:
-        print(f"  ⚠️  Partial real-leg coverage — run:")
+    if total_est > 0:
+        print(f"  ⚠️  ESTIMATED LEGS BIAS RESULTS — BS understates debit ~10-20×")
+        print(f"     Real run: drop --allow-estimate, build OTM cache first:")
         print(f"     python3 fetch_intraday_options.py --spreads --start 2021-08-01")
+    if n_no_otm > 0:
+        print(f"  Skipped (no OTM cache): {n_no_otm} days — fetch in progress?")
     print(f"{'='*80}")
 
 
@@ -510,15 +530,24 @@ def main():
     ap.add_argument("--exit",  default="15:15", help="Exit time HH:MM IST")
     ap.add_argument("--save",  default=None,
                     help="CSV path to save trade log (default: don't save)")
+    ap.add_argument("--allow-estimate", action="store_true",
+                    help="Estimate OTM legs from ATM via Black-Scholes when "
+                         "cache missing. UNRELIABLE — debit understated 10-20× "
+                         "due to vol skew. Default: skip days without real OTM.")
     args = ap.parse_args()
 
     print(f"\nSpread backtest  |  signals={'ML' if args.ml else 'rule'}  "
           f"|  entry={args.entry}  exit={args.exit}")
 
+    if args.allow_estimate:
+        print("⚠️  --allow-estimate ON: OTM legs filled by BS formula when missing.")
+        print("    These results UNDERSTATE debit ~10-20× due to vol skew. Trust real-only runs.\n")
+
     if args.adaptive:
         print(f"Adaptive regime router: signal+VIX → strategy")
         df = run_spread_backtest(None, ml=args.ml, adaptive=True,
-                                 entry_time=args.entry, exit_time=args.exit)
+                                 entry_time=args.entry, exit_time=args.exit,
+                                 allow_estimate=args.allow_estimate)
         print_spread_summary(df, "Adaptive (regime router)")
         if args.save:
             df.to_csv(args.save, index=False)
@@ -529,7 +558,8 @@ def main():
                   else [args.strategy])
     for key in strategies:
         df = run_spread_backtest(key, ml=args.ml,
-                                 entry_time=args.entry, exit_time=args.exit)
+                                 entry_time=args.entry, exit_time=args.exit,
+                                 allow_estimate=args.allow_estimate)
         print_spread_summary(df, STRATEGIES[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)
