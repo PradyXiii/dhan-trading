@@ -1,5 +1,27 @@
 # BankNifty Autoresearch Program
 
+## ⚠️ REAL-OPTIONS RULE (April 2026)
+
+Composite score measures **directional signal quality** — not real option P&L.
+OHLCV-formula premium backtest is misleading: April 2026 test showed OHLCV
+predicting ₹25M profit vs real 1-min options showing -₹1.22L on the same
+period. Theta decay + IV compression + slippage are invisible to OHLCV.
+
+**Before any feature / config change gets promoted to live:**
+1. Composite ≥ previous best (this file's existing gate)
+2. AND `python3 backtest_engine.py --real-options --ml` result is non-worse
+   than the current live config's real-options result
+
+The autoresearcher may propose changes using autoexperiment composite, but
+the 3-night paper-model promotion streak in `autoloop_bn.py` must also pass
+real-options validation before auto-promotion. Rule of thumb: composite is a
+cheap filter, real-options is the judge.
+
+See "REAL-OPTIONS RULE" in CLAUDE.md for the full discovery story and
+workflow commands.
+
+---
+
 ## Goal
 
 Maximise composite score on the 252-day temporal holdout.
@@ -13,7 +35,8 @@ Target: push composite toward 0.60+ through genuine feature signal
 
 A change is KEPT only if:
   - composite >= previous best, AND
-  - pnl_proxy >= baseline_pnl × 0.90  (guard against direction bias collapse)
+  - pnl_proxy >= baseline_pnl × 0.90  (guard against direction bias collapse), AND
+  - real-options backtest P&L (once 5-yr cache is complete) is non-worse than baseline
 
 ---
 

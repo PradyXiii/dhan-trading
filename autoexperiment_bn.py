@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
+# Composite score here measures DIRECTIONAL signal quality only. It does not
+# reflect real option P&L — ignores theta, IV compression, slippage.
+# Before promoting any paper model or config change to live, cross-validate
+# with `python3 backtest_engine.py --real-options --ml`.
+# See "REAL-OPTIONS RULE" in CLAUDE.md.
+# ─────────────────────────────────────────────────────────────────────────────
 """
 autoexperiment_bn.py — Fast single-experiment metric runner for BN autoresearch.
 

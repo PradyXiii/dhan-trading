@@ -1,4 +1,10 @@
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
+# ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
+# OHLCV-formula premium = QUICK SANITY CHECK ONLY. Never ground truth.
+# Any decision affecting live capital MUST use `--real-options`.
+# OHLCV ignores theta decay + IV compression + slippage — showed ₹25M profit
+# vs real-options -₹1.22L on same period. See "REAL-OPTIONS RULE" in CLAUDE.md.
+# ─────────────────────────────────────────────────────────────────────────────
 import pandas as pd
 import numpy as np
 import os

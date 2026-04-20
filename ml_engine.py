@@ -7,6 +7,14 @@
 # After editing FEATURE_COLS: verify len(FEATURE_COLS) == len(set(FEATURE_COLS))
 # Gate every change with: python3 autoexperiment_bn.py — keep only if >= 0.6175
 # ─────────────────────────────────────────────────────────────────────────────
+# ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
+# Autoexperiment composite gates directional signal quality — NOT P&L reality.
+# Before promoting a feature change for live use, also run:
+#   python3 backtest_engine.py --real-options --ml
+# Formula-premium backtest showed ₹25M profit; real 1-min options showed
+# -₹1.22L on same period. OHLCV cannot model theta / IV / slippage.
+# See "REAL-OPTIONS RULE" in CLAUDE.md.
+# ─────────────────────────────────────────────────────────────────────────────
 """
 ml_engine.py — Walk-forward ML direction engine for BankNifty options.
 

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
+# Any experiment that affects trade P&L must be validated against real 1-min
+# option data (`data/intraday_options_cache/`), not OHLCV-formula premium.
+# Autoexperiment composite is a proxy — it gates FEATURE quality, not full
+# P&L reality. Before promoting a paper model for live use, confirm real-options
+# backtest also favors the change. See "REAL-OPTIONS RULE" in CLAUDE.md.
+# ─────────────────────────────────────────────────────────────────────────────
 """
 autoloop_bn.py — Daily midnight autoresearch loop for BankNifty ML system.
 

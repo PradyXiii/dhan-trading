@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
+# This evaluator uses OHLCV-formula premium — QUICK SANITY CHECK ONLY.
+# Any SL_PCT / RR change that looks good here MUST be re-tested with
+# `python3 backtest_engine.py --real-options` before promotion. OHLCV ignores
+# theta decay + IV compression + slippage. See "REAL-OPTIONS RULE" in CLAUDE.md.
+# ─────────────────────────────────────────────────────────────────────────────
 """
 autoexperiment_backtest.py — Backtest evaluator for auto_trader.py constant changes.
 

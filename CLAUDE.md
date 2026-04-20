@@ -26,6 +26,33 @@ Two review surfaces, different stages:
 
 ---
 
+## ⚠️ REAL-OPTIONS RULE — NEVER USE OHLCV FOR FINAL VALIDATION
+
+**Ground truth for every backtest, experiment, or config change = real 1-min option data.**
+OHLCV-formula premium (`PREMIUM_K × BN_open × sqrt(DTE)`) is a **quick sanity check only** — never the basis for promotion, deployment, or any decision that affects live capital.
+
+**Why this rule exists (April 2026 discovery):**
+OHLCV backtest showed ₹25M profit over years. Real 1-min option backtest on same period showed **-₹1.22L**. Gap came from 3 things OHLCV can't see: theta decay (premium bleeds every minute regardless of spot), IV compression (premium falls after open even if spot unchanged), real-world bid-ask slippage. Formula tracks spot only — real options don't.
+
+**Mandatory workflow before promoting any change:**
+
+1. Ensure cache is current:
+   ```bash
+   python3 fetch_intraday_options.py --start 2021-08-01   # Dhan has no data before Aug 2021
+   ```
+2. Re-run backtest with real option data:
+   ```bash
+   python3 backtest_engine.py --real-options --ml
+   ```
+3. If results contradict OHLCV backtest → **real-options wins, always**.
+4. Autoloop / autoexperiment must use `--real-options` flag (or equivalent real-premium path) for every evaluation. OHLCV result may be logged for comparison but cannot gate promotion.
+
+**Cache location:** `data/intraday_options_cache/{YYYY-MM-DD}_{CE|PE}.csv` (gitignored, VM-only).
+
+**If cache is partial** (< 90% of trade days covered): annotate any report as "PARTIAL REAL-OPTIONS COVERAGE — results unreliable" and complete the fetch before acting.
+
+---
+
 ## ⚠️ DHAN API RULE — READ THIS FIRST, EVERY SESSION
 
 **Before writing, debugging, or modifying ANY Dhan API call — read the docs first:**
