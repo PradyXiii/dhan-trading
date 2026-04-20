@@ -8,6 +8,7 @@ from datetime import date as _date, timedelta
 from math import floor
 
 DATA_DIR         = "data"
+INTRADAY_CACHE_DIR = "data/intraday_options_cache"
 LOT_SIZE         = 30
 RISK_PCT         = 0.05
 SL_PCT           = 0.15   # 15% SL → TP=37.5% at RR=2.5x (matches auto_trader.py)
@@ -565,14 +566,169 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     return round(pnl, 2), result, lots, round(premium, 2), charges, bd, _dist
 
 
+# ── Real-options simulation (uses cached 1-min ATM option path) ──────────────
+
+def _load_intraday_path(date, signal):
+    """Load cached 1-min ATM CE/PE bars for date. Returns DataFrame or None."""
+    opt_code = "CE" if str(signal).upper() == "CALL" else "PE"
+    path = os.path.join(INTRADAY_CACHE_DIR, f"{date:%Y-%m-%d}_{opt_code}.csv")
+    if not os.path.exists(path):
+        return None
+    try:
+        bars = pd.read_csv(path, parse_dates=["dt"])
+        return bars if not bars.empty else None
+    except Exception:
+        return None
+
+
+def simulate_trade_real_option(row, bn_ohlcv, capital, trail_jump_opt=5,
+                                sl_pct=None, flat_rr=None, day_rr_override=None,
+                                dte_override=None, lot_size=None,
+                                entry_time="09:30", exit_time="15:15"):
+    """
+    Simulate one trade using REAL cached 1-min option path.
+    Entry price = open of bar at `entry_time`. Walks forward minute bars
+    applying SL / TP / stepped trailing stop (Dhan-style).
+    Falls back to `simulate_trade()` if cache missing for date.
+    Returns same 7-tuple as `simulate_trade()`. Always ATM strike (strike_dist=0).
+    """
+    from datetime import time as _dtime
+
+    date    = row["date"]
+    weekday = row["weekday"]
+    signal  = str(row.get("signal", "")).upper()
+
+    zero_bd = {k: 0.0 for k in
+               ["c_brokerage","c_stt","c_exchange","c_clearing",
+                "c_gst","c_stamp_duty","c_sebi"]}
+
+    if signal not in ("CALL", "PUT"):
+        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_bd, 0
+
+    bars = _load_intraday_path(date, signal)
+    if bars is None or bars.empty:
+        # No cache → fall back to OHLCV approximation so partial coverage works
+        return simulate_trade(row, bn_ohlcv, capital,
+                              trail_jump_opt=trail_jump_opt, sl_pct=sl_pct,
+                              flat_rr=flat_rr, day_rr_override=day_rr_override,
+                              dte_override=dte_override, lot_size=lot_size)
+
+    # Parse entry/exit clock
+    eh, em = [int(x) for x in entry_time.split(":")]
+    xh, xm = [int(x) for x in exit_time.split(":")]
+    entry_t = _dtime(eh, em)
+    exit_t  = _dtime(xh, xm)
+
+    bars  = bars.sort_values("dt").reset_index(drop=True)
+    times = bars["dt"].dt.time
+    entry_mask = times >= entry_t
+    if not entry_mask.any():
+        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_bd, 0
+
+    entry_bar = bars[entry_mask].iloc[0]
+    entry_px  = float(entry_bar["open"])
+    if entry_px <= 0 or pd.isna(entry_px):
+        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_bd, 0
+
+    # Risk / reward
+    ls = lot_size if lot_size is not None else LOT_SIZE
+    if flat_rr is not None:
+        rr = flat_rr
+    elif day_rr_override is not None:
+        rr = day_rr_override.get(weekday, 1.4)
+    else:
+        rr = DAY_RR.get(weekday, 1.4)
+    sl = sl_pct if sl_pct is not None else SL_PCT
+
+    # Position sizing — risk RISK_PCT of capital, cap at MAX_LOTS
+    risk_per_lot = entry_px * ls * sl
+    if risk_per_lot <= 0:
+        return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_bd, 0
+    lots = min(int((capital * RISK_PCT) / risk_per_lot), MAX_LOTS)
+    if lots <= 0:
+        return 0.0, "SKIPPED_LOW_CAPITAL", 0, round(entry_px, 2), 0.0, zero_bd, 0
+
+    # Absolute SL / TP on option premium
+    orig_sl_lvl = entry_px * (1.0 - sl)
+    tp_lvl      = entry_px * (1.0 + sl * rr)
+
+    # Walk forward bars until exit_time
+    fwd_mask = (bars["dt"] >= entry_bar["dt"]) & (times <= exit_t)
+    path     = bars[fwd_mask].reset_index(drop=True)
+
+    running_high = entry_px
+    sl_level     = orig_sl_lvl
+    exit_px      = None
+    result       = "PARTIAL"
+
+    for _, bar in path.iterrows():
+        high = float(bar["high"]); low = float(bar["low"])
+
+        # Stepped trail (Dhan-style): SL ratchets up by trail_jump per trail_jump favorable move
+        if trail_jump_opt > 0 and high > running_high:
+            running_high = high
+            favorable    = running_high - entry_px
+            steps        = int(favorable / trail_jump_opt) if favorable > 0 else 0
+            sl_level     = orig_sl_lvl + steps * trail_jump_opt
+
+        tp_hit = high >= tp_lvl
+        sl_hit = low  <= sl_level
+
+        if tp_hit and sl_hit:
+            # Conservative: if both hit in same minute bar, assume SL first
+            exit_px = sl_level
+            result  = "TRAIL_SL" if sl_level > orig_sl_lvl else "LOSS"
+            break
+        if tp_hit:
+            exit_px = tp_lvl
+            result  = "WIN"
+            break
+        if sl_hit:
+            exit_px = sl_level
+            result  = "TRAIL_SL" if sl_level > orig_sl_lvl else "LOSS"
+            break
+
+    if exit_px is None:
+        if path.empty:
+            return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_bd, 0
+        exit_px = float(path.iloc[-1]["close"])
+        result  = "PARTIAL"
+
+    gross       = (exit_px - entry_px) * lots * ls
+    charges, bd = calculate_charges(entry_px, lots, lot_size=ls, breakdown=True)
+    pnl         = gross - charges
+
+    return (round(pnl, 2), result, lots, round(entry_px, 2),
+            charges, bd, 0)   # strike_dist always ATM in real-options mode
+
+
 # ── Backtest loop ─────────────────────────────────────────────────────────────
 
 def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=None,
                  bn_tp_pts=None, bn_sl_pts=None, use_actual_dte=True, ml=False,
-                 use_real_premiums=True, otm_sl_pct=None, otm_flat_rr=None):
+                 use_real_premiums=True, otm_sl_pct=None, otm_flat_rr=None,
+                 use_real_options=False, entry_time="09:30", exit_time="15:15"):
     signals      = load_signals(ml=ml)
     bn_ohlcv     = load_bn_ohlcv()
     opt_premiums = load_real_premiums() if use_real_premiums else {}
+
+    if use_real_options:
+        # Check cache coverage
+        n_cache = 0
+        if os.path.isdir(INTRADAY_CACHE_DIR):
+            for _, r in signals.iterrows():
+                if str(r.get("signal","")).upper() in ("CALL","PUT"):
+                    code = "CE" if r["signal"] == "CALL" else "PE"
+                    if os.path.exists(os.path.join(
+                            INTRADAY_CACHE_DIR, f"{r['date']:%Y-%m-%d}_{code}.csv")):
+                        n_cache += 1
+        n_trade = ((signals["signal"] == "CALL") | (signals["signal"] == "PUT")).sum()
+        pct     = 100.0 * n_cache / n_trade if n_trade else 0.0
+        print(f"  Real 1-min option path: {n_cache}/{n_trade} trade days "
+              f"({pct:.0f}% coverage) — remainder fall back to OHLCV approximation")
+        print(f"  Entry={entry_time}  Exit≤{exit_time}  (cache: {INTRADAY_CACHE_DIR}/)")
+        if n_cache == 0:
+            print("  Run: python3 fetch_intraday_options.py --start <YYYY-MM-DD>  to build cache")
 
     if opt_premiums:
         covered = sum(1 for d in signals["date"] if d in opt_premiums and
@@ -613,19 +769,32 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
         capital_before = capital
         actual_dte  = get_dte(date) if use_actual_dte else None
         actual_lots = get_lot_size(date)
-        pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade(
-            row, bn_ohlcv, capital,
-            trail_jump_opt=trail_jump_opt,
-            sl_pct=sl_pct,
-            flat_rr=flat_rr,
-            day_rr_override=day_rr_override,
-            bn_tp_pts=bn_tp_pts,
-            bn_sl_pts=bn_sl_pts,
-            real_atm_premium=real_prem,
-            dte_override=actual_dte,
-            lot_size=actual_lots,
-            otm_sl_pct=otm_sl_pct,
-            otm_flat_rr=otm_flat_rr)
+        if use_real_options:
+            pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade_real_option(
+                row, bn_ohlcv, capital,
+                trail_jump_opt=trail_jump_opt,
+                sl_pct=sl_pct,
+                flat_rr=flat_rr,
+                day_rr_override=day_rr_override,
+                dte_override=actual_dte,
+                lot_size=actual_lots,
+                entry_time=entry_time,
+                exit_time=exit_time)
+            prem_src = "real_1min"   # overrides earlier "real"/"approx"
+        else:
+            pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade(
+                row, bn_ohlcv, capital,
+                trail_jump_opt=trail_jump_opt,
+                sl_pct=sl_pct,
+                flat_rr=flat_rr,
+                day_rr_override=day_rr_override,
+                bn_tp_pts=bn_tp_pts,
+                bn_sl_pts=bn_sl_pts,
+                real_atm_premium=real_prem,
+                dte_override=actual_dte,
+                lot_size=actual_lots,
+                otm_sl_pct=otm_sl_pct,
+                otm_flat_rr=otm_flat_rr)
         capital += pnl
 
         bn_open = (bn_ohlcv.loc[date, "open"]
@@ -1548,6 +1717,27 @@ def main():
         print_summary(trade_df, monthly, threshold=None, ml=True)
         print(f"\nSaved → {DATA_DIR}/trade_log_ml_real.csv")
         print(f"Saved → {DATA_DIR}/equity_curve_ml_real.csv")
+        return
+
+    if len(_sys.argv) >= 2 and _sys.argv[1] == "--real-options":
+        # ── Real 1-min option path backtest (uses data/intraday_options_cache/) ──
+        use_ml = (len(_sys.argv) > 2 and _sys.argv[2] == "--ml")
+        sig_file = f"{DATA_DIR}/signals_ml.csv" if use_ml else f"{DATA_DIR}/signals.csv"
+        label    = "ML" if use_ml else "RULE"
+        print(f"Running REAL-OPTIONS backtest [{label} signals | "
+              f"SL=15%, TP=37.5%, RR=2.5x, trail=₹5, entry=09:30, exit≤15:15]")
+        print(f"Source of truth: 1-min ATM option OHLC from Dhan rollingoption cache")
+        trade_df, monthly = run_backtest(
+            trail_jump_opt=5, sl_pct=0.15, flat_rr=2.5,
+            use_actual_dte=True, ml=use_ml, use_real_premiums=False,
+            use_real_options=True, entry_time="09:30", exit_time="15:15",
+        )
+        suffix = "_ml_realopt" if use_ml else "_realopt"
+        trade_df.to_csv(f"{DATA_DIR}/trade_log{suffix}.csv",    index=False)
+        monthly.to_csv( f"{DATA_DIR}/equity_curve{suffix}.csv", index=False)
+        print_summary(trade_df, monthly, ml=use_ml)
+        print(f"\nSaved → {DATA_DIR}/trade_log{suffix}.csv")
+        print(f"Saved → {DATA_DIR}/equity_curve{suffix}.csv")
         return
 
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--ml":
