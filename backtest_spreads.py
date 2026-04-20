@@ -207,7 +207,7 @@ def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
 
 def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
                           entry_time="09:30", exit_time="15:15",
-                          lot_size=None, allow_estimate=False):
+                          lot_size=None, allow_estimate=False, vix_val=None):
     """
     Simulate one spread trade using real 1-min bars for each leg (or
     delta-scaled estimates when OTM cache missing).
@@ -230,6 +230,23 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
 
     if signal not in strategy["signal_match"] or bn_open is None:
         return zero_result
+
+    # VIX regime filter (if configured on strategy)
+    vix_min = strategy.get("vix_min")
+    vix_max = strategy.get("vix_max")
+    if (vix_min is not None or vix_max is not None) and vix_val is not None:
+        if vix_min is not None and vix_val < vix_min:
+            return {**zero_result, "result": "SKIPPED_VIX_LOW"}
+        if vix_max is not None and vix_val > vix_max:
+            return {**zero_result, "result": "SKIPPED_VIX_HIGH"}
+
+    # DTE filter (if configured on strategy)
+    dte_min = strategy.get("dte_min")
+    dte_max = strategy.get("dte_max")
+    if dte_min is not None and dte < dte_min:
+        return {**zero_result, "result": "SKIPPED_DTE_LOW"}
+    if dte_max is not None and dte > dte_max:
+        return {**zero_result, "result": "SKIPPED_DTE_HIGH"}
 
     # Load each leg's bars
     leg_bars  = []
@@ -331,7 +348,8 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
         max_loss_per_lot = net_credit * sl_frac * ls
         if max_loss_per_lot <= 0:
             return {**zero_result, "result": "SKIPPED_ZERO_RISK"}
-        lots = min(int((capital * RISK_PCT) / max_loss_per_lot), MAX_LOTS)
+        max_lots_cap = strategy.get("max_lots", MAX_LOTS)
+        lots = min(int((capital * RISK_PCT) / max_loss_per_lot), max_lots_cap)
         if lots < 1:
             if max_loss_per_lot <= capital * 0.85:
                 lots = 1
@@ -354,7 +372,8 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
         max_loss_per_lot = net_debit * ls
         if max_loss_per_lot <= 0:
             return {**zero_result, "result": "SKIPPED_ZERO_RISK"}
-        lots = min(int((capital * RISK_PCT) / max_loss_per_lot), MAX_LOTS)
+        max_lots_cap = strategy.get("max_lots", MAX_LOTS)
+        lots = min(int((capital * RISK_PCT) / max_loss_per_lot), max_lots_cap)
         if lots < 1:
             if max_loss_per_lot <= capital * 0.85:
                 lots = 1
@@ -462,11 +481,13 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             capital      += MONTHLY_TOPUP
             current_month = mkey
 
+        # VIX lookup (for both adaptive routing AND per-strategy filters)
+        vix_val = (float(vix_df.loc[date, "close"])
+                   if vix_df is not None and date in vix_df.index
+                   else 15.0)   # default mid-range if missing
+
         # Select strategy
         if adaptive:
-            vix_val = (float(vix_df.loc[date, "close"])
-                       if vix_df is not None and date in vix_df.index
-                       else 15.0)   # default mid-range if missing
             strategy = _route_strategy(row["signal"], vix_val)
             if strategy is None:
                 continue            # no strategy for this regime — skip
@@ -476,7 +497,7 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
         trade = simulate_spread_trade(
             row, bn_ohlcv, capital, strategy,
             entry_time=entry_time, exit_time=exit_time,
-            allow_estimate=allow_estimate,
+            allow_estimate=allow_estimate, vix_val=vix_val,
         )
         trade["capital_before"] = round(capital, 2)
         capital += trade["pnl"]
