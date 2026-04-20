@@ -15,6 +15,7 @@ Variants:
 ATM+2 strike width requires new OTM fetch — not tested here.
 """
 import copy
+import time
 import pandas as pd
 
 import backtest_spreads as bs
@@ -27,6 +28,7 @@ def run(label, overrides_bc, overrides_bp,
     saved_bp = copy.deepcopy(bs.STRATEGIES["bull_put_credit"])
     bs.STRATEGIES["bear_call_credit"].update(overrides_bc)
     bs.STRATEGIES["bull_put_credit"].update(overrides_bp)
+    t0 = time.time()
     try:
         bc = bs.run_spread_backtest("bear_call_credit", ml=True,
                                     entry_time=entry_time, exit_time=exit_time)
@@ -35,6 +37,8 @@ def run(label, overrides_bc, overrides_bp,
     finally:
         bs.STRATEGIES["bear_call_credit"] = saved_bc
         bs.STRATEGIES["bull_put_credit"]  = saved_bp
+    elapsed = time.time() - t0
+    print(f"  [{label}] elapsed: {elapsed:.1f}s")
     return bc, bp
 
 

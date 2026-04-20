@@ -491,18 +491,27 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             capital      += MONTHLY_TOPUP
             current_month = mkey
 
-        # VIX lookup (for both adaptive routing AND per-strategy filters)
-        vix_val = (float(vix_df.loc[date, "close"])
-                   if vix_df is not None and date in vix_df.index
-                   else 15.0)   # default mid-range if missing
+        sig = str(row.get("signal", "")).upper()
 
-        # Select strategy
-        if adaptive:
-            strategy = _route_strategy(row["signal"], vix_val)
-            if strategy is None:
-                continue            # no strategy for this regime — skip
-        else:
+        # Fast path: skip signal mismatches WITHOUT VIX lookup or simulate call
+        if not adaptive:
             strategy = STRATEGIES[strategy_key]
+            if sig not in strategy["signal_match"]:
+                continue
+            # VIX lookup only if filter is active on this strategy
+            if strategy.get("vix_min") is not None or strategy.get("vix_max") is not None:
+                vix_val = (float(vix_df.loc[date, "close"])
+                           if vix_df is not None and date in vix_df.index
+                           else 15.0)
+            else:
+                vix_val = None
+        else:
+            vix_val = (float(vix_df.loc[date, "close"])
+                       if vix_df is not None and date in vix_df.index
+                       else 15.0)
+            strategy = _route_strategy(sig, vix_val)
+            if strategy is None:
+                continue
 
         trade = simulate_spread_trade(
             row, bn_ohlcv, capital, strategy,
