@@ -164,7 +164,7 @@ autoexperiment_bn.py        Fast 252-day holdout evaluator used by autoloop (com
 autoexperiment_backtest.py  Backtest evaluator for auto_trader.py constant changes
 validate_all.py             Pre-deployment validation pass
 backfill_live_trades.py     Periodic utility — import Dhan trade history into live_trades.csv
-spread_monitor.py           Intraday 5-min cron — SL/TP watch for credit spreads, closes both legs if hit
+spread_monitor.py           Intraday 1-min cron — SL/TP watch for credit spreads, closes both legs if hit
 backtest_spreads.py         Multi-leg credit spread backtest — Bear Call / Bull Put / regime router
 fetch_intraday_options.py   Fetch 1-min option cache for real-options backtests (data/intraday_options_cache/)
 research_program_bn.md      Research brief — defines what autoresearch may and may not change
