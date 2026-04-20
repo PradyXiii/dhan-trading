@@ -44,11 +44,12 @@ Two review surfaces, different stages:
 - No exit-marker check, no duplicate-position guard (not needed — nothing live)
 
 **Next steps before flipping back to LIVE:**
-1. Prototype vertical debit spread backtest on existing real-options cache
-2. Add OTM strike caching to `fetch_intraday_options.py` (need ATM ±300 pts)
-3. Rebuild backtest engine for 2-leg spread simulation
-4. Paper-trade new spread strategy for 30+ days
-5. Only flip PAPER_MODE = False when paper_trades.csv shows >50 days net-positive
+1. ✅ Built `fetch_intraday_options.py --spreads` (fetches ATM+3 CE / ATM-3 PE / straddle legs)
+2. ✅ Built `backtest_spreads.py` — multi-leg spread simulator with regime router
+3. Fetch full OTM cache on VM: `python3 fetch_intraday_options.py --spreads --start 2021-08-01` (~30 min)
+4. Run comparative backtest across 3 strategies + adaptive router
+5. Paper-trade the winning strategy for 30+ days — only flip PAPER_MODE when
+   `data/paper_trades.csv` shows >50 days net-positive P&L
 
 **To re-enable LIVE trading** (only after strategy is fixed):
 ```python
@@ -86,6 +87,63 @@ OHLCV backtest showed ₹25M profit over years. Real 1-min option backtest on sa
 **Cache location:** `data/intraday_options_cache/{YYYY-MM-DD}_{CE|PE}.csv` (gitignored, VM-only).
 
 **If cache is partial** (< 90% of trade days covered): annotate any report as "PARTIAL REAL-OPTIONS COVERAGE — results unreliable" and complete the fetch before acting.
+
+---
+
+## 🎯 ADAPTIVE MULTI-STRATEGY SYSTEM (April 2026 — design phase)
+
+**The system must dynamically choose strategy per day based on market regime.**
+No single strategy works across all years — directional spreads fail in neutral
+regimes, straddles fail in low-vol regimes, etc.
+
+### Strategy registry (`backtest_spreads.py` → `STRATEGIES` dict)
+
+| Strategy | Direction | Regime (signal + VIX) | Legs | Max loss | Max profit |
+|---|---|---|---|---|---|
+| Bull Call Spread | BULLISH | CALL + VIX∈[10,20] | BUY ATM CE + SELL ATM+3 CE | net debit | (300 − debit) |
+| Bear Put Spread  | BEARISH | PUT  + VIX∈[10,20] | BUY ATM PE + SELL ATM-3 PE | net debit | (300 − debit) |
+| Long Straddle    | VOLATILE | any signal + VIX≥20 | BUY ATM CE + BUY ATM PE | sum of debits | unlimited |
+| Iron Condor (TBD) | NEUTRAL | no signal + VIX∈[12,18] | 4-leg credit spread | spread width − credit | net credit |
+
+### Adaptive router (`_route_strategy()` in `backtest_spreads.py`)
+```
+VIX ≥ 20 + directional signal  →  Long Straddle
+CALL signal + VIX∈[10,20)       →  Bull Call Spread
+PUT  signal + VIX∈[10,20)       →  Bear Put Spread
+else                            →  skip day (no valid regime match)
+```
+
+### ⚠️ MANDATORY LIVE PLACEMENT ORDER: BUY FIRST, THEN SELL
+
+Dhan hedge margin rules require the LONG leg on the books BEFORE the SHORT leg
+gets margin benefit. In `auto_trader.py` when spreads go live:
+
+1. Place BUY order (long leg) — wait for fill confirmation
+2. Then place SELL order (short leg) — margin benefit applies
+3. Never reverse the order — short-first triggers full margin for the sell, defeating spread economics
+
+### Cache file naming (for multi-leg backtests)
+
+| File | Contents |
+|---|---|
+| `{date}_CE.csv` | ATM CE (backward-compat, exists from Apr 2026 fetch) |
+| `{date}_PE.csv` | ATM PE (backward-compat) |
+| `{date}_CE_p3.csv` | ATM+3 CE (Bull Call Spread short leg, CALL days only) |
+| `{date}_PE_m3.csv` | ATM-3 PE (Bear Put Spread short leg, PUT days only) |
+| `{date}_PE_straddle.csv` | ATM PE on CALL signal days (Long Straddle) |
+| `{date}_CE_straddle.csv` | ATM CE on PUT signal days (Long Straddle) |
+
+Fetch them all (one-time, ~30 min for full 5y): `python3 fetch_intraday_options.py --spreads --start 2021-08-01`
+
+### Common commands
+
+```bash
+python3 backtest_spreads.py                              # run all 3 strategies
+python3 backtest_spreads.py --strategy bull_call_spread  # single strategy
+python3 backtest_spreads.py --adaptive                   # regime router
+python3 backtest_spreads.py --ml                         # use signals_ml.csv
+python3 backtest_spreads.py --save data/spread_trades.csv
+```
 
 ---
 
