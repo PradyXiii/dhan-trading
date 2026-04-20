@@ -35,7 +35,8 @@ Read these files and compare every API call against the fresh docs:
 
 - `auto_trader.py` — check all Dhan API calls: orders, super orders, option chain, expirylist, fundlimit, positions
 - `data_fetcher.py` — check all historical data calls (charts/historical, charts/intraday, charts/rollingoption)
-- `dhan_mcp.py` — check positions, holdings, orders endpoints
+- `spread_monitor.py` — check marketfeed/ltp, orders endpoints
+- `exit_positions.py` — check positions, orders endpoints
 - `renew_token.py` — check RenewToken endpoint
 - `lot_expiry_scanner.py` — check any API calls used
 

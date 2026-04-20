@@ -158,7 +158,6 @@ replay_today.py             Post-mortem tool — runs after evolver to replay to
 analyze_confidence.py       Confidence bucket + VIX regime diagnostics; writes dynamic VIX threshold
 renew_token.py              Dynamic token renewal — 23h50m interval, 7 days a week
 notify.py                   Telegram send helper
-dhan_mcp.py                 MCP server — query live Dhan positions/P&L from Claude Code
 autoloop_bn.py              Nightly autoresearch loop — Claude API experiments → paper model → promote after 3 wins
 autoexperiment_bn.py        Fast 252-day holdout evaluator used by autoloop (composite score)
 autoexperiment_backtest.py  Backtest evaluator for auto_trader.py constant changes
@@ -291,29 +290,6 @@ python3 renew_token.py                       # check / force token renewal
 # Lot/expiry scanner
 python3 lot_expiry_scanner.py --show         # print current lot size and expiry override
 python3 lot_expiry_scanner.py                # run scan + alert if anything changed
-```
-
----
-
-## Live P&L from Claude Code
-
-`dhan_mcp.py` is an MCP server that lets you ask Claude Code about your live positions:
-
-> "Show me my current positions"
-> "What's today's P&L?"
-> "Did my stop-loss trigger?"
-
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "dhan": {
-      "command": "python3",
-      "args": ["/path/to/dhan-trading/dhan_mcp.py"]
-    }
-  }
-}
 ```
 
 ---

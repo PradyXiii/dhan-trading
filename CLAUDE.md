@@ -257,7 +257,6 @@ No human input needed during market hours.
 | `replay_today.py` | Post-mortem tool — ensemble replay of today after evolver |
 | `renew_token.py` | Every-5-min token renewer (23h50m interval) |
 | `notify.py` | Telegram send/log helper (2 functions) |
-| `dhan_mcp.py` | MCP server — exposes live Dhan positions/orders/P&L to Claude Code |
 | `autoloop_bn.py` | Daily midnight autoresearch — paper-trades ML changes, auto-promotes after 3 nights of outperformance |
 | `ml_engine_paper.py` | Paper copy of ml_engine.py — autoresearcher tests here first before promoting to live |
 | `autoexperiment_bn.py` | Fast 252-day holdout evaluator; `--module ml_engine_paper` to eval paper model |
@@ -527,7 +526,7 @@ The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this lis
 | Add data source | `data_fetcher.py` + `model_evolver.py` feature list |
 | Change HPO trials | `model_evolver.py` top — `N_TRIALS = 30` |
 | Add a new model | `model_evolver.py` `_build_model()` + competition loop |
-| Check live P&L | `dhan_mcp.py` (MCP) or ask Claude "show positions" |
+| Check live P&L | Dhan app → Positions, or `python3 -c "from backfill_live_trades import ..." ` |
 
 ---
 
