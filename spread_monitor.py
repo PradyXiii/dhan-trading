@@ -3,7 +3,8 @@
 """
 spread_monitor.py — Intraday SL/TP watcher for credit spreads
 ==============================================================
-Runs every 5 min during market hours (9:30 AM → 3:10 PM IST).
+Runs every 1 min during market hours (9:30 AM → 3:29 PM IST) — matches
+backtest bar resolution. fcntl lock prevents overlapping runs.
 
 What it does:
   1. Reads data/today_trade.json — today's spread trade
@@ -19,8 +20,8 @@ What it does:
 PAPER MODE: no real Dhan orders — only writes to today_trade.json +
   paper_trades.csv. Same SL/TP logic, same alerts, just no money moves.
 
-Cron (every 5 min, 9:30 AM → 3:10 PM IST = 4:00 UTC → 9:40 UTC):
-  */5 4-9 * * 1-5 cd ~/dhan-trading && python3 spread_monitor.py >> logs/spread_monitor.log 2>&1
+Cron (every 1 min, 9:30 AM → 3:29 PM IST = UTC hours 4-9):
+  * 4-9 * * 1-5 cd ~/dhan-trading && python3 spread_monitor.py >> logs/spread_monitor.log 2>&1
 """
 import os
 import sys
@@ -56,7 +57,7 @@ CREDIT_SL_FRAC = 0.5     # stop when spread grows 50% above entry credit
 CREDIT_TP_FRAC = 0.65    # take profit when 65% of credit is in pocket
 
 MKT_OPEN  = dt_time(9,  30)
-MKT_CLOSE = dt_time(15, 10)   # stop at 3:10; exit_positions.py owns 3:15+
+MKT_CLOSE = dt_time(15, 10)   # stop SL/TP monitoring at 3:10; exit_positions.py owns 3:15+
 
 SPREAD_STRATEGIES = {"bear_call_credit", "bull_put_credit"}
 

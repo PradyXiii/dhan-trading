@@ -1813,6 +1813,9 @@ def main():
             return
 
         # Chain intelligence (max pain + GEX) — informational only
+        # Sleep 300ms: get_spread_legs() just fetched the chain; Dhan rate-limits
+        # back-to-back hits with 429. Tiny pause avoids the noise.
+        time.sleep(0.3)
         chain_sig = compute_chain_signals(expiry, spot)
         if chain_sig:
             _append_chain_signals(chain_sig, spot)
@@ -1995,6 +1998,8 @@ def main():
     if not lots or lots < 1:
         die(f"Lot sizing returned {lots} — insufficient capital or premium too high for 1 lot.")
 
+    # 300ms spacer: get_affordable_option already fetched the chain once.
+    time.sleep(0.3)
     chain_sig = compute_chain_signals(expiry, spot)
     if chain_sig:
         _append_chain_signals(chain_sig, spot)
