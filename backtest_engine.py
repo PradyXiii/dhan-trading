@@ -776,6 +776,10 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
         actual_dte  = get_dte(date) if use_actual_dte else None
         actual_lots = get_lot_size(date)
         if use_real_options:
+            # Probe cache existence BEFORE the call so prem_src reflects truth
+            # (simulate_trade_real_option silently falls back to OHLCV when missing).
+            _probe = _load_intraday_path(date, signal)
+            prem_src = "real_1min" if _probe is not None else "approx_fallback"
             pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade_real_option(
                 row, bn_ohlcv, capital,
                 trail_jump_opt=trail_jump_opt,
@@ -786,7 +790,6 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
                 lot_size=actual_lots,
                 entry_time=entry_time,
                 exit_time=exit_time)
-            prem_src = "real_1min"   # overrides earlier "real"/"approx"
         else:
             pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade(
                 row, bn_ohlcv, capital,
@@ -1449,12 +1452,25 @@ def print_summary(trade_df, monthly, threshold=None, ml=False):
     print(f"  Max drawdown        : {max_dd:.1f}%")
     print(f"{'─'*60}")
     if "premium_source" in trade_df.columns:
-        real_days  = (trade_df["premium_source"] == "real").sum()
         total_days = len(trade_df)
-        print(f"  Premium source (real): {real_days}/{total_days} trade days  "
-              f"({real_days/total_days*100:.0f}%  from Dhan rollingoption)")
-        print(f"  Premium source (approx): {total_days-real_days}/{total_days} days "
-              f" (BN×K×√DTE formula)")
+        real1m     = (trade_df["premium_source"] == "real_1min").sum()
+        realopen   = (trade_df["premium_source"] == "real").sum()
+        fallback   = (trade_df["premium_source"] == "approx_fallback").sum()
+        approx     = (trade_df["premium_source"] == "approx").sum()
+        if real1m > 0 or fallback > 0:
+            # Real-options mode
+            print(f"  Premium source (real 1-min path): {real1m}/{total_days} days  "
+                  f"({real1m/total_days*100:.1f}%  from Dhan rollingoption cache)")
+            print(f"  Premium source (OHLCV fallback) : {fallback}/{total_days} days  "
+                  f"({fallback/total_days*100:.1f}%  cache missing — formula used)")
+            if real1m / max(total_days, 1) < 0.90:
+                print(f"  ⚠️  PARTIAL REAL-OPTIONS COVERAGE — {fallback} days used formula. "
+                      f"P&L is a hybrid; do not treat as ground truth until coverage >= 90%.")
+        else:
+            print(f"  Premium source (real ATM open): {realopen}/{total_days} days  "
+                  f"({realopen/total_days*100:.0f}%  from Dhan rollingoption)")
+            print(f"  Premium source (formula approx): {approx}/{total_days} days  "
+                  f"(BN×K×√DTE formula)")
     print(f"{'='*60}")
 
     print(f"\nMonthly breakdown (first 8 months):")
