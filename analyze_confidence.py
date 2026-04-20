@@ -80,8 +80,12 @@ def compute_optimal_threshold(proba, y_val, vix_vals) -> dict:
                 best_n         = n
 
     threshold = float(max(VIX_FLOOR, min(best_threshold, VIX_CEIL)))
+    # Ceiling — preserved across nightly rewrites so auto_trader keeps the panic-VIX cap.
+    # Set by real-options backtest (Oct-24 → Apr-26: VIX∈[12,20] = best ≥60%-retention filter).
+    vix_max = 20.0
     return {
         "vix_min_trade":          threshold,
+        "vix_max_trade":          vix_max,
         "accuracy_at_threshold":  round(best_acc, 4),
         "n_trades_in_holdout":    best_n,
         "n_holdout_total":        int(len(y_val)),
@@ -90,7 +94,8 @@ def compute_optimal_threshold(proba, y_val, vix_vals) -> dict:
         "bucket_report":          [(t, round(a, 4), n) for t, a, n in bucket_report],
         "reason":                 (
             f"Lowest VIX≥{threshold:.0f} where accuracy ({best_acc:.1%}) "
-            f">= {MIN_ACC_TO_TRADE:.0%} over {best_n} holdout days."
+            f">= {MIN_ACC_TO_TRADE:.0%} over {best_n} holdout days. "
+            f"Ceiling fixed at {vix_max:.0f} (panic regime)."
         ),
     }
 

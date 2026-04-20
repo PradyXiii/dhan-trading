@@ -244,17 +244,21 @@ RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
 ML_CONF_THRESHOLD = 0.55
 
 # ── VIX regime filter ─────────────────────────────────────────────────────────
-# Dynamically updated by analyze_confidence.py --write-threshold (called nightly
+# MIN: dynamically updated by analyze_confidence.py --write-threshold (called nightly
 # by autoloop_bn.py). As model accuracy improves, the threshold relaxes so we
 # trade on more days. Fallback: 13.0 (VIX<13 historically 46.7% accuracy).
-def _load_vix_threshold() -> float:
+# MAX: ceiling — panic-VIX days (real 1-min option backtest Oct-24 → Apr-26:
+# VIX∈[12,20] band kept 63.2% of trades, saved ₹44K vs unfiltered baseline).
+def _load_vix_threshold() -> tuple[float, float]:
     try:
         with open(f"{DATA_DIR}/vix_threshold.json") as _f:
-            return float(json.load(_f).get("vix_min_trade", 13.0))
+            d = json.load(_f)
+            return (float(d.get("vix_min_trade", 13.0)),
+                    float(d.get("vix_max_trade", 20.0)))
     except Exception:
-        return 13.0
+        return (13.0, 20.0)
 
-VIX_MIN_TRADE = _load_vix_threshold()
+VIX_MIN_TRADE, VIX_MAX_TRADE = _load_vix_threshold()
 
 # ── Adaptive opening-wait parameters ─────────────────────────────────────────
 # Root cause of bad 9:30 fills: large BN spot gap → inflated IV at open.
@@ -1343,6 +1347,7 @@ def main():
 
     # ── VIX regime filter ────────────────────────────────────────────────────
     # Model accuracy: VIX<13 = 46.7% (losing), VIX 13-18 = 57.4%, VIX>18 = 62.9%
+    # Ceiling: VIX>20 = panic regime; real-options backtest showed P&L drops sharply.
     vix_now = get_vix_level()
     if VIX_MIN_TRADE > 0 and vix_now < VIX_MIN_TRADE:
         notify.send(
@@ -1354,6 +1359,18 @@ def main():
             f"Waiting for a higher-conviction setup. Capital preserved."
         )
         notify.log(f"VIX regime filter: VIX={vix_now:.1f} < {VIX_MIN_TRADE} — no trade")
+        return
+    if VIX_MAX_TRADE > 0 and vix_now > VIX_MAX_TRADE:
+        notify.send(
+            f"⏸  <b>No Trade — Panic Volatility Day</b>\n"
+            f"─────────────────────\n"
+            f"{today_wd}  ·  {today_label}\n\n"
+            f"VIX at {vix_now:.1f}  (above {VIX_MAX_TRADE:.0f} ceiling)\n"
+            f"In panic markets our entry timing edge evaporates — option premiums are\n"
+            f"already inflated so +15% target becomes nearly unreachable.\n"
+            f"Waiting for a calmer setup. Capital preserved."
+        )
+        notify.log(f"VIX regime filter: VIX={vix_now:.1f} > {VIX_MAX_TRADE} — no trade")
         return
 
     # ── ML confidence gate ───────────────────────────────────────────────────
