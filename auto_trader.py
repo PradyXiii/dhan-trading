@@ -229,6 +229,18 @@ DRY_RUN   = "--dry-run" in sys.argv
 # IV crush). Paper-trading new spread strategy before risking ₹51K capital.
 PAPER_MODE = True
 
+# ── Credit Spread Mode — replaces naked options with Bear Call / Bull Put ─────
+# CALL signal → Bear Call Spread: SELL ATM CE + BUY (ATM+300) CE  (fade the call)
+# PUT  signal → Bull Put Spread:  SELL ATM PE + BUY (ATM-300) PE  (fade the put)
+# Locked config (5y backtest +₹36.2L): sl_frac=0.5, tp_frac=0.65, width=300
+# All variants (VIX filter, DTE filter, entry delay, early exit, lot cap) were
+# tested and each hurt vs baseline — default config wins.
+# Set False to fall back to naked single-leg option buying.
+CREDIT_SPREAD_MODE = True
+SPREAD_WIDTH       = 300    # pts between short (ATM) and long (OTM hedge) legs
+CREDIT_SL_FRAC     = 0.5    # stop when spread value grows 50% above credit received
+CREDIT_TP_FRAC     = 0.65   # take profit when 65% of credit is in pocket
+
 HEADERS = {
     "access-token": TOKEN,
     "client-id":    CLIENT_ID,
@@ -445,6 +457,242 @@ def _log_paper_trade(security_id, signal, lots, qty, premium, sl_price, tp_price
         notify.log(f"PAPER trade logged → {path}")
     except Exception as e:
         notify.log(f"Could not write paper_trades.csv: {e}")
+
+
+def _log_paper_spread_trade(short_sid, long_sid, signal, lots, qty,
+                            net_credit, short_strike, long_strike,
+                            short_ltp, long_ltp, spot):
+    """Log a paper credit spread trade to data/paper_trades.csv."""
+    import csv as _csv
+    path = f"{DATA_DIR}/paper_trades.csv"
+    cols = [
+        "date", "signal", "strategy",
+        "short_sid", "long_sid", "short_strike", "long_strike",
+        "lots", "qty", "lot_size", "spot",
+        "short_ltp", "long_ltp", "net_credit",
+        "max_loss_inr", "max_profit_inr",
+    ]
+    max_loss_per_share = SPREAD_WIDTH - net_credit
+    row = {
+        "date":           date.today().isoformat(),
+        "signal":         signal,
+        "strategy":       "bear_call_credit" if signal == "CALL" else "bull_put_credit",
+        "short_sid":      str(short_sid),
+        "long_sid":       str(long_sid),
+        "short_strike":   int(short_strike),
+        "long_strike":    int(long_strike),
+        "lots":           int(lots),
+        "qty":            int(qty),
+        "lot_size":       int(LOT_SIZE),
+        "spot":           round(float(spot), 2),
+        "short_ltp":      round(float(short_ltp), 2),
+        "long_ltp":       round(float(long_ltp), 2),
+        "net_credit":     round(float(net_credit), 2),
+        "max_loss_inr":   round(max_loss_per_share * qty, 2),
+        "max_profit_inr": round(net_credit * qty, 2),
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        new_file = not os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            if new_file:
+                w.writeheader()
+            w.writerow(row)
+        notify.log(f"PAPER spread trade logged → {path}")
+    except Exception as e:
+        notify.log(f"Could not write paper_trades.csv: {e}")
+
+
+def get_spread_legs(signal: str, expiry: date, capital: float):
+    """
+    Fetch both legs of the credit spread from the live option chain.
+
+    CALL → Bear Call Spread: SELL ATM CE + BUY (ATM+SPREAD_WIDTH) CE
+    PUT  → Bull Put  Spread: SELL ATM PE + BUY (ATM-SPREAD_WIDTH) PE
+
+    Returns (short_sid, long_sid, short_strike, long_strike,
+             short_ltp, long_ltp, net_credit, lots, spot)
+    or (None, None, None, None, 0, 0, 0, 0, None) on failure.
+    """
+    opt_type_lc  = "ce" if signal == "CALL" else "pe"
+    long_offset  = +SPREAD_WIDTH if signal == "CALL" else -SPREAD_WIDTH
+
+    expiry_candidates = [expiry, expiry + timedelta(days=7)]
+
+    for exp in expiry_candidates:
+        for attempt in range(3):
+            try:
+                data, atm_strike, spot, inner = _fetch_option_chain(exp)
+                if data is None:
+                    if attempt < 2:
+                        notify.log(f"Spread: retry {attempt+1}/3 for {exp} in 3s...")
+                        time.sleep(3)
+                    continue
+
+                oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+                if not oc:
+                    notify.log(f"Spread: empty OC for {exp}")
+                    break
+
+                def _get_leg(strike):
+                    for k in [f"{float(strike):.6f}", str(int(strike)), f"{float(strike):.1f}"]:
+                        if k in oc:
+                            sub = (oc[k].get(opt_type_lc) or
+                                   oc[k].get(opt_type_lc.upper()) or {})
+                            sid = sub.get("security_id") or sub.get("securityId")
+                            ltp = float(sub.get("last_price") or sub.get("ltp") or 0)
+                            if sid and ltp > 0:
+                                return str(sid), ltp
+                    return None, 0.0
+
+                short_strike = atm_strike
+                long_strike  = atm_strike + long_offset
+                short_sid, short_ltp = _get_leg(short_strike)
+                long_sid,  long_ltp  = _get_leg(long_strike)
+
+                if not short_sid or not long_sid:
+                    notify.log(f"Spread: leg missing — short={short_sid}/{short_ltp:.0f} "
+                               f"long={long_sid}/{long_ltp:.0f} (exp={exp})")
+                    break  # chain OK but legs missing — skip to next expiry
+
+                net_credit = short_ltp - long_ltp
+                if net_credit <= 0:
+                    notify.log(f"Spread: net credit ≤ 0 ({net_credit:.1f}) — legs inverted?")
+                    break
+
+                # Max loss per lot = (spread_width - net_credit) × lot_size
+                max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+                sl_risk_per_lot  = net_credit * CREDIT_SL_FRAC * LOT_SIZE
+                risk_per_lot     = min(max_loss_per_lot, sl_risk_per_lot)
+
+                lots_by_risk   = floor(capital * RISK_PCT  / risk_per_lot)   if risk_per_lot   > 0 else 0
+                lots_by_margin = floor(capital * 0.85      / max_loss_per_lot) if max_loss_per_lot > 0 else 0
+                lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+                if lots < 1 and lots_by_margin >= 1:
+                    lots = 1
+
+                if lots < 1:
+                    notify.log(f"Spread: insufficient capital for 1 lot "
+                               f"(max_loss/lot ₹{max_loss_per_lot:.0f})")
+                    return None, None, None, None, 0, 0, 0, 0, spot
+
+                if exp != expiry:
+                    notify.log(f"Spread: using fallback expiry {exp} (primary {expiry} failed)")
+                opt_uc = opt_type_lc.upper()
+                notify.log(
+                    f"Credit spread: SELL {opt_uc} {int(short_strike)} ₹{short_ltp:.0f} / "
+                    f"BUY {opt_uc} {int(long_strike)} ₹{long_ltp:.0f} "
+                    f"= net credit ₹{net_credit:.0f} → {lots} lot(s)"
+                )
+                return (short_sid, long_sid, short_strike, long_strike,
+                        short_ltp, long_ltp, net_credit, lots, spot)
+
+            except Exception as e:
+                notify.log(f"Spread legs exception (exp={exp}, attempt={attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(3)
+
+        notify.log(f"Spread: all attempts failed for {exp} — trying next expiry")
+
+    return None, None, None, None, 0, 0, 0, 0, None
+
+
+def place_credit_spread(short_sid: str, long_sid: str, signal: str, lots: int,
+                        net_credit: float, short_strike: float, long_strike: float,
+                        short_ltp: float, long_ltp: float, spot: float) -> dict:
+    """
+    Place credit spread: BUY long (hedge) leg first, then SELL short (credit) leg.
+    MANDATORY ORDER: BUY hedge leg FIRST — Dhan hedge-margin rule requires the
+    long leg on books before the short gets reduced margin treatment.
+    """
+    qty      = lots * LOT_SIZE
+    opt_type = "CE" if signal == "CALL" else "PE"
+
+    if DRY_RUN:
+        return {"status": "DRY_RUN", "net_credit": net_credit}
+
+    if PAPER_MODE:
+        _log_paper_spread_trade(short_sid, long_sid, signal, lots, qty,
+                                net_credit, short_strike, long_strike,
+                                short_ltp, long_ltp, spot)
+        return {
+            "status":     "PAPER",
+            "mode":       "PAPER",
+            "orderId":    f"paper_spread_{date.today():%Y%m%d}",
+            "net_credit": net_credit,
+        }
+
+    # ── Step 1: BUY long (hedge) leg ─────────────────────────────────────────
+    buy_payload = {
+        "dhanClientId":      CLIENT_ID,
+        "correlationId":     f"spread_buy_{date.today().strftime('%Y%m%d')}",
+        "transactionType":   "BUY",
+        "exchangeSegment":   "NSE_FNO",
+        "productType":       "MARGIN",
+        "orderType":         "MARKET",
+        "validity":          "DAY",
+        "securityId":        long_sid,
+        "quantity":          qty,
+        "price":             0,
+        "triggerPrice":      0,
+        "disclosedQuantity": 0,
+    }
+    try:
+        buy_resp   = requests.post("https://api.dhan.co/v2/orders",
+                                   headers=HEADERS, json=buy_payload, timeout=15)
+        buy_result = buy_resp.json()
+        buy_oid    = buy_result.get("orderId") or buy_result.get("order_id")
+        if not buy_oid:
+            notify.send(
+                f"❌ <b>Spread BUY (hedge leg) failed — no orderId</b>\n\n"
+                f"{opt_type} {int(long_strike)} qty={qty}\n"
+                f"Response: {str(buy_result)[:200]}\n\nNo position opened."
+            )
+            return {"mode": "FAILED"}
+        notify.log(f"Spread BUY leg: {opt_type} {int(long_strike)} qty={qty} orderId={buy_oid}")
+    except Exception as e:
+        notify.send(f"❌ <b>Spread BUY leg exception</b>\n\nException: {e}\nNo position opened.")
+        return {"mode": "FAILED"}
+
+    time.sleep(2)   # let BUY settle on exchange before SELL goes in
+
+    # ── Step 2: SELL short (credit) leg ──────────────────────────────────────
+    sell_payload = {**buy_payload,
+                    "correlationId":   f"spread_sell_{date.today().strftime('%Y%m%d')}",
+                    "transactionType": "SELL",
+                    "securityId":      short_sid}
+    try:
+        sell_resp   = requests.post("https://api.dhan.co/v2/orders",
+                                    headers=HEADERS, json=sell_payload, timeout=15)
+        sell_result = sell_resp.json()
+        sell_oid    = sell_result.get("orderId") or sell_result.get("order_id")
+        if not sell_oid:
+            notify.send(
+                f"🚨 <b>CRITICAL — Spread SELL (credit leg) no orderId</b>\n\n"
+                f"BUY leg orderId: {buy_oid}\n"
+                f"SELL response: {str(sell_result)[:200]}\n\n"
+                f"<b>NAKED LONG {opt_type} {int(long_strike)} x{qty}!</b>\n"
+                f"Open Dhan app → SELL {opt_type} {int(short_strike)} qty={qty} IMMEDIATELY."
+            )
+            return {"mode": "PARTIAL_SPREAD", "buy_oid": buy_oid}
+        notify.log(f"Spread SELL leg: {opt_type} {int(short_strike)} qty={qty} orderId={sell_oid}")
+    except Exception as e:
+        notify.send(
+            f"🚨 <b>CRITICAL — Spread SELL leg exception</b>\n\n"
+            f"BUY leg orderId: {buy_oid}\n"
+            f"Exception: {e}\n\n"
+            f"<b>NAKED LONG {opt_type} {int(long_strike)} x{qty}!</b>\n"
+            f"IMMEDIATELY SELL {opt_type} {int(short_strike)} qty={qty} on Dhan app."
+        )
+        return {"mode": "PARTIAL_SPREAD", "buy_oid": buy_oid}
+
+    return {
+        "mode":       "CREDIT_SPREAD",
+        "buy_oid":    buy_oid,
+        "sell_oid":   sell_oid,
+        "net_credit": net_credit,
+    }
 
 
 def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
@@ -1466,13 +1714,191 @@ def main():
         notify.log("DRY RUN: capital ₹0 → using ₹1,00,000 for simulation")
         capital = 100_000.0
 
-    # 4. Expiry + find affordable strike (walks ATM → OTM if needed)
+    # 4. Expiry
     expiry = get_expiry()
+    dte    = max(0.25, (expiry - date.today()).days + 1)
+
+    # Shared display helpers (used by both credit spread and naked option paths)
+    opt_type  = "CE" if signal == "CALL" else "PE"
+    opt_emoji = "📈" if signal == "CALL" else "📉"
+    cap_label = f"₹{capital:,.0f}" + ("  [DRY RUN]" if DRY_RUN else "")
+    if abs(score) == score_max:
+        score_desc = "  ● max signal ●"
+    elif abs(score) >= 3:
+        score_desc = "  ● strong ●"
+    elif abs(score) == 2:
+        score_desc = ""
+    else:
+        score_desc = "  ● weak ●"
+    sig_line  = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
+    news_row  = f"News       {news_note}\n" if news_note else ""
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CREDIT SPREAD PATH  (CREDIT_SPREAD_MODE = True)
+    # Bear Call Spread (CALL) or Bull Put Spread (PUT) — theta works FOR us
+    # ══════════════════════════════════════════════════════════════════════════
+    if CREDIT_SPREAD_MODE:
+        (short_sid, long_sid, short_strike, long_strike,
+         short_ltp, long_ltp, net_credit, lots, spot) = get_spread_legs(signal, expiry, capital)
+
+        if short_sid is None:
+            die(
+                f"Could not fetch credit spread legs for {signal} / {expiry}.\n"
+                f"Both ATM and ATM±{SPREAD_WIDTH}pt {opt_type} must have live prices."
+            )
+
+        if not spot or spot <= 0:
+            if DRY_RUN:
+                spot = 50_000.0
+            else:
+                die("Spot price unavailable from option chain.")
+
+        if lots < 1:
+            notify.send(
+                f"⏸  <b>No Trade — Insufficient Capital for Spread</b>\n"
+                f"─────────────────────\n"
+                f"{today_wd}  ·  {today_label}\n\n"
+                f"Signal: <b>{signal}</b>\n"
+                f"Max loss per lot = ₹{(SPREAD_WIDTH - net_credit) * LOT_SIZE:,.0f}  "
+                f"(spread ₹{SPREAD_WIDTH} − credit ₹{net_credit:.0f}) × {LOT_SIZE} shares\n"
+                f"Capital ₹{capital:,.0f} can't cover even 1 lot safely.\n"
+                f"Add funds or wait for higher credit on a different day."
+            )
+            return
+
+        # Chain intelligence (max pain + GEX) — informational only
+        chain_sig = compute_chain_signals(expiry, spot)
+        if chain_sig:
+            _append_chain_signals(chain_sig, spot)
+
+        chain_line = ""
+        if chain_sig:
+            mp      = chain_sig["max_pain_strike"]
+            mp_d    = chain_sig["max_pain_dist"]
+            gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
+            mp_dir  = "above" if mp_d > 0 else "below"
+            mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
+            chain_line = (
+                f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Max pain   ₹{mp:,.0f}  ({abs(mp_d):.1f}% {mp_dir} spot → {mp_bias})\n"
+                f"Gamma      {gex_lbl}\n"
+                f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
+            )
+
+        max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+        risk_amt   = lots * net_credit * CREDIT_SL_FRAC * LOT_SIZE
+        target_amt = lots * net_credit * LOT_SIZE
+
+        strategy_name = "Bear Call Spread" if signal == "CALL" else "Bull Put Spread"
+        short_sym = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(short_strike)} {opt_type}"
+        long_sym  = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(long_strike)} {opt_type}"
+
+        # 6. Telegram trade-details message (spread format)
+        notify.send(
+            f"{opt_emoji}  <b>{strategy_name}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Score      {score:+d} / {score_max}{score_desc}\n"
+            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else '  ⚠ low' if (ml_trained and ml_conf < ML_CONF_THRESHOLD) else ''}\n"
+            f"{news_row}"
+            f"Capital    {cap_label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>{short_sym}</code>  @ ₹{short_ltp:.0f}\n"
+            f"BUY   <code>{long_sym}</code>  @ ₹{long_ltp:.0f}\n"
+            f"Net credit  ₹{net_credit:.0f} / share   ({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
+            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   spread value > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  (credit grew {CREDIT_SL_FRAC*100:.0f}%)\n"
+            f"TP   spread value < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  ({CREDIT_TP_FRAC*100:.0f}% of credit in pocket)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   Max profit ₹{target_amt:,.0f}"
+            f"{chain_line}"
+        )
+
+        # 6b. Double-position guard
+        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+            notify.send(
+                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+                f"An open BankNifty position already exists on your account.\n"
+                f"Skipping new order to avoid double exposure.\n\n"
+                f"<i>Close the existing position on Dhan app if this is unexpected.</i>"
+            )
+            return
+
+        # 7. Place spread orders
+        notify.log("Placing credit spread...")
+        result = place_credit_spread(
+            short_sid, long_sid, signal, lots,
+            net_credit, short_strike, long_strike,
+            short_ltp, long_ltp, spot
+        )
+
+        # 8. Result handling
+        if DRY_RUN:
+            notify.send(
+                f"✅  <b>Dry Run Complete — {strategy_name}</b>\n\n"
+                f"Would have placed:\n"
+                f"SELL  <code>{short_sym}</code>  @ ₹{short_ltp:.0f}\n"
+                f"BUY   <code>{long_sym}</code>  @ ₹{long_ltp:.0f}\n"
+                f"{lots} lot{'s' if lots > 1 else ''}  ·  Net credit ₹{net_credit:.0f}\n\n"
+                f"<i>Add funds to your Dhan account to go live.</i>"
+            )
+            return
+
+        mode = result.get("mode", "CREDIT_SPREAD")
+
+        if mode == "FAILED":
+            notify.log("Spread placement failed — no position opened. See earlier error.")
+            return
+
+        if mode == "PARTIAL_SPREAD":
+            notify.log("PARTIAL SPREAD — only BUY (hedge) leg placed. Emergency alert sent.")
+            return
+
+        if mode == "PAPER":
+            notify.send(
+                f"📝  <b>[PAPER] Credit Spread Logged — No Real Order</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Strategy   {strategy_name}\n"
+                f"SELL  <code>{short_sym}</code>  @ ₹{short_ltp:.0f}\n"
+                f"BUY   <code>{long_sym}</code>  @ ₹{long_ltp:.0f}\n"
+                f"Qty        {lots*LOT_SIZE}  ({lots} lot)\n"
+                f"Net credit ₹{net_credit:.0f} / share\n"
+                f"Max loss   ₹{lots * max_loss_per_lot:,.0f}   Max profit ₹{target_amt:,.0f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>PAPER MODE. Real money safe. Tracking in data/paper_trades.csv.</i>"
+            )
+            return
+
+        buy_oid  = result.get("buy_oid")
+        sell_oid = result.get("sell_oid")
+        notify.send(
+            f"✅  <b>{strategy_name} Placed!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"BUY  orderId  <code>{buy_oid}</code>\n"
+            f"SELL orderId  <code>{sell_oid}</code>\n"
+            f"SELL  <code>{short_sym}</code>  @ ₹{short_ltp:.0f}\n"
+            f"BUY   <code>{long_sym}</code>  @ ₹{long_ltp:.0f}\n"
+            f"Net credit ₹{net_credit:.0f}  ·  {lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL when spread > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  — exit BOTH legs manually\n"
+            f"TP when spread < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  — exit BOTH legs manually\n"
+            f"<i>Monitor spread value on Dhan app. No automated SL/TP on spreads yet.</i>"
+        )
+
+        if buy_oid:
+            notify.log("Waiting 30s to verify buy leg status...")
+            time.sleep(30)
+            _verify_order_status(buy_oid, short_sym)
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # NAKED OPTION PATH  (CREDIT_SPREAD_MODE = False)
+    # Original single-leg BUY — kept for fallback / comparison
+    # ══════════════════════════════════════════════════════════════════════════
     security_id, atm_strike, premium, lots, spot, otm_distance = \
         get_affordable_option(signal, expiry, capital)
 
     if security_id is None and otm_distance == -2:
-        # Option chain was available but even deepest OTM doesn't fit capital
         notify.send(
             f"⏸  <b>No Trade — Even Deep OTM Too Expensive</b>\n"
             f"─────────────────────\n"
@@ -1493,14 +1919,12 @@ def main():
             f"Check Dhan API status."
         )
 
-    # Guard: premium must be valid — crashes SL/TP calc if None or zero
     if not premium or premium <= 0:
         die(
             f"Invalid premium ({premium}) from option chain — cannot calculate SL/TP.\n"
             f"Strike: {atm_strike}  |  Expiry: {expiry}  |  Check option chain API."
         )
 
-    # Guard: spot must be valid — used in risk calculations and Telegram message
     if not spot or spot <= 0:
         if DRY_RUN:
             notify.log("Spot price unavailable — using ₹50,000 placeholder for DRY RUN display")
@@ -1508,18 +1932,13 @@ def main():
         else:
             die("Spot price unavailable. Cannot confirm trade safety. Check Dhan LTP endpoint.")
 
-    # Guard: lots must be at least 1 — belt-and-suspenders beyond strike selection
     if not lots or lots < 1:
         die(f"Lot sizing returned {lots} — insufficient capital or premium too high for 1 lot.")
 
-    # 4c. Option chain intelligence — max pain + GEX (runs a 2nd chain fetch)
     chain_sig = compute_chain_signals(expiry, spot)
     if chain_sig:
         _append_chain_signals(chain_sig, spot)
 
-    # 4b. Adaptive opening-wait — if BN spot gapped significantly from yesterday's
-    #     close, opening IV is likely elevated. Wait proportionally, then re-fetch
-    #     so SL/TP are anchored to the actual fill price, not the inflated open.
     sig_spot = float(sig.get("bn_close") or 0)
     if not DRY_RUN and sig_spot > 0 and spot > 0:
         spot_gap_pct = abs(spot - sig_spot) / sig_spot
@@ -1540,7 +1959,6 @@ def main():
                 f"Will enter by ~{(datetime.now() + timedelta(minutes=wait_mins)).strftime('%H:%M')} IST regardless."
             )
             time.sleep(wait_mins * 60)
-            # Re-fetch live prices — SL/TP will auto-recalculate from the new premium below
             notify.log("Adaptive wait complete — re-fetching live option price...")
             sid2, strike2, prem2, lots2, spot2, otm2 = get_affordable_option(signal, expiry, capital)
             if sid2 and prem2 and prem2 > 0:
@@ -1563,48 +1981,25 @@ def main():
                 f"{direction_word}. Would wait {wait_mins} min before entering."
             )
 
-    # 5. Sizing — DTE + risk/reward numbers come from the real premium returned above
-    dte = max(0.25, (expiry - date.today()).days + 1)
-    rr  = RR
-
+    rr = RR
     max_loss_1lot = LOT_SIZE * premium * SL_PCT
-    margin_1lot   = LOT_SIZE * premium
-
     risk_amt   = lots * max_loss_1lot
-    target_amt = lots * LOT_SIZE * premium * SL_PCT * rr - 40   # rough charge estimate
+    target_amt = lots * LOT_SIZE * premium * SL_PCT * rr - 40
     sl_price   = premium * (1 - SL_PCT)
     tp_price   = premium * (1 + SL_PCT * rr)
 
-    opt_type  = "CE" if signal == "CALL" else "PE"
-    opt_emoji = "📈" if signal == "CALL" else "📉"
-    opt_sym   = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(atm_strike)} {opt_type}"
-    # Strike label — shows context for why this strike was chosen
+    opt_sym = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(atm_strike)} {opt_type}"
     if otm_distance and otm_distance >= 1:
         otm_label = f"  ({otm_distance*100}pt OTM — ATM too pricey for budget)"
     elif otm_distance and otm_distance <= -1:
         otm_label = f"  ({abs(otm_distance)*100}pt ITM — capital flush, higher delta)"
     else:
         otm_label = "  (ATM)"
-    cap_label = f"₹{capital:,.0f}" + ("  [DRY RUN]" if DRY_RUN else "")
 
-    # Determine score description
-    if abs(score) == score_max:
-        score_desc = "  ● max signal ●"
-    elif abs(score) >= 3:
-        score_desc = "  ● strong ●"
-    elif abs(score) == 2:
-        score_desc = ""
-    else:
-        score_desc = "  ● weak ●"
-
-    sig_line  = f"\n<i>↳ {sig_note}</i>" if sig_note  else ""
-    news_row  = f"News       {news_note}\n" if news_note else ""
-
-    # Chain intelligence lines (max pain + GEX)
     chain_line = ""
     if chain_sig:
-        mp     = chain_sig["max_pain_strike"]
-        mp_d   = chain_sig["max_pain_dist"]
+        mp      = chain_sig["max_pain_strike"]
+        mp_d    = chain_sig["max_pain_dist"]
         gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
         mp_dir  = "above" if mp_d > 0 else "below"
         mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
@@ -1615,7 +2010,6 @@ def main():
             f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
         )
 
-    # Stale-data warning (DRY RUN only — API unavailable, approximated fallback)
     stale_line = ""
     if security_id == "DRY_RUN_FALLBACK":
         stale_line = (
@@ -1623,7 +2017,6 @@ def main():
             "Actual Monday trade will use live option-chain prices.</i>"
         )
 
-    # 6. Send ONE trade-details message to Telegram
     notify.send(
         f"{opt_emoji}  <b>BUY {signal}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1645,10 +2038,6 @@ def main():
         f"{stale_line}"
     )
 
-    # 6b. Double-position guard — abort if a BN position already exists
-    #     (protects against cron double-fire or manual re-run on same day)
-    # Skip in PAPER mode — the "position" is purely hypothetical; any real
-    # BN position on the account is unrelated to today's paper simulation.
     if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
         notify.send(
             f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
@@ -1658,11 +2047,9 @@ def main():
         )
         return
 
-    # 7. Place order
     notify.log("Placing order...")
     result = place_super_order(security_id, signal, lots, spot, premium, rr)
 
-    # 8. Send ONE result message
     if DRY_RUN:
         if security_id == "DRY_RUN_FALLBACK":
             footer = (
@@ -1681,12 +2068,10 @@ def main():
         )
         return
 
-    # Extract mode and orderId before writing today_trade.json
     mode = result.get("mode", "SUPER_ORDER")
     oid  = (result.get("orderId") or result.get("order_id") or
             (result.get("buy_order") or {}).get("orderId"))
 
-    # Write oracle intent for EOD trade journal (live trades only)
     iv_val = float(sig.get("iv_at_entry", sig.get("iv", 0.0)) or 0.0)
     _write_today_trade(signal, atm_strike, lots, dte, spot,
                        oracle_premium=premium,
@@ -1695,7 +2080,6 @@ def main():
                        expiry=expiry, ml_conf=ml_conf,
                        order_id=oid, order_mode=mode)
 
-    # Emergency modes — critical alerts already sent inside place_super_order
     if mode == "FAILED":
         notify.log("Order placement failed entirely — no position opened. See earlier error.")
         return
@@ -1703,7 +2087,6 @@ def main():
         notify.log("FALLBACK_NO_SL — BUY placed but SL failed. Emergency alert sent. Manual action needed.")
         return
 
-    # PAPER mode — no real order placed, just log + plain-English Telegram
     if mode == "PAPER":
         notify.send(
             f"📝  <b>[PAPER] Trade Logged — No Real Order</b>\n"
@@ -1740,7 +2123,6 @@ def main():
                 f"Cancel from Dhan app before open if you change your mind.</i>"
             )
         elif mode == "FALLBACK":
-            # Manual BUY + SL-M: SL is automated, TP is NOT (no TP order placed)
             notify.send(
                 f"✅  <b>Order Placed!</b>  [FALLBACK — BUY+SL-M]\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1774,8 +2156,6 @@ def main():
             f"Check Dhan app → Orders to confirm."
         )
 
-    # 9. Order status verification — wait 30s then confirm not REJECTED
-    #    Skip for AMO (status stays PENDING until market opens) and error modes
     if oid and mode not in ("AMO", "FAILED", "FALLBACK_NO_SL"):
         notify.log("Waiting 30s to verify order status is not REJECTED...")
         time.sleep(30)
