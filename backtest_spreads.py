@@ -126,8 +126,8 @@ STRATEGIES = {
             ("CE", +3, "BUY",   "p3", None),      # Long ATM+3 CE (protection wing)
         ],
         "entry_debit":   False,                   # net credit (we receive money)
-        "sl_frac":       1.0,                     # stop if unrealized loss = 100% of credit
-        "tp_frac":       0.50,                    # take profit at 50% of credit retained
+        "sl_frac":       0.50,                    # stop if loss = 50% of credit received
+        "tp_frac":       0.65,                    # take profit at 65% of credit captured (1.3× RR)
     },
     "bull_put_credit": {
         "name":          "Bull Put Spread (credit)",
@@ -139,8 +139,8 @@ STRATEGIES = {
             ("PE", -3, "BUY",   None, "m3"),      # Long ATM-3 PE (protection wing)
         ],
         "entry_debit":   False,
-        "sl_frac":       1.0,
-        "tp_frac":       0.50,
+        "sl_frac":       0.50,
+        "tp_frac":       0.65,
     },
 }
 
