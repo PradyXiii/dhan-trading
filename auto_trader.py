@@ -220,6 +220,15 @@ CLIENT_ID = os.getenv("DHAN_CLIENT_ID",    "")
 
 DRY_RUN   = "--dry-run" in sys.argv
 
+# ── PAPER MODE — set True to disable LIVE order placement ────────────────────
+# When True: full signal flow runs, "would have placed" trade is logged to
+# data/paper_trades.csv, Telegram message is prefixed with [PAPER]. No real
+# order goes to Dhan. Flip back to False when strategy is fixed and ready.
+# Reason for activation (Apr 2026): real-options backtest + 4-trade live
+# sample showed naked-options buying is structurally losing (theta decay +
+# IV crush). Paper-trading new spread strategy before risking ₹51K capital.
+PAPER_MODE = True
+
 HEADERS = {
     "access-token": TOKEN,
     "client-id":    CLIENT_ID,
@@ -230,7 +239,8 @@ DATA_DIR      = "data"
 LOT_SIZE      = 30
 SL_PCT        = 0.15   # 15% stop-loss on premium
 RISK_PCT      = 0.05
-MAX_LOTS      = 20
+MAX_LOTS      = 1      # Capped at 1 lot during PAPER_MODE / strategy rebuild.
+                       # Was 20 — restore only after spread strategy proves out.
 PREMIUM_K     = 0.004
 ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
 
@@ -395,6 +405,46 @@ def refresh_data_and_signal():
         notify.log("ml_engine.py timed out (60s) — falling back to rule signal")
     except Exception as e:
         notify.log(f"ml_engine.py failed: {e} — falling back to rule signal")
+
+
+def _log_paper_trade(security_id, signal, lots, qty, premium, sl_price, tp_price, spot):
+    """
+    Append one paper-trade row to data/paper_trades.csv. Used when PAPER_MODE=True.
+    Schema mirrors live_trades.csv so we can backtest the exact trades that would
+    have been placed live (no Dhan order goes out).
+    """
+    import csv as _csv
+    path  = f"{DATA_DIR}/paper_trades.csv"
+    cols  = [
+        "date", "signal", "security_id", "lots", "qty", "lot_size",
+        "spot", "entry_premium", "sl_price", "tp_price",
+        "max_loss_inr", "max_profit_inr",
+    ]
+    row = {
+        "date":           date.today().isoformat(),
+        "signal":         signal,
+        "security_id":    str(security_id),
+        "lots":           int(lots),
+        "qty":            int(qty),
+        "lot_size":       int(LOT_SIZE),
+        "spot":           round(float(spot), 2),
+        "entry_premium":  round(float(premium), 2),
+        "sl_price":       round(float(sl_price), 2),
+        "tp_price":       round(float(tp_price), 2),
+        "max_loss_inr":   round((premium - sl_price) * qty, 2),
+        "max_profit_inr": round((tp_price - premium) * qty, 2),
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        new_file = not os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols)
+            if new_file:
+                w.writeheader()
+            w.writerow(row)
+        notify.log(f"PAPER trade logged → {path}")
+    except Exception as e:
+        notify.log(f"Could not write paper_trades.csv: {e}")
 
 
 def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
@@ -1104,6 +1154,16 @@ def place_super_order(security_id: str, signal: str, lots: int,
     if DRY_RUN:
         return {"status": "DRY_RUN", "sl": sl_price, "tp": tp_price}
 
+    if PAPER_MODE:
+        _log_paper_trade(security_id, signal, lots, qty, premium, sl_price, tp_price, spot)
+        return {
+            "status":  "PAPER",
+            "mode":    "PAPER",
+            "orderId": f"paper_{date.today():%Y%m%d}",
+            "sl":      sl_price,
+            "tp":      tp_price,
+        }
+
     # Primary: Super Order (entry + SL + TP in one call)
     # Note: SuperOrderRequest spec does NOT include "validity" — omit it
     payload = {
@@ -1250,7 +1310,12 @@ def place_super_order(security_id: str, signal: str, lots: int,
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    mode_label = "DRY RUN" if DRY_RUN else "LIVE"
+    if DRY_RUN:
+        mode_label = "DRY RUN"
+    elif PAPER_MODE:
+        mode_label = "PAPER"
+    else:
+        mode_label = "LIVE"
     notify.log(f"BankNifty Auto Trader starting [{mode_label}]")
 
     # 0. Credentials + lot-size sanity check
@@ -1258,7 +1323,8 @@ def main():
     _check_lot_size()
 
     # 0b. Verify yesterday's exit ran — catch open overnight positions before trading
-    if not DRY_RUN:
+    # Skipped in PAPER mode: paper trades have no real position to exit.
+    if not DRY_RUN and not PAPER_MODE:
         _check_exit_marker()
 
     # 1. Refresh data + signal
@@ -1581,7 +1647,9 @@ def main():
 
     # 6b. Double-position guard — abort if a BN position already exists
     #     (protects against cron double-fire or manual re-run on same day)
-    if not DRY_RUN and _check_no_existing_position():
+    # Skip in PAPER mode — the "position" is purely hypothetical; any real
+    # BN position on the account is unrelated to today's paper simulation.
+    if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
         notify.send(
             f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
             f"An open BankNifty position already exists on your account.\n"
@@ -1633,6 +1701,24 @@ def main():
         return
     if mode == "FALLBACK_NO_SL":
         notify.log("FALLBACK_NO_SL — BUY placed but SL failed. Emergency alert sent. Manual action needed.")
+        return
+
+    # PAPER mode — no real order placed, just log + plain-English Telegram
+    if mode == "PAPER":
+        notify.send(
+            f"📝  <b>[PAPER] Trade Logged — No Real Order</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Signal     {signal}\n"
+            f"Option     <code>{opt_sym}</code>\n"
+            f"Qty        {lots*LOT_SIZE}  ({lots} lot)\n"
+            f"Entry      ₹{premium:.0f}\n"
+            f"SL ₹{sl_price:.0f}  ·  TP ₹{tp_price:.0f}\n"
+            f"Max loss   ₹{(premium - sl_price) * lots * LOT_SIZE:,.0f}\n"
+            f"Max profit ₹{(tp_price - premium) * lots * LOT_SIZE:,.0f}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>PAPER MODE on. Real money safe. Tracking what would have happened\n"
+            f"in data/paper_trades.csv to evaluate the new strategy before going live.</i>"
+        )
         return
 
     corr_id = f"at_{date.today().strftime('%Y%m%d')}"

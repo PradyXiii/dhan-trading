@@ -26,6 +26,42 @@ Two review surfaces, different stages:
 
 ---
 
+## 🛑 PAPER MODE — LIVE TRADING DISABLED (April 2026)
+
+**`auto_trader.py` is currently in PAPER_MODE = True.** No real orders will be placed.
+`MAX_LOTS = 1` (was 20) during rebuild.
+
+**Why:** Real 1-min option backtest + 4-trade live sample (Apr 13–17, 2026) proved:
+- Naked long-options buying is structurally losing — theta decay + IV crush
+- 2025–26 real-data backtest: WR 17%, -₹1,006/trade per lot
+- Core problem is the strategy (buy naked ATM options), not the signal
+
+**What happens now each morning (9:30 AM IST):**
+- Full signal flow runs (data → rule → ML → option pick)
+- "Would have placed" trade logged to `data/paper_trades.csv`
+- Telegram message fires with `[PAPER]` prefix + clear plain-English "no real order"
+- No Dhan API call for order placement
+- No exit-marker check, no duplicate-position guard (not needed — nothing live)
+
+**Next steps before flipping back to LIVE:**
+1. Prototype vertical debit spread backtest on existing real-options cache
+2. Add OTM strike caching to `fetch_intraday_options.py` (need ATM ±300 pts)
+3. Rebuild backtest engine for 2-leg spread simulation
+4. Paper-trade new spread strategy for 30+ days
+5. Only flip PAPER_MODE = False when paper_trades.csv shows >50 days net-positive
+
+**To re-enable LIVE trading** (only after strategy is fixed):
+```python
+# In auto_trader.py — near top of file:
+PAPER_MODE = False   # WAS True during Apr 2026 rebuild
+MAX_LOTS   = 20      # WAS 1 during rebuild
+```
+
+Then: re-read this section, read `data/paper_trades.csv` last 30 days, confirm
+positive P&L, commit with clear message, restart cron.
+
+---
+
 ## ⚠️ REAL-OPTIONS RULE — NEVER USE OHLCV FOR FINAL VALIDATION
 
 **Ground truth for every backtest, experiment, or config change = real 1-min option data.**

@@ -15,6 +15,7 @@ catboost_info/
 *.json
 data/
 data/live_trades.csv
+data/paper_trades.csv
 data/paper_performance.csv
 data/midday_checkpoints.csv
 data/news_sentiment.json
