@@ -144,10 +144,9 @@ def _check_exit_marker():
 
 def _check_no_existing_position() -> bool:
     """
-    Return True if a BankNifty FNO position (netQty > 0) already exists.
-    Prevents placing a duplicate order if auto_trader.py is invoked twice.
-    Fails OPEN (returns False) on connectivity issues — don't block the trade
-    just because the API is temporarily unreachable.
+    Return True if an open FNO position for the active instrument already exists.
+    IRON_CONDOR_MODE: checks for NIFTY (not BANKNIFTY) positions.
+    Fails OPEN (returns False) on connectivity issues.
     """
     try:
         resp = requests.get("https://api.dhan.co/v2/positions",
@@ -162,16 +161,25 @@ def _check_no_existing_position() -> bool:
 
     data = resp.json()
     positions = data if isinstance(data, list) else data.get("data", [])
-    # Include short legs (netQty < 0) — a spread leaves one short-open position
-    bn_open = [
-        p for p in positions
-        if int(p.get("netQty", 0)) != 0
-        and p.get("exchangeSegment", "") == "NSE_FNO"
-        and "BANKNIFTY" in str(
-            p.get("tradingSymbol", p.get("securityId", ""))
-        ).upper()
-    ]
-    return len(bn_open) > 0
+    if IRON_CONDOR_MODE:
+        # NF: symbol contains "NIFTY" but NOT "BANKNIFTY"
+        open_pos = [
+            p for p in positions
+            if int(p.get("netQty", 0)) != 0
+            and p.get("exchangeSegment", "") == "NSE_FNO"
+            and "NIFTY" in str(p.get("tradingSymbol", "")).upper()
+            and "BANKNIFTY" not in str(p.get("tradingSymbol", "")).upper()
+        ]
+    else:
+        open_pos = [
+            p for p in positions
+            if int(p.get("netQty", 0)) != 0
+            and p.get("exchangeSegment", "") == "NSE_FNO"
+            and "BANKNIFTY" in str(
+                p.get("tradingSymbol", p.get("securityId", ""))
+            ).upper()
+        ]
+    return len(open_pos) > 0
 
 
 def _verify_order_status(order_id: str, symbol: str):
@@ -230,22 +238,23 @@ DRY_RUN   = "--dry-run" in sys.argv
 # IV crush). Paper-trading new spread strategy before risking ₹51K capital.
 PAPER_MODE = True
 
-# ── Credit Spread Mode — primary strategy as of April 2026 ──────────────────
-# CALL signal → Bear Call Spread: SELL ATM CE + BUY (ATM+300) CE  (fade the call)
-# PUT  signal → Bull Put Spread:  SELL ATM PE + BUY (ATM-300) PE  (fade the put)
-# Locked config (5y backtest +₹36.2L): sl_frac=0.5, tp_frac=0.65, width=300
-# All variants (VIX filter, DTE filter, entry delay, early exit, lot cap) were
-# tested and each hurt vs baseline — default config wins.
+# ── Iron Condor Mode — Nifty50 (confirmed strategy, April 2026) ──────────────
+# NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
+# 5yr backtest: WR 84.6%, ₹1.17Cr total, ₹25L/yr avg, max DD -0.8%
+# Trades EVERY CALL/PUT signal day (~235 trades/year — always weekly).
+# Do NOT add VIX filter — no-filter gives maximum P&L per optimize_params.py.
 #
-# Setting CREDIT_SPREAD_MODE = False reverts to the legacy naked-option BUY path
-# (kept intact below for emergency fallback / A-B comparison only). The naked
-# path was the original strategy — abandoned April 2026 after real-options
-# backtest showed -₹1,006/trade per lot due to theta + IV crush. DO NOT flip
-# without re-reading the PAPER MODE section in CLAUDE.md.
+# IRON_CONDOR_MODE = True  → NF IC (4-leg, both CALL+PUT signal days)
+# IRON_CONDOR_MODE = False → 2-leg credit spread (BNF legacy path, keep for fallback)
+IRON_CONDOR_MODE   = True
+UNDERLYING_SCRIP   = 13     # 13 = Nifty50 (weekly), 25 = BankNifty (monthly, fallback)
+UNDERLYING_SEG     = "IDX_I"
+
+# ── Credit Spread / IC params ─────────────────────────────────────────────────
 CREDIT_SPREAD_MODE = True
-SPREAD_WIDTH       = 300    # pts between short (ATM) and long (OTM hedge) legs
-CREDIT_SL_FRAC     = 0.5    # stop when spread value grows 50% above credit received
-CREDIT_TP_FRAC     = 0.65   # take profit when 65% of credit is in pocket
+SPREAD_WIDTH       = 150    # NF: 50pt strike spacing × 3 = 150pts  (BNF was 300)
+CREDIT_SL_FRAC     = 0.5    # SL: spread expands 50% above credit received
+CREDIT_TP_FRAC     = 0.65   # TP: 65% of credit in pocket
 
 HEADERS = {
     "access-token": TOKEN,
@@ -254,11 +263,11 @@ HEADERS = {
 }
 
 DATA_DIR      = "data"
-LOT_SIZE      = 30
-SL_PCT        = 0.15   # 15% stop-loss on premium
+# NF lot size: 65 from Jan 6 2026, 75 before. Dynamic at startup.
+LOT_SIZE      = 65 if date.today() >= date(2026, 1, 6) else 75
+SL_PCT        = 0.15   # 15% stop-loss (legacy naked path only)
 RISK_PCT      = 0.05
-MAX_LOTS      = 1      # Capped at 1 lot during PAPER_MODE / strategy rebuild.
-                       # Was 20 — restore only after spread strategy proves out.
+MAX_LOTS      = 10     # IC: half the naked MAX_LOTS — margin tied on both sides
 PREMIUM_K     = 0.004
 ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
 
@@ -331,53 +340,36 @@ def check_credentials():
 
 def _check_lot_size():
     """
-    Verify LOT_SIZE constant matches the expected BankNifty lot size for today.
-    If they differ, send a Telegram alert BEFORE any trade is placed.
-    Does NOT block trading — the operator must fix the constant.
+    Verify LOT_SIZE matches expected NF lot size for today.
+    NF: 75 before Jan 6 2026, 65 from Jan 6 2026.
+    Does NOT block trading — alerts operator to fix the constant.
     """
-    from datetime import date as _d
-    import json as _json
-
-    today = _d.today()
-
-    # Baseline timeline (mirrors backtest_engine._baseline_lot_size)
-    if today < _d(2024, 11, 20):
-        expected = 15
-    elif today < _d(2025, 6, 26):
-        expected = 30
-    elif today < _d(2026, 1, 27):
-        expected = 35
+    today = date.today()
+    if IRON_CONDOR_MODE:
+        # Nifty50 lot size timeline
+        expected = 65 if today >= date(2026, 1, 6) else 75
     else:
-        expected = 30  # Jan 2026 onwards
-
-    # Override file (written by lot_expiry_scanner.py on NSE changes)
-    try:
-        ov_path = os.path.join(DATA_DIR, "lot_size_overrides.json")
-        if os.path.exists(ov_path):
-            with open(ov_path) as _f:
-                ov = _json.load(_f)
-            best_eff = _d(1900, 1, 1)
-            for entry in ov.get("active", []):
-                try:
-                    eff = _d.fromisoformat(entry["effective_from"])
-                except Exception:
-                    continue
-                if eff <= today and eff >= best_eff:
-                    expected = int(entry["lot_size"])
-                    best_eff = eff
-    except Exception:
-        pass
+        # Legacy BankNifty timeline
+        if today < date(2024, 11, 20):
+            expected = 15
+        elif today < date(2025, 6, 26):
+            expected = 30
+        elif today < date(2026, 1, 27):
+            expected = 35
+        else:
+            expected = 30
 
     if LOT_SIZE != expected:
         msg = (
-            f"🚨 LOT SIZE MISMATCH — auto_trader.py LOT_SIZE={LOT_SIZE} "
-            f"but expected {expected} for {today}. "
-            f"Update LOT_SIZE in auto_trader.py BEFORE next trade or sizing will be WRONG."
+            f"🚨 LOT SIZE MISMATCH — LOT_SIZE={LOT_SIZE} "
+            f"but expected {expected} for {today} ({'NF' if IRON_CONDOR_MODE else 'BNF'}). "
+            f"Update LOT_SIZE in auto_trader.py BEFORE next trade."
         )
         notify.send(msg)
         notify.log(msg)
     else:
-        notify.log(f"Lot-size check OK: LOT_SIZE={LOT_SIZE} matches expected {expected}")
+        instr = "NF" if IRON_CONDOR_MODE else "BNF"
+        notify.log(f"Lot-size check OK: LOT_SIZE={LOT_SIZE} matches expected {expected} ({instr})")
 
 
 # ── Step 1: Fetch data + generate signal ─────────────────────────────────────
@@ -907,22 +899,20 @@ def get_capital() -> float:
 
 def get_expiry() -> date:
     """
-    Find the nearest valid BankNifty expiry using the /optionchain/expirylist endpoint.
-    Returns the nearest upcoming expiry date. Falls back to last-Tuesday calculation
-    if the API is unavailable. Phase 4 (Sep 2025+): monthly, last Tuesday of month.
+    Find the nearest valid expiry using the /optionchain/expirylist endpoint.
+    NF (IRON_CONDOR_MODE): weekly Thursday. BNF: monthly last Tuesday.
+    Falls back to a calculated expiry if the API is unavailable.
     """
     today = date.today()
     try:
         resp = requests.post(
             "https://api.dhan.co/v2/optionchain/expirylist",
             headers=HEADERS,
-            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+            json={"UnderlyingScrip": UNDERLYING_SCRIP, "UnderlyingSeg": UNDERLYING_SEG},
             timeout=10,
         )
         if resp.status_code == 200:
             expiries = resp.json().get("data", [])
-            # Find the nearest expiry that is today or in the future
-            # Guard against malformed date strings from API
             upcoming = []
             for e in expiries:
                 try:
@@ -935,26 +925,32 @@ def get_expiry() -> date:
                 expiry = min(upcoming)
                 notify.log(f"Expiry from API: {expiry}  (all: {[e for e in expiries[:4]]})")
                 return expiry
-        notify.log(f"Expiry list API returned {resp.status_code} — falling back to last-Tuesday calc")
+        notify.log(f"Expiry list API returned {resp.status_code} — falling back to calc")
     except Exception as e:
-        notify.log(f"Expiry list API failed ({e}) — falling back to last-Tuesday calc")
+        notify.log(f"Expiry list API failed ({e}) — falling back to calc")
 
-    # Fallback: last Tuesday of current month (BN monthly expires last Tuesday).
-    # If that date is in the past, use next month's last Tuesday.
-    import calendar as _cal
-    def _last_tue(year, month):
-        last_day = _cal.monthrange(year, month)[1]
-        d = date(year, month, last_day)
-        while d.weekday() != 1:   # 1 = Tuesday
-            d -= timedelta(days=1)
+    if IRON_CONDOR_MODE:
+        # NF: weekly Thursday expiry. Find this week's or next Thursday.
+        d = today
+        while d.weekday() != 3:   # 3 = Thursday
+            d += timedelta(days=1)
+        notify.log(f"Using next-Thursday expiry (NF fallback): {d}")
         return d
-
-    lt = _last_tue(today.year, today.month)
-    if lt < today:
-        nxt = (today.replace(day=1) + timedelta(days=32))
-        lt  = _last_tue(nxt.year, nxt.month)
-    notify.log(f"Using last-Tuesday-of-month expiry (fallback): {lt}")
-    return lt
+    else:
+        # BNF: last Tuesday of current month (monthly expiry since Nov 2024).
+        import calendar as _cal
+        def _last_tue(year, month):
+            last_day = _cal.monthrange(year, month)[1]
+            d = date(year, month, last_day)
+            while d.weekday() != 1:
+                d -= timedelta(days=1)
+            return d
+        lt = _last_tue(today.year, today.month)
+        if lt < today:
+            nxt = (today.replace(day=1) + timedelta(days=32))
+            lt  = _last_tue(nxt.year, nxt.month)
+        notify.log(f"Using last-Tuesday-of-month expiry (BNF fallback): {lt}")
+        return lt
 
 
 # ── Step 4: ATM option security_id ───────────────────────────────────────────
@@ -966,7 +962,7 @@ def _fetch_option_chain(expiry: date) -> tuple:
     Called by get_atm_security_id with retry + fallback-expiry logic.
     """
     payload = {
-        "UnderlyingScrip": 25,
+        "UnderlyingScrip": UNDERLYING_SCRIP,
         "UnderlyingSeg":   "IDX_I",
         "Expiry":          expiry.strftime("%Y-%m-%d"),
     }
@@ -989,7 +985,9 @@ def _fetch_option_chain(expiry: date) -> tuple:
         notify.log(f"Option chain {expiry} → got 200 but spot price is 0")
         return None, None, None, None
 
-    atm_strike = round(spot / 100) * 100
+    # NF strikes are multiples of 50, BNF are multiples of 100
+    strike_unit = 50 if IRON_CONDOR_MODE else 100
+    atm_strike  = round(spot / strike_unit) * strike_unit
     return data, atm_strike, spot, inner
 
 
@@ -1606,6 +1604,339 @@ def place_super_order(security_id: str, signal: str, lots: int,
             "sl": sl_price, "tp": tp_price}
 
 
+# ── Iron Condor helpers ───────────────────────────────────────────────────────
+
+def _get_oc_leg(oc: dict, strike: float, opt_type_lc: str):
+    """Return (security_id, ltp) for a strike from the OC dict, or (None, 0.0)."""
+    for k in [f"{float(strike):.6f}", str(int(strike)), f"{float(strike):.1f}"]:
+        if k in oc:
+            sub = oc[k].get(opt_type_lc) or oc[k].get(opt_type_lc.upper()) or {}
+            sid = sub.get("security_id") or sub.get("securityId")
+            ltp = float(sub.get("last_price") or sub.get("ltp") or 0)
+            if sid and ltp > 0:
+                return str(sid), ltp
+    return None, 0.0
+
+
+def get_ic_legs(expiry: date, capital: float) -> dict | None:
+    """
+    Fetch all 4 Nifty IC legs from the live option chain.
+    IC: SELL ATM CE + BUY (ATM+SPREAD_WIDTH) CE
+        SELL ATM PE + BUY (ATM-SPREAD_WIDTH) PE
+    Returns dict with leg data + lot sizing, or None on failure.
+    """
+    expiry_candidates = [expiry, expiry + timedelta(days=7)]
+
+    for exp in expiry_candidates:
+        for attempt in range(3):
+            try:
+                data, atm_strike, spot, inner = _fetch_option_chain(exp)
+                if data is None:
+                    if attempt < 2:
+                        notify.log(f"IC: retry {attempt+1}/3 for {exp} in 3s...")
+                        time.sleep(3)
+                    continue
+
+                oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+                if not oc:
+                    notify.log(f"IC: empty OC for {exp}")
+                    break
+
+                ce_short_strike = atm_strike
+                ce_long_strike  = atm_strike + SPREAD_WIDTH
+                pe_short_strike = atm_strike
+                pe_long_strike  = atm_strike - SPREAD_WIDTH
+
+                ce_short_sid, ce_short_ltp = _get_oc_leg(oc, ce_short_strike, "ce")
+                ce_long_sid,  ce_long_ltp  = _get_oc_leg(oc, ce_long_strike,  "ce")
+                pe_short_sid, pe_short_ltp = _get_oc_leg(oc, pe_short_strike, "pe")
+                pe_long_sid,  pe_long_ltp  = _get_oc_leg(oc, pe_long_strike,  "pe")
+
+                missing = [name for name, sid in [
+                    (f"CE ATM({atm_strike})",     ce_short_sid),
+                    (f"CE +{SPREAD_WIDTH}",        ce_long_sid),
+                    (f"PE ATM({atm_strike})",     pe_short_sid),
+                    (f"PE -{SPREAD_WIDTH}",        pe_long_sid),
+                ] if not sid]
+                if missing:
+                    notify.log(f"IC: missing legs {missing} (exp={exp})")
+                    break
+
+                ce_credit  = ce_short_ltp - ce_long_ltp
+                pe_credit  = pe_short_ltp - pe_long_ltp
+                net_credit = ce_credit + pe_credit
+
+                if net_credit <= 0:
+                    notify.log(f"IC: net credit ≤ 0 ({net_credit:.1f}) — legs inverted?")
+                    break
+
+                max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+                sl_risk_per_lot  = net_credit * CREDIT_SL_FRAC * LOT_SIZE
+                risk_per_lot     = min(max_loss_per_lot, sl_risk_per_lot)
+
+                lots_by_risk   = floor(capital * RISK_PCT   / risk_per_lot)    if risk_per_lot    > 0 else 0
+                lots_by_margin = floor(capital * 0.85       / max_loss_per_lot) if max_loss_per_lot > 0 else 0
+                lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
+                if lots < 1 and lots_by_margin >= 1:
+                    lots = 1
+
+                if lots < 1:
+                    notify.log(f"IC: insufficient capital for 1 lot "
+                               f"(max_loss/lot ₹{max_loss_per_lot:.0f}, capital ₹{capital:,.0f})")
+                    return None
+
+                notify.log(
+                    f"IC legs: ATM={atm_strike}  "
+                    f"CE {ce_short_strike}=₹{ce_short_ltp:.0f} / {ce_long_strike}=₹{ce_long_ltp:.0f} "
+                    f"(credit ₹{ce_credit:.0f})  "
+                    f"PE {pe_short_strike}=₹{pe_short_ltp:.0f} / {pe_long_strike}=₹{pe_long_ltp:.0f} "
+                    f"(credit ₹{pe_credit:.0f})  net ₹{net_credit:.0f}  → {lots} lot(s)"
+                )
+                return {
+                    "ce_short_sid":    ce_short_sid,  "ce_short_strike": ce_short_strike,
+                    "ce_short_ltp":    ce_short_ltp,
+                    "ce_long_sid":     ce_long_sid,   "ce_long_strike":  ce_long_strike,
+                    "ce_long_ltp":     ce_long_ltp,
+                    "pe_short_sid":    pe_short_sid,  "pe_short_strike": pe_short_strike,
+                    "pe_short_ltp":    pe_short_ltp,
+                    "pe_long_sid":     pe_long_sid,   "pe_long_strike":  pe_long_strike,
+                    "pe_long_ltp":     pe_long_ltp,
+                    "ce_credit":       ce_credit,
+                    "pe_credit":       pe_credit,
+                    "net_credit":      net_credit,
+                    "lots":            lots,
+                    "spot":            spot,
+                    "atm_strike":      atm_strike,
+                    "expiry":          exp,
+                }
+            except Exception as e:
+                notify.log(f"IC legs exception (exp={exp}, attempt={attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(3)
+
+        notify.log(f"IC: all attempts failed for {exp} — trying next expiry")
+
+    return None
+
+
+def _log_paper_ic_trade(ic: dict, qty: int):
+    """Log a paper Nifty Iron Condor trade to data/paper_trades.csv."""
+    import csv as _csv
+    path = f"{DATA_DIR}/paper_trades.csv"
+    cols = [
+        "date", "signal", "strategy",
+        "ce_short_sid", "ce_long_sid", "pe_short_sid", "pe_long_sid",
+        "ce_short_strike", "ce_long_strike", "pe_short_strike", "pe_long_strike",
+        "lots", "qty", "lot_size", "spot", "atm_strike",
+        "ce_short_ltp", "ce_long_ltp", "pe_short_ltp", "pe_long_ltp",
+        "ce_credit", "pe_credit", "net_credit",
+        "max_loss_inr", "max_profit_inr",
+    ]
+    max_loss_per_share = SPREAD_WIDTH - ic["net_credit"]
+    row = {
+        "date":            date.today().isoformat(),
+        "signal":          "IC",
+        "strategy":        "nf_iron_condor",
+        "ce_short_sid":    str(ic["ce_short_sid"]),
+        "ce_long_sid":     str(ic["ce_long_sid"]),
+        "pe_short_sid":    str(ic["pe_short_sid"]),
+        "pe_long_sid":     str(ic["pe_long_sid"]),
+        "ce_short_strike": int(ic["ce_short_strike"]),
+        "ce_long_strike":  int(ic["ce_long_strike"]),
+        "pe_short_strike": int(ic["pe_short_strike"]),
+        "pe_long_strike":  int(ic["pe_long_strike"]),
+        "lots":            int(ic["lots"]),
+        "qty":             int(qty),
+        "lot_size":        int(LOT_SIZE),
+        "spot":            round(float(ic["spot"]), 2),
+        "atm_strike":      int(ic["atm_strike"]),
+        "ce_short_ltp":    round(float(ic["ce_short_ltp"]), 2),
+        "ce_long_ltp":     round(float(ic["ce_long_ltp"]), 2),
+        "pe_short_ltp":    round(float(ic["pe_short_ltp"]), 2),
+        "pe_long_ltp":     round(float(ic["pe_long_ltp"]), 2),
+        "ce_credit":       round(float(ic["ce_credit"]), 2),
+        "pe_credit":       round(float(ic["pe_credit"]), 2),
+        "net_credit":      round(float(ic["net_credit"]), 2),
+        "max_loss_inr":    round(max_loss_per_share * qty, 2),
+        "max_profit_inr":  round(ic["net_credit"] * qty, 2),
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        new_file = not os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            if new_file:
+                w.writeheader()
+            w.writerow(row)
+        notify.log(f"PAPER IC trade logged → {path}")
+    except Exception as e:
+        notify.log(f"Could not write paper_trades.csv: {e}")
+
+
+def _write_today_ic_trade(ic: dict, signal: str, dte: float, score: int,
+                          expiry: date, ml_conf: float, order_result: dict):
+    """Write 4-leg IC trade intent to data/today_trade.json."""
+    payload = {
+        "date":            date.today().isoformat(),
+        "strategy":        "nf_iron_condor",
+        "signal":          signal,
+        "atm_strike":      float(ic["atm_strike"]),
+        "ce_short_sid":    str(ic["ce_short_sid"]),
+        "ce_short_strike": float(ic["ce_short_strike"]),
+        "ce_short_entry":  float(ic["ce_short_ltp"]),
+        "ce_long_sid":     str(ic["ce_long_sid"]),
+        "ce_long_strike":  float(ic["ce_long_strike"]),
+        "ce_long_entry":   float(ic["ce_long_ltp"]),
+        "pe_short_sid":    str(ic["pe_short_sid"]),
+        "pe_short_strike": float(ic["pe_short_strike"]),
+        "pe_short_entry":  float(ic["pe_short_ltp"]),
+        "pe_long_sid":     str(ic["pe_long_sid"]),
+        "pe_long_strike":  float(ic["pe_long_strike"]),
+        "pe_long_entry":   float(ic["pe_long_ltp"]),
+        "ce_credit":       float(ic["ce_credit"]),
+        "pe_credit":       float(ic["pe_credit"]),
+        "net_credit":      float(ic["net_credit"]),
+        "spread_width":    float(SPREAD_WIDTH),
+        "sl_frac":         CREDIT_SL_FRAC,
+        "tp_frac":         CREDIT_TP_FRAC,
+        "lots":            int(ic["lots"]),
+        "lot_size":        int(LOT_SIZE),
+        "dte":             float(dte),
+        "expiry":          expiry.isoformat() if expiry else None,
+        "spot_at_signal":  float(ic["spot"]),
+        "signal_score":    int(score),
+        "ml_conf":         round(float(ml_conf), 4),
+        "order_mode":      order_result.get("mode"),
+        "ce_buy_oid":      order_result.get("ce_buy_oid"),
+        "ce_sell_oid":     order_result.get("ce_sell_oid"),
+        "pe_buy_oid":      order_result.get("pe_buy_oid"),
+        "pe_sell_oid":     order_result.get("pe_sell_oid"),
+        "exit_done":       False,
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(f"{DATA_DIR}/today_trade.json", "w") as f:
+            json.dump(payload, f, indent=2)
+        notify.log("IC trade intent written → data/today_trade.json")
+    except Exception as e:
+        notify.log(f"Could not write today_trade.json: {e}")
+
+
+def place_iron_condor(ic: dict, expiry: date) -> dict:
+    """
+    Place all 4 IC legs in hedge-margin order:
+    1. BUY CE long  2. SELL CE short  3. BUY PE long  4. SELL PE short
+    Returns result dict with mode and order IDs.
+    """
+    qty     = ic["lots"] * LOT_SIZE
+    exp_str = expiry.strftime('%Y%m%d')
+
+    if DRY_RUN:
+        return {"mode": "DRY_RUN", "net_credit": ic["net_credit"]}
+
+    if PAPER_MODE:
+        _log_paper_ic_trade(ic, qty)
+        return {
+            "mode":     "PAPER",
+            "orderId":  f"paper_ic_{date.today():%Y%m%d}",
+            "net_credit": ic["net_credit"],
+        }
+
+    def _place_leg(trans, sid, leg_label, corr_suffix):
+        payload = {
+            "dhanClientId":      CLIENT_ID,
+            "correlationId":     f"ic_{corr_suffix}_{exp_str}",
+            "transactionType":   trans,
+            "exchangeSegment":   "NSE_FNO",
+            "productType":       "MARGIN",
+            "orderType":         "MARKET",
+            "validity":          "DAY",
+            "securityId":        sid,
+            "quantity":          qty,
+            "price":             0,
+            "triggerPrice":      0,
+            "disclosedQuantity": 0,
+        }
+        resp   = requests.post("https://api.dhan.co/v2/orders",
+                               headers=HEADERS, json=payload, timeout=15)
+        result = resp.json()
+        oid    = result.get("orderId") or result.get("order_id")
+        if not oid:
+            raise RuntimeError(f"{leg_label} {trans}: no orderId — {str(result)[:150]}")
+        notify.log(f"IC {trans} {leg_label} qty={qty} orderId={oid}")
+        return oid
+
+    # Leg 1: BUY CE long (hedge — must be first for margin benefit)
+    try:
+        ce_buy_oid = _place_leg("BUY", ic["ce_long_sid"],
+                                f"CE {int(ic['ce_long_strike'])}", "ce_buy")
+    except Exception as e:
+        notify.send(
+            f"❌ <b>IC Failed — CE BUY (hedge) error</b>\n\n"
+            f"CE +{SPREAD_WIDTH} {int(ic['ce_long_strike'])}, qty={qty}\n{e}\n"
+            f"No position opened."
+        )
+        return {"mode": "FAILED"}
+
+    time.sleep(2)
+
+    # Leg 2: SELL CE short (credit)
+    try:
+        ce_sell_oid = _place_leg("SELL", ic["ce_short_sid"],
+                                 f"CE {int(ic['ce_short_strike'])}", "ce_sell")
+    except Exception as e:
+        notify.send(
+            f"🚨 <b>CRITICAL — IC CE SELL failed after CE BUY placed</b>\n\n"
+            f"CE BUY orderId: {ce_buy_oid}\n{e}\n\n"
+            f"NAKED LONG CE {int(ic['ce_long_strike'])} x{qty}!\n"
+            f"IMMEDIATELY SELL CE {int(ic['ce_short_strike'])} qty={qty} on Dhan app."
+        )
+        return {"mode": "PARTIAL_IC", "ce_buy_oid": ce_buy_oid}
+
+    time.sleep(2)
+
+    # Leg 3: BUY PE long (hedge)
+    try:
+        pe_buy_oid = _place_leg("BUY", ic["pe_long_sid"],
+                                f"PE {int(ic['pe_long_strike'])}", "pe_buy")
+    except Exception as e:
+        notify.send(
+            f"🚨 <b>CRITICAL — IC PE BUY failed (CE spread placed)</b>\n\n"
+            f"CE: BUY={ce_buy_oid} SELL={ce_sell_oid}\n{e}\n\n"
+            f"CE spread is on. IMMEDIATELY also BUY PE {int(ic['pe_long_strike'])} "
+            f"AND SELL PE {int(ic['pe_short_strike'])} qty={qty} on Dhan app."
+        )
+        return {"mode": "PARTIAL_IC_CE_ONLY",
+                "ce_buy_oid": ce_buy_oid, "ce_sell_oid": ce_sell_oid}
+
+    time.sleep(2)
+
+    # Leg 4: SELL PE short (credit)
+    try:
+        pe_sell_oid = _place_leg("SELL", ic["pe_short_sid"],
+                                 f"PE {int(ic['pe_short_strike'])}", "pe_sell")
+    except Exception as e:
+        notify.send(
+            f"🚨 <b>CRITICAL — IC PE SELL failed after PE BUY placed</b>\n\n"
+            f"CE: BUY={ce_buy_oid} SELL={ce_sell_oid}\n"
+            f"PE: BUY={pe_buy_oid}\n{e}\n\n"
+            f"NAKED LONG PE {int(ic['pe_long_strike'])} x{qty}!\n"
+            f"IMMEDIATELY SELL PE {int(ic['pe_short_strike'])} qty={qty} on Dhan app."
+        )
+        return {"mode": "PARTIAL_IC",
+                "ce_buy_oid": ce_buy_oid, "ce_sell_oid": ce_sell_oid,
+                "pe_buy_oid": pe_buy_oid}
+
+    return {
+        "mode":         "IRON_CONDOR",
+        "ce_buy_oid":   ce_buy_oid,
+        "ce_sell_oid":  ce_sell_oid,
+        "pe_buy_oid":   pe_buy_oid,
+        "pe_sell_oid":  pe_sell_oid,
+        "net_credit":   ic["net_credit"],
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1615,7 +1946,8 @@ def main():
         mode_label = "PAPER"
     else:
         mode_label = "LIVE"
-    notify.log(f"BankNifty Auto Trader starting [{mode_label}]")
+    instr_label = "Nifty IC" if IRON_CONDOR_MODE else "BankNifty"
+    notify.log(f"{instr_label} Auto Trader starting [{mode_label}]")
 
     # 0. Credentials + lot-size sanity check
     check_credentials()
@@ -1713,8 +2045,9 @@ def main():
     # ── VIX regime filter ────────────────────────────────────────────────────
     # Model accuracy: VIX<13 = 46.7% (losing), VIX 13-18 = 57.4%, VIX>18 = 62.9%
     # Ceiling: VIX>20 = panic regime; real-options backtest showed P&L drops sharply.
+    # IC bypasses VIX filter — no-filter gives maximum P&L per optimize_params.py.
     vix_now = get_vix_level()
-    if VIX_MIN_TRADE > 0 and vix_now < VIX_MIN_TRADE:
+    if not IRON_CONDOR_MODE and VIX_MIN_TRADE > 0 and vix_now < VIX_MIN_TRADE:
         notify.send(
             f"⏸  <b>No Trade — Low Volatility Day</b>\n"
             f"─────────────────────\n"
@@ -1725,7 +2058,7 @@ def main():
         )
         notify.log(f"VIX regime filter: VIX={vix_now:.1f} < {VIX_MIN_TRADE} — no trade")
         return
-    if VIX_MAX_TRADE > 0 and vix_now > VIX_MAX_TRADE:
+    if not IRON_CONDOR_MODE and VIX_MAX_TRADE > 0 and vix_now > VIX_MAX_TRADE:
         notify.send(
             f"⏸  <b>No Trade — Panic Volatility Day</b>\n"
             f"─────────────────────\n"
@@ -1739,7 +2072,8 @@ def main():
         return
 
     # ── ML confidence gate ───────────────────────────────────────────────────
-    if ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:
+    # IC bypasses ML confidence filter — no-filter gives maximum P&L.
+    if not IRON_CONDOR_MODE and ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:
         notify.send(
             f"⏸  <b>No Trade — Low ML Confidence</b>\n"
             f"─────────────────────\n"
@@ -1783,6 +2117,173 @@ def main():
         score_desc = "  ● weak ●"
     sig_line  = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
     news_row  = f"News       {news_note}\n" if news_note else ""
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # IRON CONDOR PATH  (IRON_CONDOR_MODE = True)
+    # NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
+    # Trades every CALL/PUT signal day — direction-neutral, theta-positive
+    # ══════════════════════════════════════════════════════════════════════════
+    if IRON_CONDOR_MODE:
+        ic = get_ic_legs(expiry, capital)
+        if ic is None:
+            die(
+                f"Could not fetch Nifty IC legs for expiry {expiry}.\n"
+                f"All 4 legs (ATM CE/PE + ATM±{SPREAD_WIDTH} CE/PE) must have live prices."
+            )
+
+        # Pull the expiry the IC function actually used (may be fallback)
+        exp_used = ic.get("expiry", expiry)
+
+        # Chain intelligence (max pain + GEX) — informational only
+        time.sleep(3)
+        chain_sig = compute_chain_signals(exp_used, ic["spot"])
+        if chain_sig:
+            _append_chain_signals(chain_sig, ic["spot"])
+
+        lots       = ic["lots"]
+        spot       = ic["spot"]
+        net_credit = ic["net_credit"]
+        max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+
+        chain_line = ""
+        if chain_sig:
+            mp      = chain_sig["max_pain_strike"]
+            mp_d    = chain_sig["max_pain_dist"]
+            gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
+            mp_dir  = "above" if mp_d > 0 else "below"
+            mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
+            chain_line = (
+                f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Max pain   ₹{mp:,.0f}  ({abs(mp_d):.1f}% {mp_dir} spot → {mp_bias})\n"
+                f"Gamma      {gex_lbl}\n"
+                f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
+            )
+
+        nf_expiry_str = exp_used.strftime('%d%b%Y').upper()
+        ce_short_sym  = f"NIFTY {nf_expiry_str} {int(ic['ce_short_strike'])} CE"
+        ce_long_sym   = f"NIFTY {nf_expiry_str} {int(ic['ce_long_strike'])} CE"
+        pe_short_sym  = f"NIFTY {nf_expiry_str} {int(ic['pe_short_strike'])} PE"
+        pe_long_sym   = f"NIFTY {nf_expiry_str} {int(ic['pe_long_strike'])} PE"
+
+        notify.send(
+            f"🦅  <b>Nifty Iron Condor</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Score      {score:+d} / {score_max}{score_desc}\n"
+            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+            f"{news_row}"
+            f"Capital    {cap_label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>{ce_short_sym}</code>  @ ₹{ic['ce_short_ltp']:.0f}\n"
+            f"BUY   <code>{ce_long_sym}</code>  @ ₹{ic['ce_long_ltp']:.0f}\n"
+            f"SELL  <code>{pe_short_sym}</code>  @ ₹{ic['pe_short_ltp']:.0f}\n"
+            f"BUY   <code>{pe_long_sym}</code>  @ ₹{ic['pe_long_ltp']:.0f}\n"
+            f"Net credit  ₹{net_credit:.0f} / share   "
+            f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
+            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {exp_used.strftime('%d %b')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   spread cost > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  "
+            f"(cost grew {CREDIT_SL_FRAC*100:.0f}% above credit received)\n"
+            f"TP   spread cost < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  "
+            f"({CREDIT_TP_FRAC*100:.0f}% of credit in pocket)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
+            f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
+            f"{chain_line}"
+        )
+
+        # Duplicate-position guard (today_trade.json is reliable for 4-leg IC)
+        if not DRY_RUN and not PAPER_MODE:
+            try:
+                with open(f"{DATA_DIR}/today_trade.json") as _ttj:
+                    ttj = json.load(_ttj)
+                if (ttj.get("date") == date.today().isoformat()
+                        and ttj.get("strategy") == "nf_iron_condor"
+                        and not ttj.get("exit_done", True)):
+                    notify.send(
+                        f"⚠️  <b>Duplicate IC Blocked</b>\n\n"
+                        f"today_trade.json shows IC already placed today.\n"
+                        f"Skipping to avoid double exposure."
+                    )
+                    return
+            except Exception:
+                pass
+
+        # Place IC
+        notify.log("Placing Nifty Iron Condor (4 legs)...")
+        order_result = place_iron_condor(ic, exp_used)
+
+        if not DRY_RUN:
+            _write_today_ic_trade(ic, signal, dte, score, exp_used, ml_conf, order_result)
+
+        mode = order_result.get("mode")
+
+        if mode == "DRY_RUN":
+            notify.send(
+                f"✅  <b>Dry Run — Nifty Iron Condor</b>\n\n"
+                f"Would have placed:\n"
+                f"SELL  <code>{ce_short_sym}</code>  @ ₹{ic['ce_short_ltp']:.0f}\n"
+                f"BUY   <code>{ce_long_sym}</code>  @ ₹{ic['ce_long_ltp']:.0f}\n"
+                f"SELL  <code>{pe_short_sym}</code>  @ ₹{ic['pe_short_ltp']:.0f}\n"
+                f"BUY   <code>{pe_long_sym}</code>  @ ₹{ic['pe_long_ltp']:.0f}\n"
+                f"{lots} lot{'s' if lots > 1 else ''}  ·  Net credit ₹{net_credit:.0f}\n\n"
+                f"<i>PAPER_MODE=True — no real order placed.</i>"
+            )
+            return
+
+        if mode == "PAPER":
+            notify.send(
+                f"📝  <b>[PAPER] Nifty Iron Condor — No Real Order</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"SELL  <code>{ce_short_sym}</code>  @ ₹{ic['ce_short_ltp']:.0f}\n"
+                f"BUY   <code>{ce_long_sym}</code>  @ ₹{ic['ce_long_ltp']:.0f}\n"
+                f"SELL  <code>{pe_short_sym}</code>  @ ₹{ic['pe_short_ltp']:.0f}\n"
+                f"BUY   <code>{pe_long_sym}</code>  @ ₹{ic['pe_long_ltp']:.0f}\n"
+                f"Net credit ₹{net_credit:.0f} / share  ·  "
+                f"{lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares\n"
+                f"Max risk ₹{lots * max_loss_per_lot:,.0f}   "
+                f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<i>PAPER MODE. Real money safe. Tracking in data/paper_trades.csv.</i>"
+            )
+            return
+
+        if mode == "FAILED":
+            notify.log("IC placement failed — no position opened. See earlier error.")
+            return
+
+        if mode and "PARTIAL" in mode:
+            notify.log(f"Partial IC ({mode}) — emergency alert sent. Check Dhan app immediately.")
+            return
+
+        # All 4 legs placed
+        notify.send(
+            f"✅  <b>Nifty Iron Condor Placed!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"CE BUY   <code>{order_result.get('ce_buy_oid')}</code>\n"
+            f"CE SELL  <code>{order_result.get('ce_sell_oid')}</code>\n"
+            f"PE BUY   <code>{order_result.get('pe_buy_oid')}</code>\n"
+            f"PE SELL  <code>{order_result.get('pe_sell_oid')}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>{ce_short_sym}</code>  @ ₹{ic['ce_short_ltp']:.0f}\n"
+            f"BUY   <code>{ce_long_sym}</code>  @ ₹{ic['ce_long_ltp']:.0f}\n"
+            f"SELL  <code>{pe_short_sym}</code>  @ ₹{ic['pe_short_ltp']:.0f}\n"
+            f"BUY   <code>{pe_long_sym}</code>  @ ₹{ic['pe_long_ltp']:.0f}\n"
+            f"Net credit ₹{net_credit:.0f}  ·  "
+            f"{lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   spread > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  "
+            f"(auto-exit: spread_monitor.py)\n"
+            f"TP   spread < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  "
+            f"(65% of credit locked in)\n"
+            f"<i>spread_monitor.py watches every 1 min — all 4 legs exit on SL/TP.</i>"
+        )
+
+        ce_buy_oid = order_result.get("ce_buy_oid")
+        if ce_buy_oid:
+            notify.log("Waiting 30s to verify CE buy leg status...")
+            time.sleep(30)
+            _verify_order_status(ce_buy_oid, ce_short_sym)
+        return
 
     # ══════════════════════════════════════════════════════════════════════════
     # CREDIT SPREAD PATH  (CREDIT_SPREAD_MODE = True)
