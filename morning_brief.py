@@ -222,7 +222,8 @@ Reply with ONLY this JSON (one line, no markdown):
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def run() -> dict:
-    print(f"[{datetime.now().strftime('%H:%M:%S')} IST] Morning brief starting...")
+    _ist = timezone(timedelta(hours=5, minutes=30))
+    print(f"[{datetime.now(_ist).strftime('%H:%M:%S')} IST] Morning brief starting...")
 
     # Live prices
     live_ctx = _build_live_context()

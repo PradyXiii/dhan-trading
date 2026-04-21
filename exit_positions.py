@@ -17,7 +17,8 @@ import os
 import sys
 import requests
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+_IST = timezone(timedelta(hours=5, minutes=30))
 from dotenv import load_dotenv
 
 import notify
@@ -48,7 +49,7 @@ def _write_exit_marker():
         marker = os.path.join(DATA_DIR, f"exit_completed_{date.today().isoformat()}.marker")
         with open(marker, "w") as f:
             f.write(f"exit_positions.py completed at "
-                    f"{datetime.now().strftime('%H:%M:%S IST')}\n")
+                    f"{datetime.now(_IST).strftime('%H:%M:%S IST')}\n")
         notify.log(f"Exit marker written: {marker}")
     except Exception as e:
         notify.log(f"Could not write exit marker: {e}")

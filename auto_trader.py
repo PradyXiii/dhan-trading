@@ -911,8 +911,12 @@ def get_expiry() -> date:
     Find the nearest valid expiry using the /optionchain/expirylist endpoint.
     NF (IRON_CONDOR_MODE): weekly Thursday. BNF: monthly last Tuesday.
     Falls back to a calculated expiry if the API is unavailable.
+
+    Uses IST date explicitly — VM runs UTC, so date.today() can return yesterday
+    relative to IST late-night (00:00–05:30 IST = prev-day UTC). Would pick an
+    already-expired contract.
     """
-    today = date.today()
+    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
     try:
         resp = requests.post(
             "https://api.dhan.co/v2/optionchain/expirylist",

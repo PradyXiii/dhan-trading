@@ -28,7 +28,8 @@ import time
 import fcntl
 import atexit
 import requests
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+_IST = timezone(timedelta(hours=5, minutes=30))
 from dotenv import load_dotenv
 
 import notify
@@ -354,7 +355,7 @@ def main():
             "exit_ce_long_ltp":   round(ce_long_ltp, 2),
             "exit_pe_short_ltp":  round(pe_short_ltp, 2),
             "exit_pe_long_ltp":   round(pe_long_ltp, 2),
-            "exit_time":          datetime.now().strftime("%H:%M"),
+            "exit_time":          datetime.now(_IST).strftime("%H:%M"),
             "pnl_inr":            total_pnl,
         })
         _save_intent(intent)
@@ -426,7 +427,7 @@ def main():
         "exit_spread":    round(current_cost, 2),
         "exit_short_ltp": round(short_ltp, 2),
         "exit_long_ltp":  round(long_ltp, 2),
-        "exit_time":      datetime.now().strftime("%H:%M"),
+        "exit_time":      datetime.now(_IST).strftime("%H:%M"),
         "pnl_inr":        total_pnl,
     })
     _save_intent(intent)
