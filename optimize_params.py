@@ -20,19 +20,21 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 from backtest_spreads import run_spread_backtest, _DATA_CACHE
 
-STRATEGIES = ["bear_call_credit", "bull_put_credit"]
+BNF_STRATEGIES = ["bear_call_credit", "bull_put_credit"]
+NF_STRATEGIES  = ["nf_bear_call_credit", "nf_bull_put_credit"]
 BASE_ENTRY  = "09:30"
 BASE_EXIT   = "15:15"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _run(strat, entry=BASE_ENTRY, exit_=BASE_EXIT, year=None, max_dte=None):
+def _run(strat, entry=BASE_ENTRY, exit_=BASE_EXIT, year=None, max_dte=None,
+         instrument="BNF"):
     """Run backtest; return only active (SL/TP/EOD) trades."""
     _DATA_CACHE.clear()
     df = run_spread_backtest(strat, ml=True, adaptive=False,
                              entry_time=entry, exit_time=exit_,
-                             max_dte=max_dte)
+                             max_dte=max_dte, instrument=instrument)
     df = df[df["result"].isin(["SL", "TP", "EOD"])].copy()
     if year is not None:
         df = df[pd.to_datetime(df["date"]).dt.year == year]
@@ -124,14 +126,16 @@ def grid_search(trade_dfs):
 
 # ── Entry time scan ───────────────────────────────────────────────────────────
 
-def entry_time_scan(entry_times, year=None):
+def entry_time_scan(entry_times, year=None, instrument="BNF", strategies=None):
     """Re-run full backtests for each entry time."""
+    if strategies is None:
+        strategies = NF_STRATEGIES if instrument == "NF" else BNF_STRATEGIES
     rows = []
     for et in entry_times:
         print(f"  Entry {et} ...", end=" ", flush=True)
         combined = {"n": 0, "wins": 0, "pnl": 0.0, "pnl_yr": 0.0}
-        for strat in STRATEGIES:
-            df = _run(strat, entry=et, year=year)
+        for strat in strategies:
+            df = _run(strat, entry=et, year=year, instrument=instrument)
             st = _stats(df)
             if st:
                 combined["n"]     += st["n"]
@@ -162,6 +166,8 @@ def _fmt(df, sort_col, ascending=False, head=25):
 
 def main():
     ap = argparse.ArgumentParser(description="Spread parameter optimizer")
+    ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
+                    help="BNF=BankNifty (default), NF=Nifty50 weekly")
     ap.add_argument("--entry-scan",  action="store_true",
                     help="Test 6 entry times 09:15–10:30 (requires ~3 min)")
     ap.add_argument("--save-trades", action="store_true",
@@ -173,17 +179,21 @@ def main():
                          "last week before expiry, mimics weekly conditions)")
     args = ap.parse_args()
 
-    yr_note = f" (year={args.year})" if args.year else ""
-    dte_note = f" (DTE≤{args.max_dte})" if args.max_dte else ""
+    inst = args.instrument
+    strategies = NF_STRATEGIES if inst == "NF" else BNF_STRATEGIES
+    inst_label = "Nifty50" if inst == "NF" else "BankNifty"
+
+    yr_note  = f" (year={args.year})"     if args.year    else ""
+    dte_note = f" (DTE≤{args.max_dte})"   if args.max_dte else ""
     print(f"\n{'='*70}")
-    print(f"BankNifty Spread Parameter Optimizer{yr_note}{dte_note}")
+    print(f"{inst_label} Spread Parameter Optimizer{yr_note}{dte_note}")
     print(f"{'='*70}")
 
     # ── Load base backtests ────────────────────────────────────────────────────
     print("\nRunning base backtests (no extra filters)...")
     trade_dfs = {}
-    for strat in STRATEGIES:
-        df = _run(strat, year=args.year, max_dte=args.max_dte)
+    for strat in strategies:
+        df = _run(strat, year=args.year, max_dte=args.max_dte, instrument=inst)
         st = _stats(df)
         if st:
             label = "Bear Call" if "bear" in strat else "Bull Put"
@@ -192,7 +202,7 @@ def main():
         trade_dfs[strat] = df
         if args.save_trades:
             key  = "bc" if "bear" in strat else "bp"
-            path = f"/tmp/{key}_opt.csv"
+            path = f"/tmp/{inst.lower()}_{key}_opt.csv"
             df.to_csv(path, index=False)
             print(f"    → saved {len(df)} rows to {path}")
 
@@ -205,7 +215,7 @@ def main():
         return
 
     print(f"\n{'='*80}")
-    print("TOP 25 — sorted by ANNUAL P&L (combined Bear Call + Bull Put)")
+    print(f"TOP 25 — sorted by ANNUAL P&L (combined Bear Call + Bull Put) [{inst}]")
     print(f"{'='*80}")
     print(_fmt(results, "pnl_yr_L"))
 
@@ -238,11 +248,11 @@ def main():
     # ── Entry time scan ────────────────────────────────────────────────────────
     if args.entry_scan:
         print(f"\n{'='*80}")
-        print("ENTRY TIME SCAN (full backtest re-run per time)")
+        print(f"ENTRY TIME SCAN (full backtest re-run per time) [{inst}]")
         print(f"{'='*80}")
         et_df = entry_time_scan(
             ["09:15", "09:30", "09:45", "10:00", "10:15", "10:30"],
-            year=args.year,
+            year=args.year, instrument=inst,
         )
         print()
         print(et_df.to_string(index=False))

@@ -58,10 +58,28 @@ HEADERS = {
     "Content-Type":   "application/json",
 }
 
-DATA_DIR        = "data"
-CACHE_DIR       = os.path.join(DATA_DIR, "intraday_options_cache")
-SIGNALS_PATH    = os.path.join(DATA_DIR, "signals_ml.csv")
-WEEKLY_BOUNDARY = datetime(2024, 11, 20).date()   # WEEK → MONTH phase transition
+DATA_DIR     = "data"
+SIGNALS_PATH = os.path.join(DATA_DIR, "signals_ml.csv")
+
+# Per-instrument config (--instrument BNF or NF)
+INSTRUMENT_CONFIG = {
+    "BNF": {
+        "security_id":      25,
+        "cache_dir":        os.path.join(DATA_DIR, "intraday_options_cache"),
+        "weekly_boundary":  datetime(2024, 11, 20).date(),  # BNF WEEK→MONTH
+        "label":            "BankNifty",
+    },
+    "NF": {
+        "security_id":      13,
+        "cache_dir":        os.path.join(DATA_DIR, "nifty_options_cache"),
+        "weekly_boundary":  None,   # Nifty always weekly — no transition
+        "label":            "Nifty50",
+    },
+}
+
+# Retain BNF defaults for backward-compat (scripts that import CACHE_DIR directly)
+CACHE_DIR       = INSTRUMENT_CONFIG["BNF"]["cache_dir"]
+WEEKLY_BOUNDARY = INSTRUMENT_CONFIG["BNF"]["weekly_boundary"]
 
 # Spread legs to fetch for each signal type.
 # Format: (strike_label, api_opt_type, file_suffix)
@@ -84,35 +102,37 @@ SPREAD_LEGS = {
 }
 
 
-def _cache_path(date_str: str, opt_code: str, suffix: str = None) -> str:
+def _cache_path(date_str: str, opt_code: str, suffix: str = None,
+                cache_dir: str = None) -> str:
     """
     Return cache path for a given date, option type, and offset label.
-      date_str : "YYYY-MM-DD"
-      opt_code : "CE" or "PE" (maps to option type regardless of trade signal)
-      suffix   : None → "{date}_{opt_code}.csv" (ATM, backward-compat)
-                 str  → "{date}_{opt_code}_{suffix}.csv"
+      date_str  : "YYYY-MM-DD"
+      opt_code  : "CE" or "PE"
+      suffix    : None → "{date}_{opt_code}.csv"; str → "{date}_{opt_code}_{suffix}.csv"
+      cache_dir : override directory (default: BNF CACHE_DIR)
     """
+    d = cache_dir or CACHE_DIR
     if suffix is None:
-        return os.path.join(CACHE_DIR, f"{date_str}_{opt_code}.csv")
-    return os.path.join(CACHE_DIR, f"{date_str}_{opt_code}_{suffix}.csv")
+        return os.path.join(d, f"{date_str}_{opt_code}.csv")
+    return os.path.join(d, f"{date_str}_{opt_code}_{suffix}.csv")
 
 
-def _fetch_one_day(date_obj, api_opt_type: str,
-                   strike: str = "ATM") -> pd.DataFrame:
+def _fetch_one_day(date_obj, api_opt_type: str, strike: str = "ATM",
+                   instrument: str = "BNF") -> pd.DataFrame:
     """
     Fetch 1-minute bars for ONE day, one option type.
-    Uses expiryFlag=WEEK before Nov 20 2024, MONTH from that date on.
+    BNF: WEEK before Nov 20 2024, MONTH after. NF: always WEEK.
     Returns DataFrame: dt, open, high, low, close, volume, strike.
-
-    strike: Dhan API strike param — "ATM", "ATM+1" … "ATM+3", "ATM-1" … "ATM-3"
     """
-    expiry_flag = "WEEK" if date_obj < WEEKLY_BOUNDARY else "MONTH"
+    cfg         = INSTRUMENT_CONFIG[instrument]
+    wb          = cfg["weekly_boundary"]
+    expiry_flag = "WEEK" if (wb is None or date_obj < wb) else "MONTH"
     next_day    = date_obj + timedelta(days=1)
 
     payload = {
         "exchangeSegment": "NSE_FNO",
         "interval":        1,
-        "securityId":      25,           # BankNifty underlying
+        "securityId":      cfg["security_id"],
         "instrument":      "OPTIDX",
         "expiryFlag":      expiry_flag,
         "expiryCode":      1,            # nearest expiry
@@ -154,16 +174,20 @@ def _fetch_one_day(date_obj, api_opt_type: str,
 
 
 def fetch_all(start: str, end: str, dry_run: bool = False,
-              spreads: bool = False) -> None:
+              spreads: bool = False, instrument: str = "BNF") -> None:
     """
     For each CALL/PUT day in signals_ml.csv between [start, end]:
-      - Always fetches ATM CE (CALL days) / ATM PE (PUT days).
-      - If spreads=True, also fetches spread legs per SPREAD_LEGS dict above.
+      - Fetches ATM CE (CALL days) / ATM PE (PUT days).
+      - If spreads=True, also fetches spread legs per SPREAD_LEGS dict.
     Idempotent — skips days whose cache file already exists.
+    instrument: "BNF" (default) or "NF" (Nifty50 weekly).
     """
     if not os.path.exists(SIGNALS_PATH):
         print(f"ERROR: {SIGNALS_PATH} missing — run `python3 ml_engine.py` first.")
         sys.exit(1)
+
+    cfg       = INSTRUMENT_CONFIG[instrument]
+    cache_dir = cfg["cache_dir"]
 
     signals = pd.read_csv(SIGNALS_PATH, parse_dates=["date"])
     signals["date"] = signals["date"].dt.date
@@ -173,7 +197,7 @@ def fetch_all(start: str, end: str, dry_run: bool = False,
             & (signals["signal"].isin(["CALL", "PUT"]))
     days  = signals[mask][["date", "signal"]].sort_values("date")
 
-    os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
 
     # Build fetch list: (date, signal, api_opt_type, strike, opt_code, suffix, path)
     to_fetch = []
@@ -182,7 +206,7 @@ def fetch_all(start: str, end: str, dry_run: bool = False,
         opt_code = "CE" if r["signal"] == "CALL" else "PE"
 
         # ATM leg (always)
-        atm_path = _cache_path(date_str, opt_code)
+        atm_path = _cache_path(date_str, opt_code, cache_dir=cache_dir)
         if not os.path.exists(atm_path):
             api_type = "CALL" if opt_code == "CE" else "PUT"
             to_fetch.append((r["date"], r["signal"], api_type, "ATM",
@@ -192,7 +216,7 @@ def fetch_all(start: str, end: str, dry_run: bool = False,
         if spreads:
             for strike_label, api_type, suffix in SPREAD_LEGS[r["signal"]]:
                 sc = "CE" if api_type == "CALL" else "PE"
-                sp_path = _cache_path(date_str, sc, suffix)
+                sp_path = _cache_path(date_str, sc, suffix, cache_dir=cache_dir)
                 if not os.path.exists(sp_path):
                     to_fetch.append((r["date"], r["signal"], api_type,
                                      strike_label, sc, suffix, sp_path))
@@ -201,12 +225,13 @@ def fetch_all(start: str, end: str, dry_run: bool = False,
     total_atm  = sum(1 for _, r in days.iterrows()
                      if not os.path.exists(
                          _cache_path(r["date"].strftime("%Y-%m-%d"),
-                                     "CE" if r["signal"] == "CALL" else "PE")))
+                                     "CE" if r["signal"] == "CALL" else "PE",
+                                     cache_dir=cache_dir)))
     print(f"Trade days in range:   {total_days}  (CALL/PUT)")
     print(f"ATM cache hits:        {total_days - total_atm}")
     print(f"Total to fetch:        {len(to_fetch)} calls")
     if spreads:
-        print(f"  (ATM + spread legs — 3 extra calls per day)")
+        print(f"  (ATM + spread legs — 5 legs per day for IC/Straddle)")
 
     if dry_run:
         for d, sig, api_t, stk, oc, suf, _ in to_fetch[:15]:
@@ -227,7 +252,8 @@ def fetch_all(start: str, end: str, dry_run: bool = False,
         print(f"[{i}/{len(to_fetch)}] {date_obj} {signal} {label} ...",
               end=" ", flush=True)
         try:
-            df = _fetch_one_day(date_obj, api_type, strike=strike)
+            df = _fetch_one_day(date_obj, api_type, strike=strike,
+                                instrument=instrument)
             if df.empty:
                 print("empty")
                 empty += 1
@@ -245,23 +271,27 @@ def fetch_all(start: str, end: str, dry_run: bool = False,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start",   default=None,
+    ap.add_argument("--start",      default=None,
                     help="YYYY-MM-DD (default: 1 year ago)")
-    ap.add_argument("--end",     default=None,
+    ap.add_argument("--end",        default=None,
                     help="YYYY-MM-DD (default: today)")
-    ap.add_argument("--spreads", action="store_true",
+    ap.add_argument("--spreads",    action="store_true",
                     help="Also fetch OTM/straddle legs for spread strategies")
-    ap.add_argument("--dry-run", action="store_true",
+    ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
+                    help="BNF=BankNifty (default), NF=Nifty50 weekly")
+    ap.add_argument("--dry-run",    action="store_true",
                     help="List what would be fetched — no API calls")
     args = ap.parse_args()
 
     end   = args.end   or datetime.today().strftime("%Y-%m-%d")
     start = args.start or (datetime.today() - timedelta(days=365)).strftime("%Y-%m-%d")
 
+    cfg  = INSTRUMENT_CONFIG[args.instrument]
     mode = "ATM + spread legs" if args.spreads else "ATM only"
-    print(f"Intraday options fetch ({mode}): {start} → {end}")
-    print(f"Cache: {CACHE_DIR}/")
-    fetch_all(start, end, dry_run=args.dry_run, spreads=args.spreads)
+    print(f"Intraday options fetch [{cfg['label']}] ({mode}): {start} → {end}")
+    print(f"Cache: {cfg['cache_dir']}/")
+    fetch_all(start, end, dry_run=args.dry_run, spreads=args.spreads,
+              instrument=args.instrument)
     print("Done.")
 
 

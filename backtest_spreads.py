@@ -52,7 +52,10 @@ from backtest_engine import (
     PREMIUM_K, MAX_LOTS, RISK_PCT,
     _otm_params, load_signals, load_bn_ohlcv, get_lot_size, get_dte,
     calculate_charges, fmt_inr,
+    NIFTY_CACHE_DIR, get_nifty_lot_size, load_nifty_ohlcv,
 )
+
+NF_CACHE_DIR = NIFTY_CACHE_DIR
 
 # ── Strategy registry ──────────────────────────────────────────────────────────
 # Each strategy defines its legs (long/short) and the cache-file suffix to load.
@@ -168,17 +171,165 @@ STRATEGIES = {
         "tp_frac":       0.65,   # TP at 65% of total credit captured
         "max_lots":      10,     # half max_lots — IC ties up margin on both sides
     },
+    # ── Naked (single-leg) BNF options — for comparison baseline ─────────────
+    "bnf_naked_call": {
+        "name":          "BNF Naked Call",
+        "direction":     "BULLISH",
+        "signal_match":  ["CALL"],
+        "spread_width":  None,
+        "legs": [
+            ("CE", 0, "BUY", None, None),
+        ],
+        "entry_debit":   True,
+        "sl_frac":       0.50,   # exit at 50% premium loss
+        "tp_frac":       1.00,   # exit at 2× premium (100% gain)
+    },
+    "bnf_naked_put": {
+        "name":          "BNF Naked Put",
+        "direction":     "BEARISH",
+        "signal_match":  ["PUT"],
+        "spread_width":  None,
+        "legs": [
+            ("PE", 0, "BUY", None, None),
+        ],
+        "entry_debit":   True,
+        "sl_frac":       0.50,
+        "tp_frac":       1.00,
+    },
+}
+
+# ── Nifty50 strategy registry ─────────────────────────────────────────────────
+# NF strike spacing = 50pts → ATM±3 = ±150pts (spread_width=150).
+# Cache naming is identical to BNF ("p3", "m3", "straddle") but files live
+# in NF_CACHE_DIR (data/nifty_options_cache/).
+# Fetch: python3 fetch_intraday_options.py --instrument NF --spreads --start 2021-08-01
+
+NIFTY_STRATEGIES = {
+    "nf_naked_call": {
+        "name":          "NF Naked Call",
+        "direction":     "BULLISH",
+        "signal_match":  ["CALL"],
+        "spread_width":  None,
+        "legs": [
+            ("CE", 0, "BUY", None, None),
+        ],
+        "entry_debit":   True,
+        "sl_frac":       0.50,
+        "tp_frac":       1.00,
+    },
+    "nf_naked_put": {
+        "name":          "NF Naked Put",
+        "direction":     "BEARISH",
+        "signal_match":  ["PUT"],
+        "spread_width":  None,
+        "legs": [
+            ("PE", 0, "BUY", None, None),
+        ],
+        "entry_debit":   True,
+        "sl_frac":       0.50,
+        "tp_frac":       1.00,
+    },
+    "nf_bull_call_spread": {
+        "name":          "NF Bull Call Spread",
+        "direction":     "BULLISH",
+        "signal_match":  ["CALL"],
+        "spread_width":  150,
+        "legs": [
+            ("CE",  0, "BUY",   None, None),
+            ("CE", +3, "SELL",  "p3", None),
+        ],
+        "vix_min":       10.0,
+        "vix_max":       20.0,
+        "entry_debit":   True,
+        "sl_frac":       0.60,
+        "tp_frac":       0.50,
+    },
+    "nf_bear_put_spread": {
+        "name":          "NF Bear Put Spread",
+        "direction":     "BEARISH",
+        "signal_match":  ["PUT"],
+        "spread_width":  150,
+        "legs": [
+            ("PE",  0, "BUY",   None, None),
+            ("PE", -3, "SELL",  None, "m3"),
+        ],
+        "vix_min":       10.0,
+        "vix_max":       20.0,
+        "entry_debit":   True,
+        "sl_frac":       0.60,
+        "tp_frac":       0.50,
+    },
+    "nf_bear_call_credit": {
+        "name":          "NF Bear Call Spread (credit)",
+        "direction":     "FADE_CALL",
+        "signal_match":  ["CALL"],
+        "spread_width":  150,
+        "legs": [
+            ("CE",  0, "SELL",  None, None),
+            ("CE", +3, "BUY",   "p3", None),
+        ],
+        "entry_debit":   False,
+        "sl_frac":       0.50,
+        "tp_frac":       0.65,
+    },
+    "nf_bull_put_credit": {
+        "name":          "NF Bull Put Spread (credit)",
+        "direction":     "FADE_PUT",
+        "signal_match":  ["PUT"],
+        "spread_width":  150,
+        "legs": [
+            ("PE",  0, "SELL",  None, None),
+            ("PE", -3, "BUY",   None, "m3"),
+        ],
+        "entry_debit":   False,
+        "sl_frac":       0.50,
+        "tp_frac":       0.65,
+    },
+    "nf_long_straddle": {
+        "name":          "NF Long Straddle",
+        "direction":     "VOLATILE",
+        "signal_match":  ["CALL", "PUT"],
+        "spread_width":  None,
+        "legs": [
+            ("CE",  0, "BUY",   None,       "straddle"),
+            ("PE",  0, "BUY",   "straddle", None),
+        ],
+        "vix_min":       20.0,
+        "vix_max":       99.0,
+        "entry_debit":   True,
+        "sl_frac":       0.50,
+        "tp_frac":       1.00,
+    },
+    "nf_iron_condor": {
+        "name":          "NF Iron Condor",
+        "direction":     "NEUTRAL",
+        "signal_match":  ["CALL", "PUT"],
+        "spread_width":  150,
+        "legs": [
+            ("CE",  0, "SELL",  None,           "straddle"),
+            ("CE", +3, "BUY",   "p3",           "p3_straddle"),
+            ("PE",  0, "SELL",  "straddle",     None),
+            ("PE", -3, "BUY",   "m3_straddle",  "m3"),
+        ],
+        "entry_debit":   False,
+        "sl_frac":       0.50,
+        "tp_frac":       0.65,
+        "max_lots":      10,
+    },
 }
 
 
 # ── Leg loader ────────────────────────────────────────────────────────────────
 
-def _leg_cache_path(date, signal, opt_type, cache_suffix_call, cache_suffix_put):
+def _leg_cache_path(date, signal, opt_type, cache_suffix_call, cache_suffix_put,
+                    cache_dir=None):
     """
     Resolve cache file path for one leg on a given signal day.
     cache_suffix_call applies on CALL signal days; cache_suffix_put on PUT days.
     Returns None if suffix undefined for this signal (leg doesn't exist that day).
     """
+    if cache_dir is None:
+        cache_dir = INTRADAY_CACHE_DIR
     if signal == "CALL":
         suffix = cache_suffix_call
     else:
@@ -186,8 +337,8 @@ def _leg_cache_path(date, signal, opt_type, cache_suffix_call, cache_suffix_put)
 
     date_str = f"{date:%Y-%m-%d}"
     if suffix is None:
-        return os.path.join(INTRADAY_CACHE_DIR, f"{date_str}_{opt_type}.csv")
-    return os.path.join(INTRADAY_CACHE_DIR, f"{date_str}_{opt_type}_{suffix}.csv")
+        return os.path.join(cache_dir, f"{date_str}_{opt_type}.csv")
+    return os.path.join(cache_dir, f"{date_str}_{opt_type}_{suffix}.csv")
 
 _LEG_BAR_CACHE: dict = {}   # path → DataFrame (or None); persists for process lifetime
 _DATA_CACHE:    dict = {}   # keyed by ("signals", ml) / "bn_ohlcv" / "vix_df"
@@ -242,16 +393,23 @@ def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
 
 def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
                           entry_time="09:30", exit_time="15:15",
-                          lot_size=None, allow_estimate=False, vix_val=None):
+                          lot_size=None, allow_estimate=False, vix_val=None,
+                          cache_dir=None, lot_size_fn=None):
     """
     Simulate one spread trade using real 1-min bars for each leg (or
     delta-scaled estimates when OTM cache missing).
 
+    cache_dir: override default INTRADAY_CACHE_DIR (pass NF_CACHE_DIR for Nifty).
+    lot_size_fn: callable(date) → int; defaults to get_lot_size (BankNifty).
     Returns dict with trade results. On skip: result="SKIPPED".
     """
+    if cache_dir is None:
+        cache_dir = INTRADAY_CACHE_DIR
+    if lot_size_fn is None:
+        lot_size_fn = get_lot_size
     date     = row["date"]
     signal   = str(row.get("signal", "")).upper()
-    ls       = lot_size if lot_size is not None else get_lot_size(date)
+    ls       = lot_size if lot_size is not None else lot_size_fn(date)
     dte      = get_dte(date)
     bn_open  = bn_ohlcv.loc[date, "open"] if date in bn_ohlcv.index else None
 
@@ -289,20 +447,21 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
     n_est     = 0
     leg_specs = strategy["legs"]
 
-    # Load ATM CE (for the day) once — needed as anchor for estimation
-    atm_ce_path = os.path.join(INTRADAY_CACHE_DIR,
+    # Load ATM CE/PE once — needed as anchor for delta-scaled estimation fallback
+    atm_ce_path = os.path.join(cache_dir,
                                f"{date:%Y-%m-%d}_CE.csv") if signal == "CALL" \
-                  else os.path.join(INTRADAY_CACHE_DIR,
+                  else os.path.join(cache_dir,
                                     f"{date:%Y-%m-%d}_CE_straddle.csv")
-    atm_pe_path = os.path.join(INTRADAY_CACHE_DIR,
+    atm_pe_path = os.path.join(cache_dir,
                                f"{date:%Y-%m-%d}_PE.csv") if signal == "PUT" \
-                  else os.path.join(INTRADAY_CACHE_DIR,
+                  else os.path.join(cache_dir,
                                     f"{date:%Y-%m-%d}_PE_straddle.csv")
     atm_ce_bars = _load_leg_bars(atm_ce_path)
     atm_pe_bars = _load_leg_bars(atm_pe_path)
 
     for opt_type, offset, action, suffix_call, suffix_put in leg_specs:
-        path = _leg_cache_path(date, signal, opt_type, suffix_call, suffix_put)
+        path = _leg_cache_path(date, signal, opt_type, suffix_call, suffix_put,
+                               cache_dir=cache_dir)
         bars = _load_leg_bars(path)
 
         if bars is not None:
@@ -484,19 +643,36 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
 
 def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                         entry_time="09:30", exit_time="15:15",
-                        allow_estimate=False, max_dte=None):
+                        allow_estimate=False, max_dte=None, instrument="BNF"):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
+    instrument: "BNF" (default) or "NF" (Nifty50 weekly options).
     adaptive=True ignores strategy_key and dispatches each day to the
     strategy matching its signal + VIX regime.
     """
+    # ── Instrument dispatch ────────────────────────────────────────────────────
+    if instrument == "NF":
+        all_strategies  = NIFTY_STRATEGIES
+        inst_cache_dir  = NF_CACHE_DIR
+        inst_lot_fn     = get_nifty_lot_size
+        ohlcv_key       = "nf_ohlcv"
+        ohlcv_loader    = load_nifty_ohlcv
+        route_fn        = _route_nifty_strategy
+    else:
+        all_strategies  = STRATEGIES
+        inst_cache_dir  = INTRADAY_CACHE_DIR
+        inst_lot_fn     = get_lot_size
+        ohlcv_key       = "bn_ohlcv"
+        ohlcv_loader    = load_bn_ohlcv
+        route_fn        = _route_strategy
+
     if ("signals", ml) not in _DATA_CACHE:
         _DATA_CACHE[("signals", ml)] = load_signals(ml=ml)
     signals = _DATA_CACHE[("signals", ml)]
-    if "bn_ohlcv" not in _DATA_CACHE:
-        _DATA_CACHE["bn_ohlcv"] = load_bn_ohlcv()
-    bn_ohlcv = _DATA_CACHE["bn_ohlcv"]
+    if ohlcv_key not in _DATA_CACHE:
+        _DATA_CACHE[ohlcv_key] = ohlcv_loader()
+    ohlcv = _DATA_CACHE[ohlcv_key]
 
     vix_path = f"{DATA_DIR}/india_vix.csv"
     if "vix_df" not in _DATA_CACHE:
@@ -526,11 +702,11 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
 
         # Fast path: skip signal mismatches WITHOUT simulate call
         if not adaptive:
-            strategy = STRATEGIES[strategy_key]
+            strategy = all_strategies[strategy_key]
             if sig not in strategy["signal_match"]:
                 continue
         else:
-            strategy = _route_strategy(sig, vix_val)
+            strategy = route_fn(sig, vix_val)
             if strategy is None:
                 continue
 
@@ -540,12 +716,13 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             strat_use = {**strategy, "dte_max": max_dte}
 
         trade = simulate_spread_trade(
-            row, bn_ohlcv, capital, strat_use,
+            row, ohlcv, capital, strat_use,
             entry_time=entry_time, exit_time=exit_time,
             allow_estimate=allow_estimate, vix_val=vix_val,
+            cache_dir=inst_cache_dir, lot_size_fn=inst_lot_fn,
         )
-        trade["ml_conf"]      = round(float(row.get("ml_conf", 0.5)), 4)
-        trade["vix_at_entry"] = round(vix_val, 2)
+        trade["ml_conf"]        = round(float(row.get("ml_conf", 0.5)), 4)
+        trade["vix_at_entry"]   = round(vix_val, 2)
         trade["capital_before"] = round(capital, 2)
         capital += trade["pnl"]
         trade["capital_after"]  = round(capital, 2)
@@ -577,6 +754,21 @@ def _route_strategy(signal, vix_val):
         return STRATEGIES["long_straddle"]
     # Sweet spot [12, 22): Iron Condor preferred
     return STRATEGIES["iron_condor"]
+
+
+def _route_nifty_strategy(signal, vix_val):
+    """
+    Adaptive regime router for Nifty50 (always weekly — no DTE filter needed).
+    Same VIX regime logic as BNF router but dispatches to NIFTY_STRATEGIES.
+    """
+    sig = str(signal).upper()
+    if sig not in ("CALL", "PUT"):
+        return None
+    if vix_val < 12.0:
+        return None
+    if vix_val >= 22.0:
+        return NIFTY_STRATEGIES["nf_long_straddle"]
+    return NIFTY_STRATEGIES["nf_iron_condor"]
 
 
 # ── Summary printer ───────────────────────────────────────────────────────────
@@ -651,11 +843,12 @@ def print_spread_summary(trade_df, strategy_name):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--strategy",
-                    choices=list(STRATEGIES.keys()) + ["all", "credit", "debit"],
-                    default="all",
-                    help="Strategy to backtest. 'credit'=credit spreads only, "
-                         "'debit'=debit spreads only, 'all'=all (default)")
+    ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
+                    help="BNF=BankNifty (default), NF=Nifty50 weekly options")
+    ap.add_argument("--strategy", default="all",
+                    help="Strategy key, or: all / credit / debit / naked. "
+                         "BNF keys: " + ", ".join(STRATEGIES.keys()) + ". "
+                         "NF keys: " + ", ".join(NIFTY_STRATEGIES.keys()) + ".")
     ap.add_argument("--ml", action="store_true",
                     help="Use signals_ml.csv instead of signals.csv")
     ap.add_argument("--adaptive", action="store_true",
@@ -673,7 +866,13 @@ def main():
                          "conditions with monthly contracts (last week before expiry).")
     args = ap.parse_args()
 
-    print(f"\nSpread backtest  |  signals={'ML' if args.ml else 'rule'}  "
+    inst = args.instrument
+    all_strategies = NIFTY_STRATEGIES if inst == "NF" else STRATEGIES
+    fetch_cmd = (f"python3 fetch_intraday_options.py --instrument {inst} "
+                 f"--spreads --start 2021-08-01")
+
+    print(f"\nSpread backtest  |  instrument={inst}  "
+          f"|  signals={'ML' if args.ml else 'rule'}  "
           f"|  entry={args.entry}  exit={args.exit}")
 
     if args.allow_estimate:
@@ -688,29 +887,41 @@ def main():
         df = run_spread_backtest(None, ml=args.ml, adaptive=True,
                                  entry_time=args.entry, exit_time=args.exit,
                                  allow_estimate=args.allow_estimate,
-                                 max_dte=args.max_dte)
-        print_spread_summary(df, "Adaptive (regime router)")
+                                 max_dte=args.max_dte, instrument=inst)
+        label = f"Adaptive ({inst} regime router)"
+        print_spread_summary(df, label)
         if args.save:
             df.to_csv(args.save, index=False)
             print(f"  Trade log: {args.save}")
         return
 
-    DEBIT_KEYS  = [k for k, v in STRATEGIES.items() if v.get("entry_debit", True)]
-    CREDIT_KEYS = [k for k, v in STRATEGIES.items() if not v.get("entry_debit", True)]
-    if args.strategy == "all":
-        strategies = list(STRATEGIES.keys())
-    elif args.strategy == "credit":
+    DEBIT_KEYS  = [k for k, v in all_strategies.items() if v.get("entry_debit", True)]
+    CREDIT_KEYS = [k for k, v in all_strategies.items() if not v.get("entry_debit", True)]
+    NAKED_KEYS  = [k for k, v in all_strategies.items()
+                   if v.get("entry_debit", True) and len(v["legs"]) == 1]
+
+    strat_arg = args.strategy
+    if strat_arg == "all":
+        strategies = list(all_strategies.keys())
+    elif strat_arg == "credit":
         strategies = CREDIT_KEYS
-    elif args.strategy == "debit":
+    elif strat_arg == "debit":
         strategies = DEBIT_KEYS
+    elif strat_arg == "naked":
+        strategies = NAKED_KEYS
     else:
-        strategies = [args.strategy]
+        if strat_arg not in all_strategies:
+            print(f"Unknown strategy '{strat_arg}' for instrument {inst}.")
+            print(f"Valid keys: {', '.join(all_strategies.keys())}")
+            sys.exit(1)
+        strategies = [strat_arg]
+
     for key in strategies:
         df = run_spread_backtest(key, ml=args.ml,
                                  entry_time=args.entry, exit_time=args.exit,
                                  allow_estimate=args.allow_estimate,
-                                 max_dte=args.max_dte)
-        print_spread_summary(df, STRATEGIES[key]["name"])
+                                 max_dte=args.max_dte, instrument=inst)
+        print_spread_summary(df, all_strategies[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)
             print(f"  Trade log: {args.save}")

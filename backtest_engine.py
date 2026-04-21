@@ -104,6 +104,33 @@ def get_lot_size(d):
     return _baseline_lot_size(d)
 
 
+# ── Nifty50 support ───────────────────────────────────────────────────────────
+NIFTY_CACHE_DIR  = "data/nifty_options_cache"
+_NF_LOT_65_FROM  = _date(2026, 1, 6)    # first weekly with new 65-unit lot
+
+
+def get_nifty_lot_size(d):
+    """Nifty50 lot size: 75 before Jan 6 2026, 65 from that date on."""
+    if isinstance(d, pd.Timestamp):
+        d = d.date()
+    return 65 if d >= _NF_LOT_65_FROM else 75
+
+
+def load_nifty_ohlcv():
+    """
+    Load Nifty50 daily data from data/nifty50.csv.
+    Only close is available (fetched by data_fetcher.py). 'open' is proxied
+    from close — used as metadata only; P&L comes from real 1-min cache.
+    """
+    path = f"{DATA_DIR}/nifty50.csv"
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["open", "high", "low", "close"])
+    df = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+    if "open" not in df.columns and "close" in df.columns:
+        df["open"] = df["close"]   # proxy: close used for open (metadata only)
+    return df
+
+
 def last_wednesday(year, month):
     """Last Wednesday of the given year/month."""
     last_day = _cal.monthrange(year, month)[1]
