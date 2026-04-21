@@ -1943,9 +1943,9 @@ def main():
             f"BUY   <code>{long_sym}</code>  @ ₹{long_ltp:.0f}\n"
             f"Net credit ₹{net_credit:.0f}  ·  {lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SL when spread > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  — exit BOTH legs manually\n"
-            f"TP when spread < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  — exit BOTH legs manually\n"
-            f"<i>Monitor spread value on Dhan app. No automated SL/TP on spreads yet.</i>"
+            f"SL   spread > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  (auto-exit: spread_monitor.py)\n"
+            f"TP   spread < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  (65% of credit locked in)\n"
+            f"<i>spread_monitor.py watches every 1 min — both legs close automatically on SL/TP hit.</i>"
         )
 
         if buy_oid:

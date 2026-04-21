@@ -437,7 +437,7 @@ def _check_position_open(security_id: str) -> bool:
         data  = r.json()
         items = data if isinstance(data, list) else data.get("data", [])
         for p in items:
-            if (int(p.get("netQty", 0)) > 0
+            if (int(p.get("netQty", 0)) != 0
                     and p.get("exchangeSegment", "") == "NSE_FNO"
                     and "BANKNIFTY" in str(
                         p.get("tradingSymbol", p.get("securityId", ""))).upper()):
@@ -535,6 +535,176 @@ def main():
         return
 
     direction   = trade.get("signal", "CALL")
+    is_spread   = trade.get("strategy") in ("bear_call_credit", "bull_put_credit")
+    opt_type    = "CE" if direction == "CALL" else "PE"
+    icon        = "📈" if direction == "CALL" else "📉"
+    now_str     = datetime.now(IST).strftime("%I:%M %p IST")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CREDIT SPREAD PATH
+    # ══════════════════════════════════════════════════════════════════════════
+    if is_spread:
+        strategy      = trade["strategy"]
+        strategy_name = ("Bear Call Spread" if strategy == "bear_call_credit"
+                         else "Bull Put Spread")
+        short_sid     = str(trade.get("short_sid", ""))
+        long_sid      = str(trade.get("long_sid", ""))
+        short_strike  = float(trade.get("short_strike", 0))
+        long_strike   = float(trade.get("long_strike", 0))
+        net_credit    = float(trade.get("net_credit", 0))
+        lots          = int(trade.get("lots", 1))
+        lot_size      = int(trade.get("lot_size", 30))
+        dte           = int(trade.get("dte", 0))
+        paper         = trade.get("order_mode") == "PAPER"
+        mode_tag      = "[PAPER] " if paper else ""
+
+        _log(f"Spread: {strategy_name}  SELL {int(short_strike)} / BUY {int(long_strike)}  credit ₹{net_credit:.0f}")
+
+        # Position check — spread has short leg (netQty<0) + long leg (netQty>0)
+        pos_open = _check_position_open(short_sid or long_sid)
+        if not pos_open:
+            _log("No open spread positions — both legs already closed.")
+            _write_midday_checkpoint({
+                "signal": direction, "conviction_score": 0,
+                "verdict": "closed", "reversal_detected": False,
+            })
+            if trade.get("exit_done"):
+                _log("exit_done=True — spread_monitor already sent exit alert. No duplicate.")
+            else:
+                closed_msg = (
+                    f"ℹ️  <b>Midday check  ·  {now_str}</b>\n\n"
+                    f"Your {strategy_name} is already closed.\n"
+                    f"<i>Journal runs at 3:30 PM with final P&amp;L.</i>"
+                )
+                if DRY_RUN:
+                    import re
+                    print("\n── Telegram preview (spread closed) ──────")
+                    print(re.sub(r"<[^>]+>", "", closed_msg))
+                else:
+                    notify.send(closed_msg)
+                    _log("Spread-closed message sent.")
+            return
+
+        # Fetch LTP for both legs
+        short_ltp = _get_ltp_from_marketfeed(short_sid) if short_sid else None
+        long_ltp  = _get_ltp_from_marketfeed(long_sid)  if long_sid  else None
+        macro     = get_macro()
+
+        # Spread P&L and SL/TP proximity
+        sl_trigger = net_credit * 1.5    # CREDIT_SL_FRAC = 0.5
+        tp_trigger = net_credit * 0.35   # CREDIT_TP_FRAC = 0.65
+
+        if short_ltp and long_ltp and net_credit > 0:
+            current_cost  = short_ltp - long_ltp
+            pnl_per_share = net_credit - current_cost
+            pnl_inr       = round(pnl_per_share * lots * lot_size, 0)
+            pnl_pct       = pnl_per_share / net_credit * 100
+
+            sl_room_pct = (sl_trigger - current_cost) / net_credit * 100
+            tp_room_pct = (current_cost - tp_trigger) / net_credit * 100
+            pnl_icon    = "💰" if pnl_inr >= 0 else "📉"
+            pnl_sign    = "+" if pnl_inr >= 0 else ""
+
+            spread_line = (
+                f"{pnl_icon} Spread: ₹{net_credit:.0f} credit → ₹{current_cost:.0f} cost now  "
+                f"(P&amp;L {pnl_sign}₹{pnl_inr:,.0f}  /  {pnl_sign}{pnl_pct:.0f}% of credit)"
+            )
+            legs_line = (f"📍 Short @ ₹{short_ltp:.0f}  ·  Long @ ₹{long_ltp:.0f}")
+            sl_line   = (f"🛡️ SL at ₹{sl_trigger:.0f}"
+                         + (f"  ({sl_room_pct:.0f}% headroom left)"
+                            if sl_room_pct > 0 else "  ⚠️ very close to SL!"))
+            tp_line   = (f"🎯 TP at ₹{tp_trigger:.0f}"
+                         + (f"  ({tp_room_pct:.0f}% to go)"
+                            if tp_room_pct > 0 else "  ✅ past TP trigger!"))
+
+            if current_cost <= tp_trigger:
+                verdict_line = "✅ <b>At or past target — spread at max profit zone.</b>"
+                verdict_sub  = "spread_monitor.py will trigger TP exit automatically."
+                conv_score   = 2
+            elif pnl_pct >= 30:
+                verdict_line = "✅ <b>Going well — collecting credit as planned.</b>"
+                verdict_sub  = "Nothing to worry about."
+                conv_score   = 1
+            elif pnl_pct >= -10:
+                verdict_line = "🟡 <b>Roughly breakeven — spread staying in range.</b>"
+                verdict_sub  = "Normal. Keep watching."
+                conv_score   = 0
+            elif current_cost >= sl_trigger * 0.85:
+                verdict_line = "🔴 <b>Approaching SL — spread moving against us.</b>"
+                verdict_sub  = "spread_monitor.py exits both legs automatically if SL hits."
+                conv_score   = -2
+            else:
+                verdict_line = "🟠 <b>Slightly against us — not at SL yet.</b>"
+                verdict_sub  = "Stop-loss is your safety net. System handles it."
+                conv_score   = -1
+        else:
+            current_cost = 0
+            pnl_inr      = 0
+            conv_score   = 0
+            spread_line  = f"Spread LTP unavailable  (entry credit was ₹{net_credit:.0f})"
+            legs_line    = ""
+            sl_line      = f"🛡️ SL triggers at ₹{sl_trigger:.0f}"
+            tp_line      = f"🎯 TP triggers at ₹{tp_trigger:.0f}"
+            verdict_line = "⬜ <b>Cannot check — option prices unavailable.</b>"
+            verdict_sub  = "Check Dhan app manually."
+
+        # Macro
+        macro_parts = []
+        if "sp500f_chg_pct" in macro:
+            v = macro["sp500f_chg_pct"]
+            macro_parts.append(f"S&P {'up' if v >= 0 else 'down'} {abs(v):.1f}%")
+        if "dxy_chg_pct" in macro:
+            v = macro["dxy_chg_pct"]
+            macro_parts.append(f"dollar {'stronger' if v >= 0 else 'weaker'} {abs(v):.2f}%")
+        if "vix_now" in macro:
+            macro_parts.append(f"fear index {macro['vix_now']:.1f}")
+        if "crude_chg_pct" in macro:
+            v = macro["crude_chg_pct"]
+            macro_parts.append(f"crude {'up' if v >= 0 else 'down'} {abs(v):.1f}%")
+        macro_str = "  ·  ".join(macro_parts) if macro_parts else "unavailable"
+
+        _write_midday_checkpoint({
+            "signal":            direction,
+            "conviction_score":  conv_score,
+            "verdict":           "hold" if conv_score >= 0 else "reversal",
+            "reversal_detected": conv_score < 0,
+            "sp500f_chg_pct":    round(macro.get("sp500f_chg_pct", 0), 3),
+            "dxy_chg_pct":       round(macro.get("dxy_chg_pct", 0), 3),
+            "vix_now":           round(macro.get("vix_now", 0), 2),
+            "vix_chg":           round(macro.get("vix_chg", 0), 2),
+            "crude_chg_pct":     (round(macro["crude_chg_pct"], 3)
+                                  if "crude_chg_pct" in macro else ""),
+            "reason_codes":      [],
+        })
+
+        msg = (
+            f"{icon}  <b>{mode_tag}Midday check  ·  {now_str}</b>\n\n"
+            f"<b>{strategy_name}  ·  SELL {int(short_strike)} {opt_type} / BUY {int(long_strike)} {opt_type}"
+            f"  ·  {lots} lot  ·  {dte}d to expiry</b>\n\n"
+            f"{spread_line}\n"
+            + (f"{legs_line}\n" if legs_line else "")
+            + f"{sl_line}\n"
+            f"{tp_line}\n\n"
+            f"🌍 <b>Global:</b>  {macro_str}\n\n"
+            f"{verdict_line}\n"
+            f"<i>{verdict_sub}</i>"
+        )
+
+        _log(f"Spread conviction {conv_score:+d}  |  current_cost=₹{current_cost:.0f}")
+
+        if DRY_RUN:
+            import re
+            print("\n── Telegram preview (spread) ─────────────────────")
+            print(re.sub(r"<[^>]+>", "", msg))
+            print("──────────────────────────────────────────────────")
+            return
+        notify.send(msg)
+        _log("Spread midday message sent to Telegram.")
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # NAKED OPTION PATH (existing logic)
+    # ══════════════════════════════════════════════════════════════════════════
     strike      = int(trade.get("strike", 0))
     lots        = int(trade.get("lots", 1))
     entry_prem  = float(trade.get("oracle_premium", 0))
@@ -543,9 +713,6 @@ def main():
     dte         = int(trade.get("dte", 0))
     security_id = str(trade.get("security_id", ""))
     entry_spot  = float(trade.get("spot_at_signal", 0))
-    opt_type    = "CE" if direction == "CALL" else "PE"
-    icon        = "📈" if direction == "CALL" else "📉"
-    now_str     = datetime.now(IST).strftime("%I:%M %p IST")
 
     _log(f"Trade: {direction} {strike}  entry ₹{entry_prem:.0f}  SL ₹{sl_price:.0f}  TP ₹{tp_price:.0f}")
 

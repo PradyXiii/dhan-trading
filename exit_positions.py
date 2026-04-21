@@ -141,10 +141,57 @@ def _classify_exit(exit_price: float, sl_price: float, tp_price: float) -> str:
 
 def _send_exit_telegram(today_trade: dict, sells: list):
     """
-    Build and send exit Telegram notification matching the entry alert format.
-    Called when position is already closed (intraday SL/TP) OR after EOD squareoff.
-    `sells` is a list of SELL fill dicts from the tradebook.
+    Build and send exit Telegram notification.
+    Called when position is already closed (intraday SL/TP fired) OR after EOD squareoff.
+    Handles both credit spread and naked option schemas.
     """
+    strategy = today_trade.get("strategy", "")
+    today_label = date.today().strftime("%d %b %Y")
+
+    # ── Credit spread path ────────────────────────────────────────────────────
+    if strategy in ("bear_call_credit", "bull_put_credit"):
+        if today_trade.get("exit_done"):
+            # spread_monitor.py already sent the exit Telegram — no duplicate
+            notify.log("Spread exit already handled by spread_monitor.py — skipping duplicate.")
+            return
+        # Spread closed by EOD squareoff (spread_monitor didn't trigger)
+        strategy_name = ("Bear Call Spread" if strategy == "bear_call_credit"
+                         else "Bull Put Spread")
+        short_strike = float(today_trade.get("short_strike", 0))
+        long_strike  = float(today_trade.get("long_strike", 0))
+        net_credit   = float(today_trade.get("net_credit", 0))
+        lots         = int(today_trade.get("lots", 0))
+        lot_size     = int(today_trade.get("lot_size", 30))
+        pnl_inr      = float(today_trade.get("pnl_inr", 0))
+        exit_spread  = float(today_trade.get("exit_spread", 0))
+        exit_time    = today_trade.get("exit_time", "")
+        paper        = today_trade.get("order_mode") == "PAPER"
+        mode_tag     = "[PAPER] " if paper else ""
+        pnl_sign     = "+" if pnl_inr >= 0 else ""
+        opt_type     = "CE" if today_trade.get("signal") == "CALL" else "PE"
+        lines = [
+            f"⏹  <b>{mode_tag}Spread Closed  ·  {today_label}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"Strategy    {strategy_name}",
+            f"Legs        SELL {int(short_strike)} {opt_type} / BUY {int(long_strike)} {opt_type}",
+            f"Lots        {lots}  ·  {lots * lot_size} shares",
+            "",
+            f"Entry credit  ₹{net_credit:.0f} / share",
+        ]
+        if exit_spread > 0:
+            lines.append(f"Exit cost    ₹{exit_spread:.0f} / share")
+        if exit_time:
+            lines.append(f"Exit time    {exit_time} IST")
+        lines += [
+            "",
+            f"<b>P&amp;L  {pnl_sign}₹{pnl_inr:,.0f}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "<i>Both legs squared off at 3:15 PM — no SL/TP triggered during session.</i>",
+        ]
+        notify.send("\n".join(lines))
+        return
+
+    # ── Naked option path ─────────────────────────────────────────────────────
     signal   = today_trade.get("signal", "?")
     strike   = today_trade.get("strike", 0)
     lots     = today_trade.get("lots", 0)
@@ -175,7 +222,7 @@ def _send_exit_telegram(today_trade: dict, sells: list):
     sign_pct = "+" if pnl_pct >= 0 else ""
 
     lines = [
-        f"📤 <b>Trade Closed  ·  {date.today().strftime('%d %b %Y')}</b>",
+        f"📤 <b>Trade Closed  ·  {today_label}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"Signal      {signal}  ·  {strike:.0f} strike",
         f"Expiry      {expiry}",
@@ -338,15 +385,27 @@ def main():
         "",
     ]
     if today_trade:
-        lines.append(
-            f"Signal      {today_trade.get('signal','?')}  ·  "
-            f"{today_trade.get('strike',0):.0f} strike  ·  "
-            f"expiry {today_trade.get('expiry','?')}"
-        )
-        lines.append(
-            f"SL / TP     ₹{today_trade.get('sl_price',0):.2f} / "
-            f"₹{today_trade.get('tp_price',0):.2f}"
-        )
+        td_strategy = today_trade.get("strategy", "")
+        if td_strategy in ("bear_call_credit", "bull_put_credit"):
+            td_name = ("Bear Call Spread" if td_strategy == "bear_call_credit"
+                       else "Bull Put Spread")
+            td_opt  = "CE" if today_trade.get("signal") == "CALL" else "PE"
+            lines.append(f"Strategy    {td_name}")
+            lines.append(
+                f"Legs        SELL {int(today_trade.get('short_strike', 0))} {td_opt} / "
+                f"BUY {int(today_trade.get('long_strike', 0))} {td_opt}"
+            )
+            lines.append(f"Entry credit  ₹{float(today_trade.get('net_credit', 0)):.0f} / share")
+        else:
+            lines.append(
+                f"Signal      {today_trade.get('signal','?')}  ·  "
+                f"{today_trade.get('strike',0):.0f} strike  ·  "
+                f"expiry {today_trade.get('expiry','?')}"
+            )
+            lines.append(
+                f"SL / TP     ₹{today_trade.get('sl_price',0):.2f} / "
+                f"₹{today_trade.get('tp_price',0):.2f}"
+            )
         lines.append("")
 
     for r in results:
