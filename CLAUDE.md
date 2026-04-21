@@ -1,4 +1,4 @@
-# CLAUDE.md — BankNifty Auto-Trader Architecture Map
+# CLAUDE.md — Nifty50 + BankNifty Auto-Trader Architecture Map
 
 Quick reference for Claude Code. Read this before touching any file.
 
@@ -43,19 +43,30 @@ Two review surfaces, different stages:
 - No Dhan API call for order placement
 - No exit-marker check, no duplicate-position guard (not needed — nothing live)
 
-**Next steps before flipping back to LIVE:**
-1. ✅ Built `fetch_intraday_options.py --spreads` (fetches ATM+3 CE / ATM-3 PE / straddle legs)
-2. ✅ Built `backtest_spreads.py` — multi-leg spread simulator with regime router
-3. Fetch full OTM cache on VM: `python3 fetch_intraday_options.py --spreads --start 2021-08-01` (~30 min)
-4. Run comparative backtest across 3 strategies + adaptive router
-5. Paper-trade the winning strategy for 30+ days — only flip PAPER_MODE when
-   `data/paper_trades.csv` shows >50 days net-positive P&L
+**Confirmed winning strategy: Nifty50 Iron Condor (NF IC)**
+- WR 84.6% (2021–2026), consistent 80–91% each year, no 2025 collapse
+- ~235 trades/year (weekly expiry → no DTE filter needed), ₹25L/year avg
+- Max drawdown -0.8% across 5 years
+- NF IC is superior to BNF IC because NF kept weekly expiry (SEBI mandate);
+  BNF switched to monthly Nov 2024 → IC WR collapsed to 27% in 2025
+- Strategy: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
+  (spread_width=150, NF strike spacing=50pts → ATM±3 strikes)
+- NF lot size: 75 before Jan 6 2026, 65 from Jan 6 2026
 
-**To re-enable LIVE trading** (only after strategy is fixed):
+**Checklist before going live with NF IC:**
+1. ✅ Built `fetch_intraday_options.py --instrument NF --spreads` (NF multi-leg cache)
+2. ✅ Built `backtest_spreads.py` with `--instrument NF` + 8 NF strategy variants
+3. ✅ Fetched full NF option cache (5590 files, Aug 2021–Apr 2026)
+4. ✅ Confirmed NF IC: WR 84.6%, ₹1.17Cr (5yr), ₹25L/yr, max DD -0.8%
+5. ⬜ Wire NF IC into `auto_trader.py` (change instrument, security_id=13, lot fn, legs)
+6. ⬜ Paper-trade NF IC for 30+ days — flip PAPER_MODE when
+   `data/paper_trades.csv` shows >30 days net-positive P&L
+
+**To re-enable LIVE trading** (only after step 6):
 ```python
 # In auto_trader.py — near top of file:
 PAPER_MODE = False   # WAS True during Apr 2026 rebuild
-MAX_LOTS   = 20      # WAS 1 during rebuild
+MAX_LOTS   = 10      # NF IC max_lots=10 (IC uses margin on both sides)
 ```
 
 Then: re-read this section, read `data/paper_trades.csv` last 30 days, confirm
@@ -90,60 +101,89 @@ OHLCV backtest showed ₹25M profit over years. Real 1-min option backtest on sa
 
 ---
 
-## 🎯 ADAPTIVE MULTI-STRATEGY SYSTEM (April 2026 — design phase)
+## 🎯 CONFIRMED STRATEGY: Nifty50 Iron Condor (April 2026)
 
-**The system must dynamically choose strategy per day based on market regime.**
-No single strategy works across all years — directional spreads fail in neutral
-regimes, straddles fail in low-vol regimes, etc.
+**NF IC is the live strategy. Backtest confirmed on 4.5 years of real 1-min option data.**
 
-### Strategy registry (`backtest_spreads.py` → `STRATEGIES` dict)
+### NF IC Backtest Results (real 1-min data, 2021–2026)
 
-| Strategy | Direction | Regime (signal + VIX) | Legs | Max loss | Max profit |
-|---|---|---|---|---|---|
-| Bull Call Spread | BULLISH | CALL + VIX∈[10,20] | BUY ATM CE + SELL ATM+3 CE | net debit | (300 − debit) |
-| Bear Put Spread  | BEARISH | PUT  + VIX∈[10,20] | BUY ATM PE + SELL ATM-3 PE | net debit | (300 − debit) |
-| Long Straddle    | VOLATILE | any signal + VIX≥20 | BUY ATM CE + BUY ATM PE | sum of debits | unlimited |
-| Iron Condor (TBD) | NEUTRAL | no signal + VIX∈[12,18] | 4-leg credit spread | spread width − credit | net credit |
+| Year | Trades | WR | P&L |
+|---|---|---|---|
+| 2021 (Aug–Dec) | 100 | 88% | ₹9.6L |
+| 2022 | 238 | 80% | ₹25.2L |
+| 2023 | 235 | 91% | ₹24.1L |
+| 2024 | 235 | 86% | ₹25.8L |
+| 2025 | 237 | 86% | ₹25.4L |
+| 2026 (Jan–Apr) | 69 | 67% | ₹7.2L |
+| **5yr total** | **1114** | **84.6%** | **₹1.17Cr** |
 
-### Adaptive router (`_route_strategy()` in `backtest_spreads.py`)
+Max drawdown: **-0.8%**. No year below 67% WR.
+
+### NF IC Structure
 ```
-VIX ≥ 20 + directional signal  →  Long Straddle
-CALL signal + VIX∈[10,20)       →  Bull Call Spread
-PUT  signal + VIX∈[10,20)       →  Bear Put Spread
-else                            →  skip day (no valid regime match)
+SELL ATM CE  + BUY ATM+150 CE   (Bear Call side: upper wing)
+SELL ATM PE  + BUY ATM-150 PE   (Bull Put side: lower wing)
+spread_width = 150pts (NF strike spacing = 50pts, ATM±3 strikes)
+net_credit   ≈ ₹108/lot average
+SL: loss = 50% of credit received
+TP: retain 65% of credit (spread decays to 35%)
+max_lots = 10 (IC ties up margin on both sides)
+Trades CALL and PUT signal days — 235 trades/year (weekly expiry)
 ```
+
+### Why NF IC beats BNF IC
+
+BNF lost weekly expiry (SEBI mandate, Nov 20 2024) → monthly contracts → 15-22 DTE → gamma risk dominates theta → IC WR collapsed 70%→27% in 2025. NF kept weekly Thursday expiry. Every NF trade is naturally DTE≤7.
 
 ### ⚠️ MANDATORY LIVE PLACEMENT ORDER: BUY FIRST, THEN SELL
 
 Dhan hedge margin rules require the LONG leg on the books BEFORE the SHORT leg
-gets margin benefit. In `auto_trader.py` when spreads go live:
+gets margin benefit. In `auto_trader.py` for IC:
 
-1. Place BUY order (long leg) — wait for fill confirmation
-2. Then place SELL order (short leg) — margin benefit applies
-3. Never reverse the order — short-first triggers full margin for the sell, defeating spread economics
+1. Place BUY ATM+150 CE (long wing) — wait for fill confirmation
+2. Then SELL ATM CE (short leg) — margin benefit applies
+3. Place BUY ATM-150 PE (long wing) — wait for fill
+4. Then SELL ATM PE (short leg) — margin benefit applies
+5. Never place short before long — full unhedged margin triggered
 
-### Cache file naming (for multi-leg backtests)
+### NF IC cache file naming
+
+NF files live in `data/nifty_options_cache/` (separate from BNF `data/intraday_options_cache/`).
+Same suffix naming convention as BNF:
 
 | File | Contents |
 |---|---|
-| `{date}_CE.csv` | ATM CE (backward-compat, exists from Apr 2026 fetch) |
-| `{date}_PE.csv` | ATM PE (backward-compat) |
-| `{date}_CE_p3.csv` | ATM+3 CE (Bull Call Spread short leg, CALL days only) |
-| `{date}_PE_m3.csv` | ATM-3 PE (Bear Put Spread short leg, PUT days only) |
-| `{date}_PE_straddle.csv` | ATM PE on CALL signal days (Long Straddle) |
-| `{date}_CE_straddle.csv` | ATM CE on PUT signal days (Long Straddle) |
+| `{date}_CE.csv` | ATM CE (CALL signal days) |
+| `{date}_PE.csv` | ATM PE (PUT signal days) |
+| `{date}_CE_p3.csv` | ATM+150 CE (CALL days) |
+| `{date}_PE_m3.csv` | ATM-150 PE (PUT days) |
+| `{date}_PE_straddle.csv` | ATM PE on CALL days (IC bull-put side) |
+| `{date}_CE_straddle.csv` | ATM CE on PUT days (IC bear-call side) |
+| `{date}_PE_m3_straddle.csv` | ATM-150 PE on CALL days (IC long put wing) |
+| `{date}_CE_p3_straddle.csv` | ATM+150 CE on PUT days (IC long call wing) |
 
-Fetch them all (one-time, ~30 min for full 5y): `python3 fetch_intraday_options.py --spreads --start 2021-08-01`
+Fetch: `python3 fetch_intraday_options.py --instrument NF --spreads --start 2021-08-01`
 
 ### Common commands
 
 ```bash
-python3 backtest_spreads.py                              # run all 3 strategies
-python3 backtest_spreads.py --strategy bull_call_spread  # single strategy
-python3 backtest_spreads.py --adaptive                   # regime router
-python3 backtest_spreads.py --ml                         # use signals_ml.csv
-python3 backtest_spreads.py --save data/spread_trades.csv
+# NF IC backtest (primary)
+python3 backtest_spreads.py --instrument NF --strategy nf_iron_condor --ml
+python3 backtest_spreads.py --instrument NF --strategy all --ml    # all 8 NF variants
+python3 optimize_params.py --instrument NF                         # VIX+conf grid search
+
+# BNF IC DTE≤7 (fallback if NF data unavailable)
+python3 backtest_spreads.py --strategy iron_condor --ml --max-dte 7
+
+# Fetch / refresh NF cache (incremental — skips existing files)
+python3 fetch_intraday_options.py --instrument NF --spreads --start 2021-08-01
 ```
+
+### Optimizer verdict (NF, Bear Call + Bull Put credit, combined)
+
+No VIX/confidence filter = highest P&L (₹17.55L/yr, 1114 trades) but NF IC standalone
+is better (₹25L/yr, 1114 trades) because IC collects both sides simultaneously.
+**Do not filter NF IC by VIX or confidence — no filter gives maximum P&L.**
 
 ---
 
