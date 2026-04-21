@@ -142,6 +142,32 @@ STRATEGIES = {
         "sl_frac":       0.50,
         "tp_frac":       0.65,
     },
+    # ── Iron Condor: sell premium on BOTH sides simultaneously ────────────────
+    # Collect Bear Call credit + Bull Put credit in one trade.
+    # Profit zone: BN stays between (ATM-300) and (ATM+300) by EOD.
+    # Net credit ≈ 2× single-side credit; max-loss ≈ max(each side's net loss)
+    # because BN can only blow through one side (not both simultaneously).
+    # Requires cache files: CE.csv, CE_p3.csv, PE_straddle.csv, PE_m3_straddle.csv
+    #   on CALL days; CE_straddle.csv, CE_p3_straddle.csv, PE.csv, PE_m3.csv on PUT days.
+    # Fetch: python3 fetch_intraday_options.py --spreads --start 2021-08-01
+    "iron_condor": {
+        "name":          "Iron Condor",
+        "direction":     "NEUTRAL",
+        "signal_match":  ["CALL", "PUT"],
+        "spread_width":  300,
+        "legs": [
+            # Bear Call side (upper wing)
+            ("CE",  0, "SELL",  None,           "straddle"),      # Short ATM CE
+            ("CE", +3, "BUY",   "p3",           "p3_straddle"),   # Long  ATM+3 CE
+            # Bull Put side (lower wing)
+            ("PE",  0, "SELL",  "straddle",     None),            # Short ATM PE
+            ("PE", -3, "BUY",   "m3_straddle",  "m3"),            # Long  ATM-3 PE
+        ],
+        "entry_debit":   False,
+        "sl_frac":       0.50,   # SL when either wing's loss = 50% of total credit
+        "tp_frac":       0.65,   # TP at 65% of total credit captured
+        "max_lots":      10,     # half max_lots — IC ties up margin on both sides
+    },
 }
 
 
@@ -525,19 +551,27 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
 
 def _route_strategy(signal, vix_val):
     """
-    Adaptive router: map (signal, VIX) → strategy.
-    Returns None if no strategy fits (day is skipped).
+    Adaptive regime router v2: credit-first, IC preferred.
+
+    Regime → strategy:
+      VIX < 12              → skip (no premium worth collecting)
+      VIX ∈ [12, 22)        → Iron Condor (collect both sides, wider profit zone)
+                              Falls back to single-side credit if IC cache missing.
+      VIX ≥ 22              → Long Straddle (capture big directional move)
+      no signal (NONE)      → skip
+
+    Previous router used directional debit spreads (Bull Call / Bear Put) —
+    these showed 14.7% WR, -₹7.8L over 5 years. IC-first replaces them.
     """
     sig = str(signal).upper()
-    # High-vol → straddle regardless of direction
-    if vix_val >= 20.0 and sig in ("CALL", "PUT"):
+    if sig not in ("CALL", "PUT"):
+        return None
+    if vix_val < 12.0:
+        return None   # insufficient premium across all strikes
+    if vix_val >= 22.0:
         return STRATEGIES["long_straddle"]
-    # Directional signal + normal vol → directional spread
-    if sig == "CALL" and 10.0 <= vix_val < 20.0:
-        return STRATEGIES["bull_call_spread"]
-    if sig == "PUT" and 10.0 <= vix_val < 20.0:
-        return STRATEGIES["bear_put_spread"]
-    return None
+    # Sweet spot [12, 22): Iron Condor preferred
+    return STRATEGIES["iron_condor"]
 
 
 # ── Summary printer ───────────────────────────────────────────────────────────

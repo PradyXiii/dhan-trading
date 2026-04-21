@@ -70,14 +70,16 @@ WEEKLY_BOUNDARY = datetime(2024, 11, 20).date()   # WEEK → MONTH phase transit
 #   file_suffix:  appended to {date}_{CE|PE}_{suffix}.csv; None = ATM (no suffix)
 SPREAD_LEGS = {
     "CALL": [
-        ("ATM+3", "CALL", "p3"),         # Bull Call Spread short leg
-        ("ATM-3", "CALL", "m3"),         # Bear Call Spread (Iron Condor inner)
-        ("ATM",   "PUT",  "straddle"),   # Straddle second leg
+        ("ATM+3", "CALL", "p3"),            # Bear Call short wing (ATM+3 CE)
+        ("ATM-3", "CALL", "m3"),            # cross-strike
+        ("ATM",   "PUT",  "straddle"),      # Straddle + IC short PE leg
+        ("ATM-3", "PUT",  "m3_straddle"),   # Iron Condor: long PE wing on CALL days
     ],
     "PUT": [
-        ("ATM-3", "PUT",  "m3"),         # Bear Put Spread short leg
-        ("ATM+3", "PUT",  "p3"),         # Bull Put Spread (Iron Condor inner)
-        ("ATM",   "CALL", "straddle"),   # Straddle second leg
+        ("ATM-3", "PUT",  "m3"),            # Bull Put short wing (ATM-3 PE)
+        ("ATM+3", "PUT",  "p3"),            # cross-strike
+        ("ATM",   "CALL", "straddle"),      # Straddle + IC short CE leg
+        ("ATM+3", "CALL", "p3_straddle"),   # Iron Condor: long CE wing on PUT days
     ],
 }
 
