@@ -493,22 +493,17 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
 
         sig = str(row.get("signal", "")).upper()
 
-        # Fast path: skip signal mismatches WITHOUT VIX lookup or simulate call
+        # Always look up VIX — needed for trade metadata and ex-post filtering
+        vix_val = (float(vix_df.loc[date, "close"])
+                   if vix_df is not None and date in vix_df.index
+                   else 15.0)
+
+        # Fast path: skip signal mismatches WITHOUT simulate call
         if not adaptive:
             strategy = STRATEGIES[strategy_key]
             if sig not in strategy["signal_match"]:
                 continue
-            # VIX lookup only if filter is active on this strategy
-            if strategy.get("vix_min") is not None or strategy.get("vix_max") is not None:
-                vix_val = (float(vix_df.loc[date, "close"])
-                           if vix_df is not None and date in vix_df.index
-                           else 15.0)
-            else:
-                vix_val = None
         else:
-            vix_val = (float(vix_df.loc[date, "close"])
-                       if vix_df is not None and date in vix_df.index
-                       else 15.0)
             strategy = _route_strategy(sig, vix_val)
             if strategy is None:
                 continue
@@ -518,6 +513,8 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             entry_time=entry_time, exit_time=exit_time,
             allow_estimate=allow_estimate, vix_val=vix_val,
         )
+        trade["ml_conf"]      = round(float(row.get("ml_conf", 0.5)), 4)
+        trade["vix_at_entry"] = round(vix_val, 2)
         trade["capital_before"] = round(capital, 2)
         capital += trade["pnl"]
         trade["capital_after"]  = round(capital, 2)
