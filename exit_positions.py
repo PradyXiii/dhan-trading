@@ -151,6 +151,44 @@ def _send_exit_telegram(today_trade: dict, sells: list):
     strategy = today_trade.get("strategy", "")
     today_label = date.today().strftime("%d %b %Y")
 
+    # ── NF Iron Condor path ──────────────────────────────────────────────────
+    if strategy == "nf_iron_condor":
+        if today_trade.get("exit_done"):
+            notify.log("IC exit already handled by spread_monitor.py — skipping duplicate.")
+            return
+        net_credit  = float(today_trade.get("net_credit", 0))
+        lots        = int(today_trade.get("lots", 0))
+        lot_size    = int(today_trade.get("lot_size", 65))
+        pnl_inr     = float(today_trade.get("pnl_inr", 0))
+        exit_spread = float(today_trade.get("exit_spread", 0))
+        exit_time   = today_trade.get("exit_time", "")
+        paper       = today_trade.get("order_mode") == "PAPER"
+        mode_tag    = "[PAPER] " if paper else ""
+        pnl_sign    = "+" if pnl_inr >= 0 else ""
+        atm         = int(today_trade.get("atm_strike", 0))
+        sw          = int(today_trade.get("spread_width", 150))
+        lines = [
+            f"⏹  <b>{mode_tag}Nifty IC Closed  ·  {today_label}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"Strategy    Iron Condor",
+            f"Wings       ATM ± {sw}pt  (ATM={atm})",
+            f"Lots        {lots}  ·  {lots * lot_size} shares",
+            "",
+            f"Entry credit  ₹{net_credit:.0f} / share",
+        ]
+        if exit_spread > 0:
+            lines.append(f"Exit cost     ₹{exit_spread:.0f} / share")
+        if exit_time:
+            lines.append(f"Exit time     {exit_time} IST")
+        lines += [
+            "",
+            f"<b>P&amp;L  {pnl_sign}₹{pnl_inr:,.0f}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "<i>All 4 IC legs squared off at 3:15 PM — no SL/TP triggered.</i>",
+        ]
+        notify.send("\n".join(lines))
+        return
+
     # ── Credit spread path ────────────────────────────────────────────────────
     if strategy in ("bear_call_credit", "bull_put_credit"):
         if today_trade.get("exit_done"):
@@ -249,11 +287,11 @@ def _send_exit_telegram(today_trade: dict, sells: list):
     notify.send("\n".join(lines))
 
 
-def get_open_bn_positions():
+def get_open_positions():
     """
-    Return all open BankNifty F&O positions from Dhan (netQty != 0).
-    Includes both long (netQty > 0) AND short (netQty < 0) legs — spread trades
-    have a negative-qty short leg that must ALSO be squared off (BUY to cover).
+    Return all open NSE_FNO positions (netQty != 0) for the active strategy.
+    Reads today_trade.json to determine instrument (NF IC vs BNF).
+    Falls back to fetching ALL NSE_FNO positions if strategy is unknown.
     """
     try:
         resp = requests.get("https://api.dhan.co/v2/positions",
@@ -273,14 +311,28 @@ def get_open_bn_positions():
     data      = resp.json()
     positions = data if isinstance(data, list) else data.get("data", [])
 
-    return [
-        p for p in positions
-        if int(p.get("netQty", 0)) != 0
-        and p.get("exchangeSegment", "") == "NSE_FNO"
-        and "BANKNIFTY" in str(
-            p.get("tradingSymbol", p.get("securityId", ""))
-        ).upper()
-    ]
+    # Determine which instrument to filter for
+    today_trade = _load_today_trade()
+    strategy    = today_trade.get("strategy", "")
+
+    if strategy == "nf_iron_condor":
+        # NF: symbol contains "NIFTY" but NOT "BANKNIFTY"
+        return [
+            p for p in positions
+            if int(p.get("netQty", 0)) != 0
+            and p.get("exchangeSegment", "") == "NSE_FNO"
+            and "NIFTY" in str(p.get("tradingSymbol", "")).upper()
+            and "BANKNIFTY" not in str(p.get("tradingSymbol", "")).upper()
+        ]
+    else:
+        return [
+            p for p in positions
+            if int(p.get("netQty", 0)) != 0
+            and p.get("exchangeSegment", "") == "NSE_FNO"
+            and "BANKNIFTY" in str(
+                p.get("tradingSymbol", p.get("securityId", ""))
+            ).upper()
+        ]
 
 
 def square_off(pos) -> dict:
@@ -336,9 +388,10 @@ def main():
         notify.log(f"Market holiday ({today_label}) — skipping squareoff.")
         return
 
-    positions = get_open_bn_positions()
+    positions = get_open_positions()
+    instr_label = "Nifty IC" if _load_today_trade().get("strategy") == "nf_iron_condor" else "BankNifty"
     if not positions:
-        notify.log("No open BankNifty positions — nothing to square off. SL/TP already hit.")
+        notify.log(f"No open {instr_label} positions — nothing to square off. SL/TP already hit.")
         # Send exit Telegram if we placed a trade today (SL or TP fired intraday)
         today_trade = _load_today_trade()
         if today_trade:
@@ -389,7 +442,14 @@ def main():
     ]
     if today_trade:
         td_strategy = today_trade.get("strategy", "")
-        if td_strategy in ("bear_call_credit", "bull_put_credit"):
+        if td_strategy == "nf_iron_condor":
+            lines.append(f"Strategy    Nifty Iron Condor")
+            lines.append(
+                f"Wings       ATM ± {int(today_trade.get('spread_width', 150))}pt  "
+                f"(ATM={int(today_trade.get('atm_strike', 0))})"
+            )
+            lines.append(f"Entry credit  ₹{float(today_trade.get('net_credit', 0)):.0f} / share")
+        elif td_strategy in ("bear_call_credit", "bull_put_credit"):
             td_name = ("Bear Call Spread" if td_strategy == "bear_call_credit"
                        else "Bull Put Spread")
             td_opt  = "CE" if today_trade.get("signal") == "CALL" else "PE"

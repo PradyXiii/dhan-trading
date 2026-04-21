@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
-spread_monitor.py — Intraday SL/TP watcher for credit spreads
-==============================================================
-Runs every 1 min during market hours (9:30 AM → 3:29 PM IST) — matches
-backtest bar resolution. fcntl lock prevents overlapping runs.
+spread_monitor.py — Intraday SL/TP watcher for credit spreads + NF Iron Condor
+===============================================================================
+Runs every 1 min during market hours (9:30 AM → 3:10 PM IST).
+fcntl lock prevents overlapping runs.
 
 What it does:
-  1. Reads data/today_trade.json — today's spread trade
-  2. Skips if not a credit spread (strategy != bear_call_credit / bull_put_credit)
-  3. Skips if exit already recorded (exit_done == True)
-  4. Fetches live LTP for both legs via Dhan marketfeed/ltp
-  5. Computes current spread cost = short_ltp - long_ltp
-  6. If spread >= SL trigger → close both legs (BUY back short, SELL long)
-     If spread <= TP trigger → close both legs
-  7. Writes exit fields to today_trade.json + paper_trades.csv row
-  8. Sends Telegram exit alert
+  1. Reads data/today_trade.json — today's trade
+  2. Handles two strategy families:
+     a. bear_call_credit / bull_put_credit  → 2-leg BNF credit spread
+     b. nf_iron_condor                      → 4-leg NF IC
+  3. Fetches live LTPs for all legs
+  4. Computes current spread cost vs entry net_credit
+  5. SL / TP hit → close all legs, write exit to today_trade.json, Telegram
 
-PAPER MODE: no real Dhan orders — only writes to today_trade.json +
-  paper_trades.csv. Same SL/TP logic, same alerts, just no money moves.
+PAPER MODE: no real orders, writes exit state to json + paper_trades.csv.
 
-Cron (every 1 min, 9:30 AM → 3:29 PM IST = UTC hours 4-9):
+Cron (every 1 min, 9:30 AM → 3:10 PM IST = UTC 4-9):
   * 4-9 * * 1-5 cd ~/dhan-trading && python3 spread_monitor.py >> logs/spread_monitor.log 2>&1
 """
 import os
@@ -52,14 +49,14 @@ DATA_DIR   = "data"
 INTENT     = f"{DATA_DIR}/today_trade.json"
 PAPER_CSV  = f"{DATA_DIR}/paper_trades.csv"
 
-# Locked from backtest (+₹36.2L over 5y)
-CREDIT_SL_FRAC = 0.5     # stop when spread grows 50% above entry credit
-CREDIT_TP_FRAC = 0.65    # take profit when 65% of credit is in pocket
+CREDIT_SL_FRAC = 0.5     # SL: spread cost grew 50% above entry credit
+CREDIT_TP_FRAC = 0.65    # TP: 65% of credit in pocket
 
 MKT_OPEN  = dt_time(9,  30)
-MKT_CLOSE = dt_time(15, 10)   # stop SL/TP monitoring at 3:10; exit_positions.py owns 3:15+
+MKT_CLOSE = dt_time(15, 10)   # hand off to exit_positions.py at 3:15
 
 SPREAD_STRATEGIES = {"bear_call_credit", "bull_put_credit"}
+IC_STRATEGY       = "nf_iron_condor"
 
 _LOCK_FILE = "/tmp/spread_monitor.lock"
 _lock_fh   = None
@@ -71,7 +68,7 @@ def _acquire_lock():
     try:
         fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        sys.exit(0)   # another run in progress; silent exit
+        sys.exit(0)
 
 
 def _release_lock():
@@ -133,35 +130,26 @@ def _get_ltps(security_ids: list) -> dict:
         return {}
 
 
+# ── 2-leg spread close (BNF bear_call / bull_put) ────────────────────────────
+
 def _close_spread(intent: dict) -> dict:
-    """
-    Close both legs:
-      - BUY back the short leg (buy to cover)
-      - SELL the long hedge leg
-    """
+    """BUY back short leg, SELL long leg."""
     short_sid = str(intent["short_sid"])
     long_sid  = str(intent["long_sid"])
     qty       = int(intent["lots"]) * int(intent.get("lot_size", 30))
     day_tag   = date.today().strftime("%Y%m%d")
 
-    buy_back = {
+    base = {
         "dhanClientId":      CLIENT_ID,
-        "correlationId":     f"spread_exit_buy_{day_tag}",
-        "transactionType":   "BUY",
         "exchangeSegment":   "NSE_FNO",
         "productType":       "MARGIN",
         "orderType":         "MARKET",
         "validity":          "DAY",
-        "securityId":        short_sid,
         "quantity":          qty,
         "price":             0,
         "triggerPrice":      0,
         "disclosedQuantity": 0,
     }
-    sell_long = {**buy_back,
-                 "correlationId": f"spread_exit_sell_{day_tag}",
-                 "transactionType": "SELL",
-                 "securityId": long_sid}
 
     if DRY_RUN:
         return {"close_short": "DRY_RUN", "close_long": "DRY_RUN"}
@@ -169,16 +157,22 @@ def _close_spread(intent: dict) -> dict:
     result = {}
     try:
         r1 = requests.post("https://api.dhan.co/v2/orders",
-                           headers=HEADERS, json=buy_back, timeout=15)
+                           headers=HEADERS,
+                           json={**base, "correlationId": f"spread_exit_buy_{day_tag}",
+                                 "transactionType": "BUY", "securityId": short_sid},
+                           timeout=15)
         result["close_short"] = r1.json()
     except Exception as e:
         result["close_short_err"] = str(e)
 
-    time.sleep(2)   # let exchange settle before 2nd leg
+    time.sleep(2)
 
     try:
         r2 = requests.post("https://api.dhan.co/v2/orders",
-                           headers=HEADERS, json=sell_long, timeout=15)
+                           headers=HEADERS,
+                           json={**base, "correlationId": f"spread_exit_sell_{day_tag}",
+                                 "transactionType": "SELL", "securityId": long_sid},
+                           timeout=15)
         result["close_long"] = r2.json()
     except Exception as e:
         result["close_long_err"] = str(e)
@@ -186,11 +180,62 @@ def _close_spread(intent: dict) -> dict:
     return result
 
 
+# ── 4-leg IC close (NF iron condor) ──────────────────────────────────────────
+
+def _close_ic(intent: dict) -> dict:
+    """
+    Close all 4 IC legs:
+    BUY back CE short, SELL CE long, BUY back PE short, SELL PE long.
+    """
+    qty     = int(intent["lots"]) * int(intent.get("lot_size", 65))
+    day_tag = date.today().strftime("%Y%m%d")
+
+    base = {
+        "dhanClientId":      CLIENT_ID,
+        "exchangeSegment":   "NSE_FNO",
+        "productType":       "MARGIN",
+        "orderType":         "MARKET",
+        "validity":          "DAY",
+        "quantity":          qty,
+        "price":             0,
+        "triggerPrice":      0,
+        "disclosedQuantity": 0,
+    }
+
+    if DRY_RUN:
+        return {leg: "DRY_RUN" for leg in
+                ["ce_buy_back", "ce_sell_long", "pe_buy_back", "pe_sell_long"]}
+
+    legs = [
+        ("BUY",  intent["ce_short_sid"], "ce_buy_back"),
+        ("SELL", intent["ce_long_sid"],  "ce_sell_long"),
+        ("BUY",  intent["pe_short_sid"], "pe_buy_back"),
+        ("SELL", intent["pe_long_sid"],  "pe_sell_long"),
+    ]
+    result = {}
+    for trans, sid, tag in legs:
+        try:
+            r = requests.post(
+                "https://api.dhan.co/v2/orders", headers=HEADERS,
+                json={**base, "correlationId": f"ic_exit_{tag}_{day_tag}",
+                      "transactionType": trans, "securityId": str(sid)},
+                timeout=15,
+            )
+            result[tag] = r.json()
+            oid = result[tag].get("orderId") or result[tag].get("order_id")
+            notify.log(f"IC exit {trans} {tag} orderId={oid}")
+        except Exception as e:
+            result[f"{tag}_err"] = str(e)
+            notify.log(f"IC exit {trans} {tag} FAILED: {e}")
+        time.sleep(1)
+
+    return result
+
+
+# ── paper_trades.csv exit update ─────────────────────────────────────────────
+
 def _update_paper_csv_exit(intent: dict):
-    """
-    Update today's row in paper_trades.csv with exit fields.
-    Rewrites the whole file (small — one row per trading day).
-    """
+    """Update today's row in paper_trades.csv with exit fields."""
     if not os.path.exists(PAPER_CSV):
         return
     try:
@@ -198,22 +243,22 @@ def _update_paper_csv_exit(intent: dict):
             rows = list(csv.DictReader(f))
         today_s = date.today().isoformat()
 
-        # Add exit columns to header if missing
-        exit_cols = ["exit_reason", "exit_spread", "exit_short_ltp",
-                     "exit_long_ltp", "exit_time", "pnl_inr"]
+        exit_cols = [
+            "exit_reason", "exit_spread",
+            "exit_short_ltp", "exit_long_ltp",           # 2-leg spread
+            "exit_ce_short_ltp", "exit_ce_long_ltp",     # IC
+            "exit_pe_short_ltp", "exit_pe_long_ltp",     # IC
+            "exit_time", "pnl_inr",
+        ]
         for r in rows:
             for c in exit_cols:
                 r.setdefault(c, "")
 
-        # Find today's row, populate exit fields
         for r in rows:
             if r.get("date") == today_s:
-                r["exit_reason"]     = intent.get("exit_reason", "")
-                r["exit_spread"]     = intent.get("exit_spread", "")
-                r["exit_short_ltp"]  = intent.get("exit_short_ltp", "")
-                r["exit_long_ltp"]   = intent.get("exit_long_ltp", "")
-                r["exit_time"]       = intent.get("exit_time", "")
-                r["pnl_inr"]         = intent.get("pnl_inr", "")
+                for c in exit_cols:
+                    if c in intent:
+                        r[c] = intent[c]
                 break
 
         if not rows:
@@ -227,6 +272,8 @@ def _update_paper_csv_exit(intent: dict):
         notify.log(f"paper_trades.csv exit update failed: {e}")
 
 
+# ── Main ──────────────────────────────────────────────────────────────────────
+
 def main():
     _acquire_lock()
 
@@ -238,12 +285,105 @@ def main():
         return
 
     strategy = intent.get("strategy", "")
-    if strategy not in SPREAD_STRATEGIES:
-        return   # naked option trade — not our concern
+    if strategy not in SPREAD_STRATEGIES and strategy != IC_STRATEGY:
+        return   # naked option — not our concern
 
     if intent.get("exit_done"):
         return   # already closed
 
+    paper = (intent.get("order_mode") == "PAPER" or intent.get("mode") == "PAPER")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NF IRON CONDOR PATH
+    # ═══════════════════════════════════════════════════════════════════════════
+    if strategy == IC_STRATEGY:
+        ce_short_sid = str(intent.get("ce_short_sid", ""))
+        ce_long_sid  = str(intent.get("ce_long_sid",  ""))
+        pe_short_sid = str(intent.get("pe_short_sid", ""))
+        pe_long_sid  = str(intent.get("pe_long_sid",  ""))
+
+        if not all([ce_short_sid, ce_long_sid, pe_short_sid, pe_long_sid]):
+            notify.log("IC monitor: missing leg SIDs in today_trade.json")
+            return
+
+        ltps = _get_ltps([ce_short_sid, ce_long_sid, pe_short_sid, pe_long_sid])
+        ce_short_ltp = ltps.get(ce_short_sid, 0.0)
+        ce_long_ltp  = ltps.get(ce_long_sid,  0.0)
+        pe_short_ltp = ltps.get(pe_short_sid, 0.0)
+        pe_long_ltp  = ltps.get(pe_long_sid,  0.0)
+
+        if any(ltp <= 0 for ltp in [ce_short_ltp, ce_long_ltp,
+                                     pe_short_ltp, pe_long_ltp]):
+            notify.log(
+                f"IC monitor: LTP zero — CE {ce_short_ltp:.0f}/{ce_long_ltp:.0f}  "
+                f"PE {pe_short_ltp:.0f}/{pe_long_ltp:.0f}"
+            )
+            return
+
+        net_credit   = float(intent.get("net_credit", 0))
+        ce_cost      = ce_short_ltp - ce_long_ltp
+        pe_cost      = pe_short_ltp - pe_long_ltp
+        current_cost = ce_cost + pe_cost
+
+        sl_trigger = net_credit * (1 + CREDIT_SL_FRAC)
+        tp_trigger = net_credit * (1 - CREDIT_TP_FRAC)
+
+        hit_sl = current_cost >= sl_trigger
+        hit_tp = current_cost <= tp_trigger
+
+        if not (hit_sl or hit_tp):
+            return
+
+        reason = "SL" if hit_sl else "TP"
+
+        if not paper:
+            close_result = _close_ic(intent)
+            notify.log(f"IC exit ({reason}) — {close_result}")
+        else:
+            notify.log(f"IC exit ({reason}) — PAPER, no real order")
+
+        qty           = int(intent.get("lots", 0)) * int(intent.get("lot_size", 65))
+        pnl_per_share = net_credit - current_cost
+        total_pnl     = round(pnl_per_share * qty, 2)
+
+        intent.update({
+            "exit_done":          True,
+            "exit_reason":        reason,
+            "exit_spread":        round(current_cost, 2),
+            "exit_ce_short_ltp":  round(ce_short_ltp, 2),
+            "exit_ce_long_ltp":   round(ce_long_ltp, 2),
+            "exit_pe_short_ltp":  round(pe_short_ltp, 2),
+            "exit_pe_long_ltp":   round(pe_long_ltp, 2),
+            "exit_time":          datetime.now().strftime("%H:%M"),
+            "pnl_inr":            total_pnl,
+        })
+        _save_intent(intent)
+        if paper:
+            _update_paper_csv_exit(intent)
+
+        emoji   = "🟢" if reason == "TP" else "🔴"
+        verdict = "65% of credit kept — winner" if reason == "TP" else \
+                  "IC spread cost doubled — stopped out"
+        mode_tag = "[PAPER] " if paper else ""
+
+        notify.send(
+            f"{emoji} <b>Nifty IC {reason} Hit {mode_tag}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Entry credit  ₹{net_credit:.0f} / share\n"
+            f"Exit cost     ₹{current_cost:.0f} / share\n"
+            f"  CE spread   ₹{ce_short_ltp:.0f} − ₹{ce_long_ltp:.0f} = ₹{ce_cost:.0f}\n"
+            f"  PE spread   ₹{pe_short_ltp:.0f} − ₹{pe_long_ltp:.0f} = ₹{pe_cost:.0f}\n"
+            f"Shares        {qty}  ({intent.get('lots', 0)} lot)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>P&amp;L  ₹{total_pnl:+,.0f}</b>\n"
+            f"Reason        {verdict}\n"
+            f"<i>{'No real order — paper tracked.' if paper else 'All 4 IC legs closed on Dhan.'}</i>"
+        )
+        return
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 2-LEG CREDIT SPREAD PATH  (bear_call_credit / bull_put_credit)
+    # ═══════════════════════════════════════════════════════════════════════════
     short_sid = str(intent.get("short_sid", ""))
     long_sid  = str(intent.get("long_sid", ""))
     if not short_sid or not long_sid:
@@ -257,51 +397,46 @@ def main():
         notify.log(f"Spread monitor: LTPs unavailable short={short_ltp} long={long_ltp}")
         return
 
-    net_credit    = float(intent.get("net_credit", 0))
-    current_cost  = short_ltp - long_ltp    # cost to close spread now
-    sl_trigger    = net_credit * (1 + CREDIT_SL_FRAC)
-    tp_trigger    = net_credit * (1 - CREDIT_TP_FRAC)
+    net_credit   = float(intent.get("net_credit", 0))
+    current_cost = short_ltp - long_ltp
+    sl_trigger   = net_credit * (1 + CREDIT_SL_FRAC)
+    tp_trigger   = net_credit * (1 - CREDIT_TP_FRAC)
 
     hit_sl = current_cost >= sl_trigger
     hit_tp = current_cost <= tp_trigger
 
     if not (hit_sl or hit_tp):
-        return   # still within band, keep monitoring
+        return
 
     reason = "SL" if hit_sl else "TP"
-    paper  = (intent.get("order_mode") == "PAPER" or
-              intent.get("mode") == "PAPER")
 
-    # Close position (or simulate in paper)
-    close_result = {}
     if not paper:
         close_result = _close_spread(intent)
         notify.log(f"Spread exit ({reason}) — close result: {close_result}")
     else:
         notify.log(f"Spread exit ({reason}) — PAPER, no real order")
 
-    # P&L per share = credit received - cost to close
     pnl_per_share = net_credit - current_cost
     qty           = int(intent.get("lots", 0)) * int(intent.get("lot_size", 30))
     total_pnl     = round(pnl_per_share * qty, 2)
 
-    # Persist exit state
-    intent["exit_done"]      = True
-    intent["exit_reason"]    = reason
-    intent["exit_spread"]    = round(current_cost, 2)
-    intent["exit_short_ltp"] = round(short_ltp, 2)
-    intent["exit_long_ltp"]  = round(long_ltp, 2)
-    intent["exit_time"]      = datetime.now().strftime("%H:%M")
-    intent["pnl_inr"]        = total_pnl
+    intent.update({
+        "exit_done":      True,
+        "exit_reason":    reason,
+        "exit_spread":    round(current_cost, 2),
+        "exit_short_ltp": round(short_ltp, 2),
+        "exit_long_ltp":  round(long_ltp, 2),
+        "exit_time":      datetime.now().strftime("%H:%M"),
+        "pnl_inr":        total_pnl,
+    })
     _save_intent(intent)
-
     if paper:
         _update_paper_csv_exit(intent)
 
     emoji   = "🟢" if reason == "TP" else "🔴"
     verdict = "65% of credit kept — winner" if reason == "TP" else \
               "Spread grew 50% above credit — stopped out"
-    mode_tag = "[PAPER]" if paper else ""
+    mode_tag = "[PAPER] " if paper else ""
     strategy_name = ("Bear Call Spread" if strategy == "bear_call_credit"
                      else "Bull Put Spread")
 
@@ -310,7 +445,8 @@ def main():
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Strategy      {strategy_name}\n"
         f"Entry credit  ₹{net_credit:.0f} / share\n"
-        f"Exit cost     ₹{current_cost:.0f} / share  (short ₹{short_ltp:.0f} − long ₹{long_ltp:.0f})\n"
+        f"Exit cost     ₹{current_cost:.0f} / share  "
+        f"(short ₹{short_ltp:.0f} − long ₹{long_ltp:.0f})\n"
         f"Shares        {qty}  ({intent.get('lots', 0)} lot)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>P&amp;L  ₹{total_pnl:+,.0f}</b>\n"
