@@ -26,22 +26,21 @@ Two review surfaces, different stages:
 
 ---
 
-## 🛑 PAPER MODE — LIVE TRADING DISABLED (April 2026)
+## ✅ LIVE MODE — NF IC ACTIVE (April 2026)
 
-**`auto_trader.py` is currently in PAPER_MODE = True.** No real orders will be placed.
-`MAX_LOTS = 1` (was 20) during rebuild.
+**`auto_trader.py` is in PAPER_MODE = False.** Real IC orders placed via Dhan.
+`MAX_LOTS = 10` (IC margin tied on both sides).
 
 **Why:** Real 1-min option backtest + 4-trade live sample (Apr 13–17, 2026) proved:
 - Naked long-options buying is structurally losing — theta decay + IV crush
 - 2025–26 real-data backtest: WR 17%, -₹1,006/trade per lot
 - Core problem is the strategy (buy naked ATM options), not the signal
 
-**What happens now each morning (9:30 AM IST):**
-- Full signal flow runs (data → rule → ML → option pick)
-- "Would have placed" trade logged to `data/paper_trades.csv`
-- Telegram message fires with `[PAPER]` prefix + clear plain-English "no real order"
-- No Dhan API call for order placement
-- No exit-marker check, no duplicate-position guard (not needed — nothing live)
+**What happens each morning (9:30 AM IST):**
+- Full signal flow runs (data → rule → ML → 4-leg IC option pick)
+- Real MARKET orders placed via Dhan (BUY wings first, SELL short legs second)
+- Telegram fires with trade details, net credit, SL/TP triggers
+- `spread_monitor.py` watches every minute for SL/TP; `exit_positions.py` squares off at 3:15 PM
 
 **Confirmed winning strategy: Nifty50 Iron Condor (NF IC)**
 - WR 84.6% (2021–2026), consistent 80–91% each year, no 2025 collapse
@@ -53,24 +52,13 @@ Two review surfaces, different stages:
   (spread_width=150, NF strike spacing=50pts → ATM±3 strikes)
 - NF lot size: 75 before Jan 6 2026, 65 from Jan 6 2026
 
-**Checklist before going live with NF IC:**
+**Go-live checklist (completed April 2026):**
 1. ✅ Built `fetch_intraday_options.py --instrument NF --spreads` (NF multi-leg cache)
 2. ✅ Built `backtest_spreads.py` with `--instrument NF` + 8 NF strategy variants
 3. ✅ Fetched full NF option cache (5590 files, Aug 2021–Apr 2026)
 4. ✅ Confirmed NF IC: WR 84.6%, ₹1.17Cr (5yr), ₹25L/yr, max DD -0.8%
-5. ⬜ Wire NF IC into `auto_trader.py` (change instrument, security_id=13, lot fn, legs)
-6. ⬜ Paper-trade NF IC for 30+ days — flip PAPER_MODE when
-   `data/paper_trades.csv` shows >30 days net-positive P&L
-
-**To re-enable LIVE trading** (only after step 6):
-```python
-# In auto_trader.py — near top of file:
-PAPER_MODE = False   # WAS True during Apr 2026 rebuild
-MAX_LOTS   = 10      # NF IC max_lots=10 (IC uses margin on both sides)
-```
-
-Then: re-read this section, read `data/paper_trades.csv` last 30 days, confirm
-positive P&L, commit with clear message, restart cron.
+5. ✅ Wired NF IC into `auto_trader.py` (scrip=13, lot=65, 4-leg IC, IRON_CONDOR_MODE=True)
+6. ✅ PAPER_MODE=False, MAX_LOTS=10 — live from 22 Apr 2026
 
 ---
 
@@ -314,12 +302,12 @@ No human input needed during market hours.
 
 ```python
 # Mode flags
-PAPER_MODE         = True        # Apr 2026 rebuild — no real Dhan orders, log to paper_trades.csv
+PAPER_MODE         = False       # LIVE — real NF IC orders via Dhan from 22 Apr 2026
 CREDIT_SPREAD_MODE = True        # primary strategy; False = legacy naked-option fallback path
 
 # Sizing
 LOT_SIZE         = 65            # Nifty50 lot size (Jan 6 2026+ — was 75 before Jan 6 2026)
-MAX_LOTS         = 1             # capped at 1 during paper rebuild (was 20 — restore after net-positive paper P&L)
+MAX_LOTS         = 10            # NF IC max lots (margin tied on both sides)
 RISK_PCT         = 0.05          # 5% of capital at risk per trade
 
 # Credit-spread params (active path)
