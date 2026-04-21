@@ -217,8 +217,8 @@ def _get_ltp_from_option_chain(trade: dict) -> float | None:
 
 
 def get_option_ltp(security_id: str, trade: dict | None = None) -> float | None:
-    """Current LTP of our open BN option.
-    1. Tries positions API (fastest, matches by security_id then any open BN pos).
+    """Current LTP of our open NF option.
+    1. Tries positions API (fastest, matches by security_id then any open NF pos).
     2. If LTP=0, falls back to option chain at our known strike (most accurate).
     """
     try:
@@ -235,27 +235,26 @@ def get_option_ltp(security_id: str, trade: dict | None = None) -> float | None:
                 and "NIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
                 and "BANKNIFTY" not in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
             ]
-            bn_positions = nf_positions
             # Prefer exact security_id match
             ltp_from_pos = None
-            for p in bn_positions:
+            for p in nf_positions:
                 if str(p.get("securityId", p.get("security_id", ""))) == str(security_id):
                     ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
                     _log(f"Positions matched security_id: ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
                     ltp_from_pos = ltp
                     break
-            # Fallback: any open BN position
-            if ltp_from_pos is None and bn_positions:
-                p   = bn_positions[0]
+            # Fallback: any open NF position
+            if ltp_from_pos is None and nf_positions:
+                p   = nf_positions[0]
                 ltp = float(p.get("lastTradedPrice", p.get("ltp", 0)))
                 _log(f"Positions fallback match: ₹{ltp:.0f}  [{p.get('tradingSymbol','')}]")
                 ltp_from_pos = ltp
             if ltp_from_pos and ltp_from_pos > 0:
                 return ltp_from_pos
-            if bn_positions:
+            if nf_positions:
                 _log("LTP=0 from positions — trying option chain...")
             else:
-                _log("No open BN positions found — trying option chain...")
+                _log("No open NF positions found — trying option chain...")
     except Exception as e:
         _log(f"Positions API error: {e}")
 
@@ -309,7 +308,7 @@ def get_macro() -> dict:
 
 # ── Conviction engine ─────────────────────────────────────────────────────────
 
-def reassess(trade, bn_spot, option_ltp, macro) -> tuple[int, list, str]:
+def reassess(trade, nf_spot, option_ltp, macro) -> tuple[int, list, str]:
     """
     Score the 4 conviction factors in real-time.
     Returns (score -4..+4, factor lines, verdict string).
@@ -341,25 +340,25 @@ def reassess(trade, bn_spot, option_ltp, macro) -> tuple[int, list, str]:
         lines.append("⬜ Option LTP unavailable (SL/TP may have already fired)")
 
     # ── Factor 2: NF spot trend ───────────────────────────────────────────────
-    if bn_spot and entry_spot:
-        spot_chg = (bn_spot - entry_spot) / entry_spot * 100
+    if nf_spot and entry_spot:
+        spot_chg = (nf_spot - entry_spot) / entry_spot * 100
         if bull:
             if spot_chg > 0.2:
-                lines.append(f"✅ NF spot +{spot_chg:.2f}%  ₹{bn_spot:,.0f} (entry ₹{entry_spot:,.0f})")
+                lines.append(f"✅ NF spot +{spot_chg:.2f}%  ₹{nf_spot:,.0f} (entry ₹{entry_spot:,.0f})")
                 score += 1
             elif spot_chg > -0.3:
-                lines.append(f"➡️ NF spot flat {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
+                lines.append(f"➡️ NF spot flat {spot_chg:+.2f}%  ₹{nf_spot:,.0f}")
             else:
-                lines.append(f"🔴 NF spot {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
+                lines.append(f"🔴 NF spot {spot_chg:+.2f}%  ₹{nf_spot:,.0f}")
                 score -= 1
         else:
             if spot_chg < -0.2:
-                lines.append(f"✅ NF spot {spot_chg:.2f}%  ₹{bn_spot:,.0f} (PUT thesis: BN falling)")
+                lines.append(f"✅ NF spot {spot_chg:.2f}%  ₹{nf_spot:,.0f} (PUT thesis: NF falling)")
                 score += 1
             elif spot_chg < 0.3:
-                lines.append(f"➡️ NF spot flat {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
+                lines.append(f"➡️ NF spot flat {spot_chg:+.2f}%  ₹{nf_spot:,.0f}")
             else:
-                lines.append(f"🔴 NF spot +{spot_chg:.2f}%  ₹{bn_spot:,.0f} (PUT headwind)")
+                lines.append(f"🔴 NF spot +{spot_chg:.2f}%  ₹{nf_spot:,.0f} (PUT headwind)")
                 score -= 1
     else:
         lines.append("⬜ NF spot unavailable")
@@ -488,7 +487,7 @@ def _detect_reversal(signal: str, conv_score: int,
 
 _CHECKPOINT_FIELDS = [
     "date", "signal", "conviction_score", "verdict",
-    "reversal_detected", "bn_spot", "bn_chg_from_open_pct",
+    "reversal_detected", "nf_spot", "nf_chg_from_open_pct",
     "sp500f_chg_pct", "dxy_chg_pct", "vix_now", "vix_chg",
     "crude_chg_pct", "reason_codes",
 ]
@@ -896,34 +895,34 @@ def main():
         return
 
     # ── [2] Fetch live data ────────────────────────────────────────────────────
-    bn_spot    = get_nf_spot()
+    nf_spot    = get_nf_spot()
     option_ltp = get_option_ltp(security_id, trade)
     macro      = get_macro()
-    _log(f"NF spot: {bn_spot}  |  LTP: {option_ltp}  |  Macro: {list(macro.keys())}")
+    _log(f"NF spot: {nf_spot}  |  LTP: {option_ltp}  |  Macro: {list(macro.keys())}")
 
     # ── [3] Reassess conviction ────────────────────────────────────────────────
-    conv_score, factor_lines, _ = reassess(trade, bn_spot, option_ltp, macro)
+    conv_score, factor_lines, _ = reassess(trade, nf_spot, option_ltp, macro)
 
     # ── [4] Detect reversal ────────────────────────────────────────────────────
     reversal = _detect_reversal(direction, conv_score, factor_lines, macro)
 
     # ── [5] Write checkpoint ───────────────────────────────────────────────────
-    bn_chg_pct = ((bn_spot - entry_spot) / entry_spot * 100
-                  if bn_spot and entry_spot else None)
+    nf_chg_pct = ((nf_spot - entry_spot) / entry_spot * 100
+                  if nf_spot and entry_spot else None)
     _write_midday_checkpoint({
-        "signal":               direction,
-        "conviction_score":     conv_score,
-        "verdict":              "reversal" if reversal["reversal_detected"] else "hold",
-        "reversal_detected":    reversal["reversal_detected"],
-        "bn_spot":              round(bn_spot, 0) if bn_spot else "",
-        "bn_chg_from_open_pct": round(bn_chg_pct, 3) if bn_chg_pct is not None else "",
-        "sp500f_chg_pct":       round(macro.get("sp500f_chg_pct", 0), 3),
-        "dxy_chg_pct":          round(macro.get("dxy_chg_pct", 0), 3),
-        "vix_now":              round(macro.get("vix_now", 0), 2),
-        "vix_chg":              round(macro.get("vix_chg", 0), 2),
-        "crude_chg_pct":        (round(macro["crude_chg_pct"], 3)
-                                 if "crude_chg_pct" in macro else ""),
-        "reason_codes":         reversal["reason_codes"],
+        "signal":                direction,
+        "conviction_score":      conv_score,
+        "verdict":               "reversal" if reversal["reversal_detected"] else "hold",
+        "reversal_detected":     reversal["reversal_detected"],
+        "nf_spot":               round(nf_spot, 0) if nf_spot else "",
+        "nf_chg_from_open_pct":  round(nf_chg_pct, 3) if nf_chg_pct is not None else "",
+        "sp500f_chg_pct":        round(macro.get("sp500f_chg_pct", 0), 3),
+        "dxy_chg_pct":           round(macro.get("dxy_chg_pct", 0), 3),
+        "vix_now":               round(macro.get("vix_now", 0), 2),
+        "vix_chg":               round(macro.get("vix_chg", 0), 2),
+        "crude_chg_pct":         (round(macro["crude_chg_pct"], 3)
+                                  if "crude_chg_pct" in macro else ""),
+        "reason_codes":          reversal["reason_codes"],
     })
 
     # ── [6] Build plain-English Telegram message ───────────────────────────────
@@ -950,9 +949,9 @@ def main():
         tp_line   = f"🎯 Target at ₹{tp_price:.0f}"
 
     # NF spot line
-    if bn_spot and entry_spot:
-        spot_chg = (bn_spot - entry_spot) / entry_spot * 100
-        spot_line = (f"📍 Nifty at ₹{bn_spot:,.0f}  "
+    if nf_spot and entry_spot:
+        spot_chg = (nf_spot - entry_spot) / entry_spot * 100
+        spot_line = (f"📍 Nifty at ₹{nf_spot:,.0f}  "
                      f"({'up' if spot_chg >= 0 else 'down'} {abs(spot_chg):.2f}% from entry)")
     else:
         spot_line = "📍 Nifty: unavailable"

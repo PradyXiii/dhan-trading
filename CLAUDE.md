@@ -1,4 +1,4 @@
-# CLAUDE.md — Nifty50 + BankNifty Auto-Trader Architecture Map
+# CLAUDE.md — Nifty50 Iron Condor Auto-Trader Architecture Map
 
 Quick reference for Claude Code. Read this before touching any file.
 
@@ -226,7 +226,7 @@ The docs have the exact answer. Read them first, always.
 3. Add the feature name once to `FEATURE_COLS` — then check: `len(FEATURE_COLS) == len(set(FEATURE_COLS))` (duplicates inflate importance silently)
 4. If feature needs a new data file: `python3 data_fetcher.py` then `python3 data_fetcher.py --backfill` (new CSVs start with 1 row — zero importance until backfilled)
 5. Run `python3 ml_engine.py --analyze` — feature importance must be > 0
-6. Run `python3 autoexperiment_bn.py` — **keep only if composite >= 0.6175** (current best)
+6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.6175** (current best)
 7. Commit + push to `main`
 
 ---
@@ -272,8 +272,8 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 
 ## What This System Does
 
-Fully automated BankNifty options trading. Cron fires at 9:30 AM IST on trading days:
-data → rule signal → ML override → Dhan Super Order + SL/TP → Telegram alert.
+Fully automated Nifty50 Iron Condor trading. Cron fires at 9:30 AM IST on trading days:
+data → rule signal → ML override → 4-leg IC order (BUY wings, SELL short legs) → Telegram alert.
 No human input needed during market hours.
 
 ---
@@ -294,20 +294,18 @@ No human input needed during market hours.
 | `data_fetcher.py` | Downloads OHLCV + global market data → `data/*.csv` |
 | `health_ping.py` | Pre-market heartbeat (8:50 AM) — token/capital/freshness checks |
 | `midday_conviction.py` | Midday thesis reassessment (11 AM) — branches on spread vs naked schema → Telegram summary |
-| `exit_positions.py` | EOD 3:15 PM — squares off open BN F&O positions (long AND short legs for spreads) |
-| `trade_journal.py` | EOD 3:30 PM — logs actual fills; spreads → `live_spread_trades.csv`, naked → `live_trades.csv` |
-| `lot_expiry_scanner.py` | Monthly cron — detects BankNifty lot size / expiry day changes |
+| `exit_positions.py` | EOD 3:15 PM — squares off open Nifty F&O positions (long AND short legs for spreads) |
+| `trade_journal.py` | EOD 3:30 PM — logs actual fills; spreads → `live_ic_trades.csv` |
+| `lot_expiry_scanner.py` | Monthly cron — detects Nifty50 lot size / expiry day changes |
 | `replay_today.py` | Post-mortem tool — ensemble replay of today after evolver |
 | `renew_token.py` | Every-5-min token renewer (23h50m interval) |
 | `notify.py` | Telegram send/log helper (2 functions) |
-| `autoloop_bn.py` | Daily midnight autoresearch — paper-trades ML changes, auto-promotes after 3 nights of outperformance |
+| `autoloop_nf.py` | Daily midnight autoresearch — paper-trades ML changes, auto-promotes after 3 nights of outperformance |
 | `ml_engine_paper.py` | Paper copy of ml_engine.py — autoresearcher tests here first before promoting to live |
-| `autoexperiment_bn.py` | Fast 252-day holdout evaluator; `--module ml_engine_paper` to eval paper model |
+| `autoexperiment_nf.py` | Fast 252-day holdout evaluator; `--module ml_engine_paper` to eval paper model |
 | `autoexperiment_backtest.py` | Backtest evaluator for auto_trader.py constant changes |
-| `backfill_live_trades.py` | One-time / periodic utility — imports Dhan trade history into live_trades.csv |
 | `analyze_confidence.py` | Diagnostic tool — confidence buckets, VIX regime accuracy, feature importances; `--write-threshold` updates dynamic VIX filter |
-| `morning_brief.py` | 9:15 AM news sentiment — fetches BankNifty headlines, calls Claude API, writes `data/news_sentiment.json` for auto_trader vote |
-| `research_program_bn.md` | Autoresearch brief — defines what the AI agent may and may not change |
+| `morning_brief.py` | 9:15 AM news sentiment — fetches Nifty50 headlines, calls Claude API, writes `data/news_sentiment.json` for auto_trader vote |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
 
 ---
@@ -320,7 +318,7 @@ PAPER_MODE         = True        # Apr 2026 rebuild — no real Dhan orders, log
 CREDIT_SPREAD_MODE = True        # primary strategy; False = legacy naked-option fallback path
 
 # Sizing
-LOT_SIZE         = 30            # BankNifty lot size (Jan 2026+ — was 35 Jun–Dec 2025, was 15 pre-Nov 2024)
+LOT_SIZE         = 65            # Nifty50 lot size (Jan 6 2026+ — was 75 before Jan 6 2026)
 MAX_LOTS         = 1             # capped at 1 during paper rebuild (was 20 — restore after net-positive paper P&L)
 RISK_PCT         = 0.05          # 5% of capital at risk per trade
 
@@ -421,7 +419,7 @@ Live feedback: the evolver reads `data/live_trades.csv` and injects real outcome
 ## Option Chain Structure (Dhan v2)
 
 ```python
-chain = POST /v2/optionchain {UnderlyingScrip: 25, UnderlyingSeg: "IDX_I", Expiry: "YYYY-MM-DD"}
+chain = POST /v2/optionchain {UnderlyingScrip: 13, UnderlyingSeg: "IDX_I", Expiry: "YYYY-MM-DD"}
 inner = chain["data"]                 # dict with last_price + oc (no intermediate key)
 spot  = inner["last_price"]           # spot index price
 oc    = inner["oc"]                   # strike → {ce: {...}, pe: {...}}
@@ -429,33 +427,27 @@ sid   = oc["55900.000000"]["ce"]["security_id"]   # float-string keys
 iv    = oc["55900.000000"]["ce"]["implied_volatility"]  # ATM IV (%)
 
 # Always fetch expirylist first:
-expiries = POST /v2/optionchain/expirylist {UnderlyingScrip: 25, UnderlyingSeg: "IDX_I"}
+expiries = POST /v2/optionchain/expirylist {UnderlyingScrip: 13, UnderlyingSeg: "IDX_I"}
 expiry_str = expiries["data"][0]      # nearest valid expiry
 ```
 
 ---
 
-## Lot Size Timeline (backtest_engine.py get_lot_size)
+## Nifty50 Lot Size Timeline (backtest_engine.py get_lot_size)
 
 | Period | Lot size |
 |---|---|
-| Before Nov 2024 | 15 |
-| Nov 2024 – May 2025 | 30 |
-| Jun 2025 – Dec 2025 | 35 |
-| Jan 2026+ | 30 |
+| Before Jan 6 2026 | 75 |
+| Jan 6 2026+ | 65 |
 
 Live overrides stored in `data/lot_size_overrides.json` (written by `lot_expiry_scanner.py`).
 
 ---
 
-## BankNifty Phases (expiry schedule)
+## Nifty50 Expiry
 
-| Phase | Period | Expiry day |
-|---|---|---|
-| Phase 1–3 | Before Sep 2025 | Weekly Thursday |
-| Phase 4 | Sep 2025+ | Monthly last Tuesday |
-
-Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday).
+Nifty50 has **weekly Thursday expiry** (SEBI mandate — never changed to monthly).
+Every NF IC trade is naturally DTE ≤ 7. All 5 weekdays are valid entry days.
 
 ---
 
@@ -463,8 +455,7 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 
 | File | Contents |
 |---|---|
-| `data/banknifty.csv` | Daily OHLCV from Dhan |
-| `data/nifty50.csv` | Daily close from Dhan |
+| `data/nifty50.csv` | Daily OHLCV from Dhan |
 | `data/india_vix.csv` | ^INDIAVIX from yfinance |
 | `data/sp500.csv` | ^GSPC from yfinance |
 | `data/nikkei.csv` | ^N225 from yfinance |
@@ -477,9 +468,9 @@ Phase 4 means all 5 weekdays are valid trade days (no weekly expiry on Wednesday
 | `data/options_atm_daily.csv` | Real ATM option opens from Dhan rollingoption (date, call_premium, put_premium) |
 | `data/options_iv_skew.csv` | Daily ATM + OTM±3 implied volatilities (date, call_iv_atm, put_iv_atm, call_iv_otm, put_iv_otm) |
 | `data/options_oi_surface.csv` | Daily OI at ATM±3 strikes × CE/PE (date, atm_strike, ce_oi_m3..p3, pe_oi_m3..p3) |
-| `data/banknifty_15m_orb.csv` | BN 9:15-9:30 opening range candles (date, orb_open/high/low/close) for ORB features |
-| `data/bankbees.csv` + `hdfcbank.csv` + `icicibank.csv` + `kotakbank.csv` + `sbin.csv` + `axisbank.csv` | Bank ETF + top-5 BN constituents (yfinance daily OHLCV) for breadth + flow features |
-| `data/live_trades.csv` | Daily live-trade outcomes (written by trade_journal.py + backfill_live_trades.py) |
+| `data/nifty50_15m_orb.csv` | NF 9:15-9:30 opening range candles (date, orb_open/high/low/close) for ORB features |
+| `data/bankbees.csv` + `hdfcbank.csv` + `icicibank.csv` + `kotakbank.csv` + `sbin.csv` + `axisbank.csv` | Bank ETF + top-5 NF constituents (yfinance daily OHLCV) for breadth + flow features |
+| `data/live_ic_trades.csv` | Daily IC trade outcomes (written by trade_journal.py) |
 | `data/today_trade.json` | What auto_trader placed today (read by trade_journal) |
 | `data/midday_checkpoints.csv` | Midday conviction snapshots — reversal detection, fed to model_evolver + autoloop |
 | `data/paper_performance.csv` | Daily live vs paper model scores — combined_advantage drives promotion streak |
@@ -506,7 +497,7 @@ Installed by `setup_automation.sh`:
 45 9   * * 1-5  exit_positions.py       # 3:15 PM IST
 0  10  * * 1-5  trade_journal.py        # 3:30 PM IST
 30 17  * * 1-5  model_evolver.py        # 11:00 PM IST
-30 18  * * 1-5  autoloop_bn.py          # Mon–Fri midnight IST (autoresearch, after evolver)
+30 18  * * 1-5  autoloop_nf.py          # Mon–Fri midnight IST (autoresearch, after evolver)
 30 4   1 * *    lot_expiry_scanner.py   # 1st of month, 10:00 AM IST
 30 20  * * 0    log rotation            # Sunday 2:00 AM IST (trim logs > 10 MB)
 ```
@@ -540,8 +531,8 @@ python3 backtest_live_context.py             # research: intraday live-context r
 # Fetch historical ATM option premiums + IV skew + OI surface (one-time, then incremental)
 python3 data_fetcher.py --fetch-options   # options_atm_daily.csv + options_iv_skew.csv + options_oi_surface.csv
 
-# Fetch historical BN 9:15-9:30 opening range candles (one-time, ~2 min for 5y)
-python3 data_fetcher.py --fetch-intraday  # banknifty_15m_orb.csv (90-day chunks via Dhan intraday)
+# Fetch historical NF 9:15-9:30 opening range candles (one-time, ~2 min for 5y)
+python3 data_fetcher.py --fetch-intraday  # nifty50_15m_orb.csv (90-day chunks via Dhan intraday)
 
 # Live test
 python3 auto_trader.py --dry-run
@@ -563,11 +554,11 @@ python3 lot_expiry_scanner.py --show   # print current override state
 python3 lot_expiry_scanner.py          # run scan + Telegram alert if change
 
 # Autoresearch
-python3 autoexperiment_bn.py                 # baseline composite score (JSON output)
-python3 autoexperiment_bn.py --module ml_engine_paper  # evaluate paper model
-python3 autoloop_bn.py --dry-run             # test loop without calling Claude API
-python3 autoloop_bn.py --experiments 3       # run 3 live experiments
-python3 autoloop_bn.py                       # full 5-experiment nightly run
+python3 autoexperiment_nf.py                 # baseline composite score (JSON output)
+python3 autoexperiment_nf.py --module ml_engine_paper  # evaluate paper model
+python3 autoloop_nf.py --dry-run             # test loop without calling Claude API
+python3 autoloop_nf.py --experiments 3       # run 3 live experiments
+python3 autoloop_nf.py                       # full 5-experiment nightly run
 
 # VIX trade filter
 python3 analyze_confidence.py                # diagnostic: confidence + VIX regime + importances
@@ -587,23 +578,23 @@ Major groups (representative, not exhaustive — read FEATURE_COLS in ml_engine.
 
 | Group | Sample features | What they capture |
 |---|---|---|
-| Rule signals | `s_ema20`, `s_trend5`, `s_vix`, `s_bn_nf_div` | Discrete ±1 rule outputs |
-| Continuous signals | `ema20_pct`, `trend5`, `vix_dir`, `bn_nf_div` | Raw magnitudes behind the rules |
-| Technical | `rsi14`, `hv20`, `bn_gap`, `adx14` | Momentum, volatility, opening gap, trend strength |
+| Rule signals | `s_ema20`, `s_trend5`, `s_vix`, `s_nf_gap` | Discrete ±1 rule outputs |
+| Continuous signals | `ema20_pct`, `trend5`, `vix_dir` | Raw magnitudes behind the rules |
+| Technical | `rsi14`, `hv20`, `nf_gap`, `adx14` | Momentum, volatility, opening gap, trend strength |
 | Global markets | `sp500_chg`, `nikkei_chg`, `spf_gap` | Overnight global risk sentiment |
 | Macro / FII drivers | `crude_ret`, `dxy_ret`, `us10y_chg`, `usdinr_ret` | Inflation, dollar, yield, rupee |
-| Volatility regime | `vix_level`, `vix_pct_chg`, `vix_hv_ratio`, `vix_pctile` | Fear level, realized vol ratio, percentile rank |
-| Momentum & drawdown | `bn_ret1`, `bn_ret20`, `bn_dist_high20`, `bn_dist_high52w` | Short/medium trend, drawdowns, 52-week high distance |
+| Volatility regime | `vix_level`, `vix_pct_chg`, `vix_hv_ratio`, `vix_pct_rank_252` | Fear level, realized vol ratio, percentile rank |
+| Momentum & drawdown | `nf_ret1`, `nf_ret20`, `nf_dist_high20`, `nf_dist_high52` | Short/medium trend, drawdowns, 52-week high distance |
 | Calendar | `dow`, `dte` | Day-of-week, days to expiry |
-| Options sentiment | `pcr`, `pcr_ma5`, `pcr_chg` | Put/call ratio and its trend |
-| IV skew | `call_iv_atm`, `put_iv_atm`, `call_skew`, `put_skew`, `skew_spread`, `skew_momentum` | ATM + OTM±3 IVs, call/put skew dynamics |
-| OI surface | `pe_oi_atm`, `ce_oi_atm`, `pe_oi_p3`, `ce_oi_m3`, `oi_pcr`, `oi_max_pain_dist` | OI at ATM±3 strikes, max-pain distance |
-| Opening range | `orb_range_pct`, `orb_break_up`, `orb_break_dn` | 9:15-9:30 candle range + breakout direction |
-| Breadth / flow | `fii_net_cash_z`, `bankbees_ret`, `top5_breadth`, `bn_vs_nifty_5d` | FII activity, bank ETF, top-5 constituent breadth |
+| Options sentiment | `pcr_ma5`, `put_call_skew`, `iv_proxy` | Put/call ratio, premium bias, IV level |
+| IV skew | `call_skew`, `put_skew`, `skew_spread`, `skew_chg` | OTM skew dynamics, fear momentum |
+| OI surface | `oi_pcr_wide`, `oi_imbalance_atm`, `call_wall_offset`, `put_wall_offset` | OI across ATM±3 strikes, max-pain distance |
+| Opening range | `orb_range_pct`, `orb_break_side` | 9:15-9:30 candle range + breakout direction |
+| Breadth / flow | `fii_net_cash_z`, `bankbees_ret1`, `bank_breadth_d1` | FII activity, bank ETF, top-5 constituent breadth |
 | Opening signal | `vix_open_chg` | VIX gap at 9:15 AM (risk-on/off at entry) |
-| Interaction | various `_x_` cross-features | Conditional combinations (autoresearch-added) |
+| Interaction | `gap_mom_align`, `iv_spf_interaction`, `adx_gap_interact` + others | Conditional combinations (autoresearch-added) |
 
-The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this list and validates each on the 252-day holdout before committing.
+The autoresearch loop (`autoloop_nf.py`) proposes additions/removals to this list and validates each on the 252-day holdout before committing.
 
 ---
 
@@ -615,13 +606,13 @@ The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this lis
 | Change SL % or RR | `auto_trader.py` constants (top of file) |
 | Add a new indicator | `signal_engine.py` `score_row()` + `compute_indicators()` |
 | Understand ML features | `ml_engine.py` `FEATURE_COLS` + `compute_features()` — see ML Feature Set below |
-| Run/debug autoresearch | `autoloop_bn.py` + `autoexperiment_bn.py` + `ml_engine_paper.py` + `research_program_bn.md` |
+| Run/debug autoresearch | `autoloop_nf.py` + `autoexperiment_nf.py` + `ml_engine_paper.py` |
 | Change lot size | `backtest_engine.py` `get_lot_size()` + `auto_trader.py` `LOT_SIZE` |
 | Run new backtest | `backtest_engine.py` — standalone, reads `data/signals.csv` |
 | Add data source | `data_fetcher.py` + `model_evolver.py` feature list |
 | Change HPO trials | `model_evolver.py` top — `N_TRIALS = 30` |
 | Add a new model | `model_evolver.py` `_build_model()` + competition loop |
-| Check live P&L | Dhan app → Positions, or `python3 -c "from backfill_live_trades import ..." ` |
+| Check live P&L | Dhan app → Positions, or read `data/live_ic_trades.csv` |
 
 ---
 
@@ -631,5 +622,5 @@ The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this lis
 - **DH-906**: "Market closed" OR "weekend AMO block". Not an account issue.
 - **AMO window**: Mon–Fri after 3:30 PM IST. Weekends reject all `afterMarketOrder: true`.
 - **Super Order**: `/v2/super/orders` — single call for entry + SL + TP.
-- **BankNifty scrip**: `UnderlyingScrip: 25`, `UnderlyingSeg: "IDX_I"`.
+- **Nifty50 scrip**: `UnderlyingScrip: 13`, `UnderlyingSeg: "IDX_I"`.
 - **Rate limit**: Data API = 10 req/s. Long fetches (historical PCR) pace at 2 req/s for 5× headroom.

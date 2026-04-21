@@ -67,9 +67,9 @@ Every 1 min, 9:30 AM–3:14 PM IST
         — Sends plain-English brain-training report to Telegram
 
 Midnight IST, Mon–Fri
-  └── autoloop_bn.py  (Autoresearch)
+  └── autoloop_nf.py  (Autoresearch)
         — Claude AI proposes one small code change per experiment
-        — autoexperiment_bn.py evaluates on last 252 trading days
+        — autoexperiment_nf.py evaluates on last 252 trading days
         — Improvements committed; regressions reverted
         — Paper model accumulates 3-night winning streak before auto-promoting to live
 
@@ -121,7 +121,7 @@ Never reverse this — full unhedged margin triggered on short legs if long not 
 
 Signal engine and ML model still vote on CALL vs PUT (which side of the market is favored). The IC trades BOTH sides regardless — the signal just determines which days the system enters (CALL signal → market expected to hold or rise moderately, PUT signal → hold or fall moderately; both suit IC). No VIX or ML confidence filter applied — maximum trade frequency gives maximum P&L.
 
-**63 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (BN/Nifty relative strength, 52-week high distance, ORB range), calendar (DOW, DTE).
+**63 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
 
 **Nightly model competition:** RF, XGBoost, LightGBM, CatBoost compete via Optuna HPO (30 trials each = 120 total). Winner saved as champion.pkl. Full 4-model ensemble saved for live voting.
 
@@ -147,16 +147,14 @@ replay_today.py             Post-mortem — replay today's prediction with curre
 analyze_confidence.py       Confidence bucket + VIX regime diagnostics
 renew_token.py              Token renewal — 23h50m interval, 7 days a week
 notify.py                   Telegram send helper
-autoloop_bn.py              Midnight autoresearch — Claude API experiments → paper model → promote
-autoexperiment_bn.py        252-day holdout evaluator (composite score)
+autoloop_nf.py              Midnight autoresearch — Claude API experiments → paper model → promote
+autoexperiment_nf.py        252-day holdout evaluator (composite score)
 autoexperiment_backtest.py  Backtest evaluator for strategy constant changes
 validate_all.py             Pre-deployment end-to-end health check
-backfill_live_trades.py     Utility — import Dhan trade history into live_ic_trades.csv
 backtest_spreads.py         Multi-leg spread backtest — NF IC + 7 other NF variants
 fetch_intraday_options.py   Fetch 1-min NF option cache → data/nifty_options_cache/
 scan_ic_rr.py               IC SL/TP parameter scanner (RR optimisation)
 optimize_params.py          VIX + confidence grid search
-research_program_bn.md      Autoresearch brief — defines what AI may and may not change
 CLAUDE.md                   Architecture map + standing rules — auto-loaded every session
 setup_automation.sh         One-shot VM setup: deps + all cron jobs
 ```
@@ -250,8 +248,8 @@ python3 model_evolver.py --no-data
 python3 replay_today.py
 
 # Autoresearch
-python3 autoloop_bn.py --dry-run
-python3 autoexperiment_bn.py
+python3 autoloop_nf.py --dry-run
+python3 autoexperiment_nf.py
 
 # Health
 python3 health_ping.py

@@ -7,7 +7,7 @@
 # backtest also favors the change. See "REAL-OPTIONS RULE" in CLAUDE.md.
 # ─────────────────────────────────────────────────────────────────────────────
 """
-autoloop_bn.py — Daily midnight autoresearch loop for BankNifty ML system.
+autoloop_nf.py — Daily midnight autoresearch loop for Nifty50 IC ML system.
 
 Paper-trading mode for ml_engine.py changes:
   - ml_engine.py proposals go to ml_engine_paper.py (not live)
@@ -15,13 +15,13 @@ Paper-trading mode for ml_engine.py changes:
   - signal_engine.py / auto_trader.py changes apply immediately
 
 Usage:
-    python3 autoloop_bn.py                   # 5 experiments, full run
-    python3 autoloop_bn.py --experiments 3   # quick 3-experiment run
-    python3 autoloop_bn.py --dry-run         # baseline only, no Claude API calls
-    python3 autoloop_bn.py --no-evolver      # skip model_evolver.py at end
+    python3 autoloop_nf.py                   # 5 experiments, full run
+    python3 autoloop_nf.py --experiments 3   # quick 3-experiment run
+    python3 autoloop_nf.py --dry-run         # baseline only, no Claude API calls
+    python3 autoloop_nf.py --no-evolver      # skip model_evolver.py at end
 
 Cron (Mon–Fri midnight IST = 18:30 UTC):
-    30 18 * * 1-5  cd /path && python3 autoloop_bn.py >> logs/autoloop_bn.log 2>&1
+    30 18 * * 1-5  cd /path && python3 autoloop_nf.py >> logs/autoloop_nf.log 2>&1
 """
 
 import argparse
@@ -521,7 +521,7 @@ def _run_subprocess_with_args(script: str, extra_args: list[str] = None, timeout
 
 
 def _run_ml_experiment(module: str = "ml_engine") -> dict:
-    return _run_subprocess_with_args("autoexperiment_bn.py", ["--module", module], timeout=300)
+    return _run_subprocess_with_args("autoexperiment_nf.py", ["--module", module], timeout=300)
 
 
 def _run_backtest_experiment() -> dict:
@@ -672,15 +672,15 @@ def _make_client():
 
 
 def _build_system_prompt() -> str:
-    path = _HERE / "research_program_bn.md"
+    path = _HERE / "research_program_nf.md"
     try:
         brief = path.read_text(encoding="utf-8")
     except Exception:
-        brief = "(research_program_bn.md not found)"
+        brief = "(research_program_nf.md not found)"
 
     return (
         "You are an expert ML feature engineer specialising in Indian equity derivatives.\n\n"
-        "Your job: propose ONE targeted code change to improve the BankNifty ML model composite score.\n\n"
+        "Your job: propose ONE targeted code change to improve the Nifty50 IC ML model composite score.\n\n"
         "IMPORTANT: ml_engine.py changes go into a paper (test) model first. "
         "After 3 nights of outperforming the live model by ≥1.5%, they automatically go live. "
         "So be bold — paper experiments have no risk.\n\n"
@@ -704,7 +704,7 @@ def _build_system_prompt() -> str:
         "   EDITING FEATURE_COLS: when removing an entry, take the ENTIRE line including its trailing comment\n"
         "   and the comma. Never split a line in the middle of an inline comment (apostrophes like \"today's\"\n"
         "   will cause Python's implicit string concatenation to merge comment text into the list). Safe pattern:\n"
-        "   old_code = '    \"bn_ret60\",        # 3-month return — bull vs bear phase\\n'  ← full line + newline\n"
+        "   old_code = '    \"nf_ret60\",        # 3-month return — bull vs bear phase\\n'  ← full line + newline\n"
         "   new_code = ''                                                                ← delete cleanly\n"
         "3. Rolling window limits: the dataset has ~1500+ rows but beware of NaN chains.\n"
         "   Use rolling windows ≤60 days for new features. Windows >100 days risk NaN-induced row drops.\n"
@@ -712,20 +712,20 @@ def _build_system_prompt() -> str:
         "4. If your change doesn't strictly improve the score (>) it will be reverted. Equal-score = no effect.\n"
         "5. Do NOT repeat a feature already tried (see experiment log).\n"
         "6. NO LEAKAGE — RAW SAME-DAY CLOSE/HIGH/LOW: The label = sign(close_today - open_today).\n"
-        "   Any raw use of bn_close, bn_high, or bn_low for today's row leaks it. Forbidden:\n"
-        "   (bn_close - bn_open), (bn_high - bn_low), body_ratio, zscore using unshifted close.\n"
+        "   Any raw use of nf_close, nf_high, or nf_low for today's row leaks it. Forbidden:\n"
+        "   (nf_close - nf_open), (nf_high - nf_low), body_ratio, zscore using unshifted close.\n"
         "   Features with |corr(feature, label)| > 0.85 are auto-rejected.\n\n"
         "7. SHIFT-FIRST RULE — ALL ROLLING WINDOWS: Any rolling or ewm operation on price series\n"
-        "   (bn_close, bn_high, bn_low, bn_volume, vix, nifty_close, etc.) MUST call .shift(1)\n"
+        "   (nf_close, nf_high, nf_low, nf_volume, vix, sp500, etc.) MUST call .shift(1)\n"
         "   BEFORE the rolling/ewm call. Today's close is NOT known until 3:30 PM — it must never\n"
         "   appear inside any window fed to FEATURE_COLS.\n"
-        "   WRONG: d['bn_close'].rolling(20).mean()              ← includes today's close\n"
-        "   WRONG: d['bn_close'].pct_change(10)                  ← (close_today - close_10)\n"
-        "   WRONG: d['bn_close'].ewm(span=5).mean()              ← includes today's close\n"
-        "   RIGHT: d['bn_close'].shift(1).rolling(20).mean()     ← window ends yesterday\n"
-        "   RIGHT: d['bn_close'].shift(1).pct_change(9)          ← shift first, then diff\n"
-        "   RIGHT: d['bn_close'].shift(1).ewm(span=5).mean()     ← EWM ends yesterday\n"
-        "   EXCEPTION: bn_open is known at 9:15 AM (no shift needed). rsi14 and hv20 in the\n"
+        "   WRONG: d['nf_close'].rolling(20).mean()              ← includes today's close\n"
+        "   WRONG: d['nf_close'].pct_change(10)                  ← (close_today - close_10)\n"
+        "   WRONG: d['nf_close'].ewm(span=5).mean()              ← includes today's close\n"
+        "   RIGHT: d['nf_close'].shift(1).rolling(20).mean()     ← window ends yesterday\n"
+        "   RIGHT: d['nf_close'].shift(1).pct_change(9)          ← shift first, then diff\n"
+        "   RIGHT: d['nf_close'].shift(1).ewm(span=5).mean()     ← EWM ends yesterday\n"
+        "   EXCEPTION: nf_open is known at 9:15 AM (no shift needed). rsi14 and hv20 in the\n"
         "   existing FEATURE_COLS already use today's close and are grandfathered — do NOT\n"
         "   add new RSI/HV variants without shifting.\n\n"
         "Here is the complete research program:\n\n"
@@ -933,7 +933,7 @@ def main():
     except ImportError:
         pass
 
-    parser = argparse.ArgumentParser(description="BankNifty autoresearch daily midnight loop")
+    parser = argparse.ArgumentParser(description="Nifty50 IC autoresearch daily midnight loop")
     parser.add_argument("--experiments", type=int, default=N_EXPERIMENTS, help=f"Number of experiments (default: {N_EXPERIMENTS})")
     parser.add_argument("--dry-run", action="store_true", help="Compute baselines only; no Claude API calls")
     parser.add_argument("--no-evolver", action="store_true", help="Skip model_evolver.py after promotion")
@@ -945,7 +945,7 @@ def main():
     date_display = ist_now.strftime("%d %b %Y, %I:%M %p IST")
 
     print(f"\n{'='*60}")
-    print(f"  BankNifty Autoresearch — {date_display}")
+    print(f"  Nifty50 Autoresearch — {date_display}")
     print(f"  Experiments: {n_experiments} | Dry-run: {args.dry_run}")
     print(f"{'='*60}\n")
 
@@ -1058,7 +1058,7 @@ def main():
         live_eval_line = f"🧾 <b>Real trade data:</b> {n_live} trades logged (need {MIN_LIVE_FOR_MIX} to unlock) — using holdout only for now\n"
         scoring_note = f"(will mix in real trade accuracy once {MIN_LIVE_FOR_MIX} trades logged)"
     _send(
-        f"🤖 <b>BankNifty Brain Training — Starting</b>\n"
+        f"🤖 <b>Nifty50 IC Brain Training — Starting</b>\n"
         f"{date_display}\n\n"
         f"Running {n_experiments} experiments tonight.\n"
         f"ML changes go into the <b>paper model</b> first — they need {PAPER_WIN_STREAK} good nights to go live.\n\n"

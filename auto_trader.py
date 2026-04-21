@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
-auto_trader.py — BankNifty Options Full Automation
+auto_trader.py — Nifty50 Iron Condor Full Automation
 ====================================================
 Runs every trading day at 9:30 AM IST via cron.
 No human interaction required.
@@ -291,7 +291,7 @@ ML_CONF_THRESHOLD = 0.55
 
 # ── VIX regime filter ─────────────────────────────────────────────────────────
 # MIN: dynamically updated by analyze_confidence.py --write-threshold (called nightly
-# by autoloop_bn.py). As model accuracy improves, the threshold relaxes so we
+# by autoloop_nf.py). As model accuracy improves, the threshold relaxes so we
 # trade on more days. Fallback: 13.0 (VIX<13 historically 46.7% accuracy).
 # MAX: ceiling — panic-VIX days (real 1-min option backtest Oct-24 → Apr-26:
 # VIX∈[12,20] band kept 63.2% of trades, saved ₹44K vs unfiltered baseline).
@@ -1036,9 +1036,9 @@ def _parse_security_id(data, inner, atm_strike, opt_type) -> tuple:
     return None, None
 
 
-def _get_bn_ltp() -> float:
+def _get_nf_ltp() -> float:
     """
-    Fetch BankNifty last traded price from Dhan market-feed LTP endpoint.
+    Fetch Nifty50 last traded price from Dhan market-feed LTP endpoint.
     Works even when the option chain API is down (e.g. off-hours / weekends).
     Returns float spot price, or None if unavailable.
     """
@@ -1347,7 +1347,7 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
     # ── Option chain entirely unavailable ────────────────────────────────────
     # For DRY RUN: degrade to approximated ATM so user can still see what a
     # live day would look like. For LIVE: refuse to trade blind.
-    spot = last_spot or _get_bn_ltp()
+    spot = last_spot or _get_nf_ltp()
     if not spot:
         try:
             nf_df = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
@@ -1422,10 +1422,10 @@ def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
         notify.log(f"All 3 attempts failed for expiry {exp} — trying next expiry")
 
     # ── Option chain exhausted: try live LTP before falling back to CSV ────────
-    spot = _get_bn_ltp()
+    spot = _get_nf_ltp()
     if spot:
         atm_strike = round(spot / 100) * 100
-        notify.log(f"Option chain unavailable — using live BN LTP ₹{spot:,.0f} (ATM {int(atm_strike)})")
+        notify.log(f"Option chain unavailable — using live NF LTP ₹{spot:,.0f} (ATM {int(atm_strike)})")
         if DRY_RUN:
             return "DRY_RUN_LIVE_LTP", atm_strike, spot
         return None, None, None  # live mode: can't place without real security_id
@@ -1955,7 +1955,7 @@ def main():
         mode_label = "PAPER"
     else:
         mode_label = "LIVE"
-    instr_label = "Nifty IC" if IRON_CONDOR_MODE else "BankNifty"
+    instr_label = "Nifty IC" if IRON_CONDOR_MODE else "Nifty50"
     notify.log(f"{instr_label} Auto Trader starting [{mode_label}]")
 
     # 0. Credentials + lot-size sanity check
@@ -1970,7 +1970,7 @@ def main():
     # 1. Refresh data + signal
     refresh_data_and_signal()
 
-    # 1b. Holiday check — if BankNifty has no data for today, NSE is closed
+    # 1b. Holiday check — if Nifty50 has no data for today, NSE is closed
     # (handles Diwali, Republic Day, Holi, etc. without a manual holiday list)
     if not _is_trading_day() and not DRY_RUN:
         today_label = date.today().strftime("%d %b %Y")
@@ -2354,8 +2354,8 @@ def main():
         target_amt = lots * net_credit * LOT_SIZE
 
         strategy_name = "Bear Call Spread" if signal == "CALL" else "Bull Put Spread"
-        short_sym = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(short_strike)} {opt_type}"
-        long_sym  = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(long_strike)} {opt_type}"
+        short_sym = f"NIFTY {expiry.strftime('%d%b%Y').upper()} {int(short_strike)} {opt_type}"
+        long_sym  = f"NIFTY {expiry.strftime('%d%b%Y').upper()} {int(long_strike)} {opt_type}"
 
         # 6. Telegram trade-details message (spread format)
         notify.send(
@@ -2382,7 +2382,7 @@ def main():
         if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
             notify.send(
                 f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
-                f"An open BankNifty position already exists on your account.\n"
+                f"An open Nifty position already exists on your account.\n"
                 f"Skipping new order to avoid double exposure.\n\n"
                 f"<i>Close the existing position on Dhan app if this is unexpected.</i>"
             )
@@ -2493,7 +2493,7 @@ def main():
     if not security_id:
         die(
             f"Option chain unavailable — cannot find tradable option for "
-            f"BANKNIFTY {expiry} {'CE' if signal == 'CALL' else 'PE'}.\n"
+            f"NIFTY {expiry} {'CE' if signal == 'CALL' else 'PE'}.\n"
             f"Check Dhan API status."
         )
 
@@ -2568,7 +2568,7 @@ def main():
     sl_price   = premium * (1 - SL_PCT)
     tp_price   = premium * (1 + SL_PCT * rr)
 
-    opt_sym = f"BANKNIFTY {expiry.strftime('%d%b%Y').upper()} {int(atm_strike)} {opt_type}"
+    opt_sym = f"NIFTY {expiry.strftime('%d%b%Y').upper()} {int(atm_strike)} {opt_type}"
     if otm_distance and otm_distance >= 1:
         otm_label = f"  ({otm_distance*100}pt OTM — ATM too pricey for budget)"
     elif otm_distance and otm_distance <= -1:
@@ -2621,7 +2621,7 @@ def main():
     if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
         notify.send(
             f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
-            f"An open BankNifty position already exists on your account.\n"
+            f"An open Nifty position already exists on your account.\n"
             f"Skipping new order to avoid double exposure.\n\n"
             f"<i>Close the existing position on Dhan app if this is unexpected.</i>"
         )

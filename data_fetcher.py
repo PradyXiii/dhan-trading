@@ -1248,7 +1248,7 @@ def main():
                 total = len(pd.read_csv(path))
                 print(f"  → {csv_file}  (+{len(df)} rows, {total} total)")
 
-        print(f"\n=== Backfill complete. Run: python3 autoexperiment_bn.py ===")
+        print(f"\n=== Backfill complete. Run: python3 autoexperiment_nf.py ===")
         return
 
     os.makedirs(DATA_DIR, exist_ok=True)

@@ -63,26 +63,26 @@ def load_ensemble():
 #  P&L SIMULATION (mirrors ml_engine.simulate_outcome exactly)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_trade(signal, entry_premium, bn_open, bn_high, bn_low, bn_close, lots):
+def simulate_trade(signal, entry_premium, nf_open, nf_high, nf_low, nf_close, lots):
     """
     Simulate whether SL, TP, or EOD exit was hit, and compute P&L.
 
-    BN index pts required to hit SL/TP are derived from premium + delta ≈ 0.5.
+    NF index pts required to hit SL/TP are derived from premium + delta ≈ 0.5.
     This is the same formula used by ml_engine.simulate_outcome() for training labels,
     so simulation is consistent with what the model was trained on.
     """
-    sl_pts = (SL_PCT * entry_premium) / 0.5   # BN pts where option SL hits
-    tp_pts = (TP_PCT * entry_premium) / 0.5   # BN pts where option TP hits
+    sl_pts = (SL_PCT * entry_premium) / 0.5   # NF pts where option SL hits
+    tp_pts = (TP_PCT * entry_premium) / 0.5   # NF pts where option TP hits
 
     sl_price = round(entry_premium * (1 - SL_PCT), 1)
     tp_price = round(entry_premium * (1 + TP_PCT), 1)
 
     if signal == "CALL":
-        sl_hit = bn_low  <= bn_open - sl_pts
-        tp_hit = bn_high >= bn_open + tp_pts
+        sl_hit = nf_low  <= nf_open - sl_pts
+        tp_hit = nf_high >= nf_open + tp_pts
     else:  # PUT
-        sl_hit = bn_high >= bn_open + sl_pts
-        tp_hit = bn_low  <= bn_open - tp_pts
+        sl_hit = nf_high >= nf_open + sl_pts
+        tp_hit = nf_low  <= nf_open - tp_pts
 
     if tp_hit and sl_hit:
         # Both triggered intraday — conservative: assume SL hit first
@@ -99,9 +99,9 @@ def simulate_trade(signal, entry_premium, bn_open, bn_high, bn_low, bn_close, lo
         outcome = "EOD"
         delta = 0.5
         if signal == "CALL":
-            approx_move = (bn_close - bn_open) * delta * 0.5
+            approx_move = (nf_close - nf_open) * delta * 0.5
         else:
-            approx_move = (bn_open - bn_close) * delta * 0.5
+            approx_move = (nf_open - nf_close) * delta * 0.5
         exit_price = max(0.5, entry_premium + approx_move)
 
     pnl_per_lot = (exit_price - entry_premium) * LOT_SIZE
@@ -161,30 +161,30 @@ def main():
     else:
         print(f"  ⚠  today_trade.json not found — was a trade placed today?")
 
-    # ── 2. Load today's BankNifty OHLCV ──────────────────────────────────────
+    # ── 2. Load today's Nifty50 OHLCV ──────────────────────────────────────
     today_ts  = pd.Timestamp(today_dt)
-    bn_open = bn_high = bn_low = bn_close = None
+    nf_open = nf_high = nf_low = nf_close = None
     using_date = today_dt
     data_source = "CSV"
 
-    bn_path = f"{DATA_DIR}/banknifty.csv"
-    if os.path.exists(bn_path):
-        bn_df = pd.read_csv(bn_path, parse_dates=["date"])
-        row   = bn_df[bn_df["date"] == today_ts]
+    nf_path = f"{DATA_DIR}/nifty50.csv"
+    if os.path.exists(nf_path):
+        nf_df = pd.read_csv(nf_path, parse_dates=["date"])
+        row   = nf_df[nf_df["date"] == today_ts]
         if not row.empty:
-            bn_open  = float(row.iloc[0]["open"])
-            bn_high  = float(row.iloc[0]["high"])
-            bn_low   = float(row.iloc[0]["low"])
-            bn_close = float(row.iloc[0]["close"])
+            nf_open  = float(row.iloc[0]["open"])
+            nf_high  = float(row.iloc[0]["high"])
+            nf_low   = float(row.iloc[0]["low"])
+            nf_close = float(row.iloc[0]["close"])
 
-    if bn_open is None:
+    if nf_open is None:
         # CSV stale (e.g. post-holiday, market still open) — auto-fetch from yfinance
-        print(f"\n  ⏳  Today's BN row not in CSV — fetching from yfinance (^NSEBANK)...")
+        print(f"\n  ⏳  Today's NF row not in CSV — fetching from yfinance (^NSEI)...")
         try:
             import yfinance as yf
             from datetime import timedelta
             yf_end = today_dt + timedelta(days=1)
-            yf_df  = yf.download("^NSEBANK", start=str(today_dt), end=str(yf_end),
+            yf_df  = yf.download("^NSEI", start=str(today_dt), end=str(yf_end),
                                  progress=False, auto_adjust=True)
             if not yf_df.empty:
                 yf_df = yf_df.reset_index()
@@ -192,30 +192,30 @@ def main():
                     yf_df.columns = yf_df.columns.get_level_values(0)
                 yf_df.columns = [c.lower() for c in yf_df.columns]
                 r = yf_df.iloc[0]
-                bn_open  = float(r["open"])
-                bn_high  = float(r["high"])
-                bn_low   = float(r["low"])
-                bn_close = float(r["close"])
-                data_source = "yfinance ^NSEBANK"
+                nf_open  = float(r["open"])
+                nf_high  = float(r["high"])
+                nf_low   = float(r["low"])
+                nf_close = float(r["close"])
+                data_source = "yfinance ^NSEI"
                 print(f"  ✓  Live data fetched from yfinance")
             else:
                 print(f"  ⚠  yfinance returned no data — market may still be open or holiday")
         except Exception as e:
             print(f"  ⚠  yfinance fetch failed: {e}")
 
-    if bn_open is None:
-        print(f"\n  ❌  No BN OHLCV available for today — run after market close")
+    if nf_open is None:
+        print(f"\n  ❌  No NF OHLCV available for today — run after market close")
         return
 
-    day_move  = (bn_close - bn_open) / bn_open * 100
-    day_range = bn_high - bn_low
+    day_move  = (nf_close - nf_open) / nf_open * 100
+    day_range = nf_high - nf_low
 
-    print(f"\n  BANKNIFTY  {using_date}  [{data_source}]")
+    print(f"\n  NIFTY50  {using_date}  [{data_source}]")
     print(f"  ─────────────────────────────────────")
-    print(f"  Open  : {bn_open:>8,.0f}")
-    print(f"  High  : {bn_high:>8,.0f}  (+{bn_high - bn_open:,.0f} pts)")
-    print(f"  Low   : {bn_low:>8,.0f}  ({bn_low - bn_open:,.0f} pts)")
-    print(f"  Close : {bn_close:>8,.0f}")
+    print(f"  Open  : {nf_open:>8,.0f}")
+    print(f"  High  : {nf_high:>8,.0f}  (+{nf_high - nf_open:,.0f} pts)")
+    print(f"  Low   : {nf_low:>8,.0f}  ({nf_low - nf_open:,.0f} pts)")
+    print(f"  Close : {nf_close:>8,.0f}")
     print(f"  Day   : {day_move:+.2f}%   Range: {day_range:.0f} pts")
 
     # ── 3. Ensemble prediction ────────────────────────────────────────────────
@@ -287,7 +287,7 @@ def main():
         # Scenario A: what was actually traded
         sim_actual = simulate_trade(
             actual_signal, actual_premium,
-            bn_open, bn_high, bn_low, bn_close,
+            nf_open, nf_high, nf_low, nf_close,
             actual_lots
         )
         sign_a = "+" if sim_actual["total_pnl"] >= 0 else ""
@@ -298,7 +298,7 @@ def main():
         if ens_signal != actual_signal:
             sim_ens = simulate_trade(
                 ens_signal, actual_premium,
-                bn_open, bn_high, bn_low, bn_close,
+                nf_open, nf_high, nf_low, nf_close,
                 actual_lots
             )
             sign_e = "+" if sim_ens["total_pnl"] >= 0 else ""
@@ -322,11 +322,11 @@ def main():
         print(f"  TP price       : ₹{ref['tp_price']:.0f}  (+{TP_PCT*100:.0f}%  of premium,  RR {RR}×)")
         print(f"  Trailing jump  : ₹{ref['trailing_jump']:.1f}  (Super Order trail increment)")
         print(f"  ─────────────────────────────────────")
-        print(f"  BN pts to SL   : {ref['sl_pts_needed']:.0f} pts  {'against' if actual_signal=='CALL' else 'in favour'}")
-        print(f"  BN pts to TP   : {ref['tp_pts_needed']:.0f} pts  {'in favour' if actual_signal=='CALL' else 'against'}")
-        print(f"  Actual BN drop : {bn_open - bn_low:.0f} pts (low vs open)"
+        print(f"  NF pts to SL   : {ref['sl_pts_needed']:.0f} pts  {'against' if actual_signal=='CALL' else 'in favour'}")
+        print(f"  NF pts to TP   : {ref['tp_pts_needed']:.0f} pts  {'in favour' if actual_signal=='CALL' else 'against'}")
+        print(f"  Actual NF drop : {nf_open - nf_low:.0f} pts (low vs open)"
               if actual_signal == "CALL" else
-              f"  Actual BN rise : {bn_high - bn_open:.0f} pts (high vs open)")
+              f"  Actual NF rise : {nf_high - nf_open:.0f} pts (high vs open)")
         print(f"  ─────────────────────────────────────")
         print(f"  Max loss  1 lot: ₹{SL_PCT * actual_premium * LOT_SIZE:,.0f}")
         print(f"  Max gain  1 lot: ₹{TP_PCT * actual_premium * LOT_SIZE:,.0f}")
@@ -334,11 +334,11 @@ def main():
         print(f"  Max gain  total: ₹{TP_PCT * actual_premium * LOT_SIZE * actual_lots:,.0f}")
 
         # ── 6. What actually moved vs what was needed ─────────────────────────
-        print(f"\n  BN MOVEMENT vs REQUIRED")
+        print(f"\n  NF MOVEMENT vs REQUIRED")
         print(f"  ─────────────────────────────────────")
         if actual_signal == "CALL":
-            adverse_move  = bn_open - bn_low    # how far down it went
-            favourable    = bn_high - bn_open   # how far up
+            adverse_move  = nf_open - nf_low    # how far down it went
+            favourable    = nf_high - nf_open   # how far up
             print(f"  Max adverse  (down): {adverse_move:>5.0f} pts  "
                   f"vs SL trigger {ref['sl_pts_needed']:.0f} pts  "
                   f"→ {'SL HIT ✗' if adverse_move >= ref['sl_pts_needed'] else 'SL clear ✓'}")
@@ -346,8 +346,8 @@ def main():
                   f"vs TP trigger {ref['tp_pts_needed']:.0f} pts  "
                   f"→ {'TP HIT ✓' if favourable >= ref['tp_pts_needed'] else 'TP not reached'}")
         else:  # PUT
-            adverse_move  = bn_high - bn_open   # how far up (bad for PUT)
-            favourable    = bn_open - bn_low    # how far down (good for PUT)
+            adverse_move  = nf_high - nf_open   # how far up (bad for PUT)
+            favourable    = nf_open - nf_low    # how far down (good for PUT)
             print(f"  Max adverse   (up): {adverse_move:>5.0f} pts  "
                   f"vs SL trigger {ref['sl_pts_needed']:.0f} pts  "
                   f"→ {'SL HIT ✗' if adverse_move >= ref['sl_pts_needed'] else 'SL clear ✓'}")

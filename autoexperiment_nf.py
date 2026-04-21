@@ -7,7 +7,7 @@
 # See "REAL-OPTIONS RULE" in CLAUDE.md.
 # ─────────────────────────────────────────────────────────────────────────────
 """
-autoexperiment_bn.py — Fast single-experiment metric runner for BN autoresearch.
+autoexperiment_nf.py — Fast single-experiment metric runner for NF IC autoresearch.
 
 Imports ml_engine.py so any code changes there take effect immediately.
 Trains all 4 fixed-param classifiers (CatBoost, XGBoost, LightGBM, RandomForest),
@@ -20,11 +20,11 @@ other 3 models will show no improvement in ensemble vote, and gets discarded.
 No Optuna, no HPO — deterministic. Runtime: ~30–90 seconds for all 4 models.
 
 Usage:
-    python3 autoexperiment_bn.py
+    python3 autoexperiment_nf.py
     → {"composite": 0.734, "pnl_proxy": 0.68, "n_val": 252, "n_train": 1423,
        "model": "Ensemble(CAT+XGB+LGB+RF)", "scores": {"CatBoost": 0.71, ...}}
 
-Used by: autoloop_bn.py (reads stdout, parses JSON)
+Used by: autoloop_nf.py (reads stdout, parses JSON)
 """
 
 import argparse

@@ -1,5 +1,5 @@
 #!/bin/bash
-# setup_automation.sh — One-time setup for BankNifty Auto Trader cron job
+# setup_automation.sh — One-time setup for Nifty50 Auto Trader cron job
 # Run this once on your GCP VM:  bash setup_automation.sh
 
 set -e
@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
 
 echo "════════════════════════════════════════════════"
-echo "  BankNifty Auto Trader — Setup"
+echo "  Nifty50 Auto Trader — Setup"
 echo "════════════════════════════════════════════════"
 echo ""
 
@@ -85,7 +85,7 @@ echo ""
 echo "[5] Installing cron job (9:30 AM IST = 4:00 AM UTC, Mon–Fri)..."
 
 CRON_CMD="0 4 * * 1-5 cd $SCRIPT_DIR && python3 auto_trader.py >> $LOG_DIR/auto_trader.log 2>&1"
-CRON_COMMENT="# BankNifty Auto Trader — runs at 9:30 AM IST"
+CRON_COMMENT="# Nifty50 Auto Trader — runs at 9:30 AM IST"
 
 # Token renewer — twice daily + @reboot safety net.
 # 7:55 AM IST (2:25 UTC): renews before 9:30 AM trade. 11:00 PM IST (17:30 UTC): overnight renewal.
@@ -97,14 +97,14 @@ RENEWER_COMMENT="# Token renewer — twice daily 7:55 AM IST (2:25 UTC) + 11:00 
 
 # Monthly lot/expiry scanner — 1st of month at 10 AM IST = 4:30 AM UTC
 SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
-SCANNER_COMMENT="# BankNifty lot/expiry scanner — runs 1st of month 10 AM IST"
+SCANNER_COMMENT="# Nifty50 lot/expiry scanner — runs 1st of month 10 AM IST"
 
 # Nightly model evolver — 11 PM IST = 17:30 UTC, Mon–Fri
 EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DIR/evolver.log 2>&1"
 EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 
 # EOD position squareoff — 3:15 PM IST = 9:45 AM UTC, Mon–Fri
-# Closes any open BankNifty NRML positions that SL/TP didn't catch by end of day
+# Closes any open Nifty50 NRML positions that SL/TP didn't catch by end of day
 EXIT_CMD="45 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/exit.log 2>&1"
 EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, closes open NRML positions before market close"
 
@@ -131,7 +131,7 @@ HEALTH_CMD="35 3 * * 1-5 cd $SCRIPT_DIR && python3 health_ping.py >> $LOG_DIR/he
 HEALTH_COMMENT="# Pre-market health ping — 9:05 AM IST, system checks before trade"
 
 # Morning news brief — 9:15 AM IST = 3:45 AM UTC, Mon–Fri
-# Fetches BankNifty headlines, calls Claude for sentiment, writes data/news_sentiment.json
+# Fetches Nifty50 headlines, calls Claude for sentiment, writes data/news_sentiment.json
 BRIEF_CMD="45 3 * * 1-5 cd $SCRIPT_DIR && python3 morning_brief.py >> $LOG_DIR/morning_brief.log 2>&1"
 BRIEF_COMMENT="# Morning news brief — 9:15 AM IST, news sentiment for auto_trader"
 
@@ -144,7 +144,7 @@ LOG_ROTATE_COMMENT="# Weekly log rotation — Sun 2 AM IST, truncate logs > 10 M
 # Claude AI proposes feature/signal improvements with paper trading mode for ML changes.
 # Paper model must beat live by ≥1.5% for 3 consecutive nights to auto-promote.
 # Sends Telegram updates throughout. Retains evolver if immediate changes are made.
-AUTOLOOP_CMD="30 18 * * 1-5 cd $SCRIPT_DIR && python3 autoloop_bn.py >> $LOG_DIR/autoloop_bn.log 2>&1"
+AUTOLOOP_CMD="30 18 * * 1-5 cd $SCRIPT_DIR && python3 autoloop_nf.py >> $LOG_DIR/autoloop_nf.log 2>&1"
 AUTOLOOP_COMMENT="# Autoresearch — Mon–Fri midnight IST, paper-trading AI improvement loop"
 
 # Remove old entries (all scripts) if any
@@ -160,10 +160,10 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "trade_journal" \
   | grep -v "midday_conviction" \
   | grep -v "health_ping" \
-  | grep -v "autoloop_bn" \
+  | grep -v "autoloop_nf" \
   | grep -v "log rotation" \
-  | grep -v "BankNifty Auto Trader" \
-  | grep -v "BankNifty lot/expiry" \
+  | grep -v "Nifty50 Auto Trader" \
+  | grep -v "Nifty50 lot/expiry" \
   | grep -v "ML Model Evolver" \
   | grep -v "Token renewer" \
   | grep -v "EOD squareoff" \
@@ -245,7 +245,7 @@ echo "  ML Evolver     : 11:00 PM IST every weekday (Mon–Fri)"
 echo "  Evolver log    : $LOG_DIR/evolver.log"
 echo ""
 echo "  Autoresearch   : Mon–Fri midnight IST (AI model improvement, paper trading mode)"
-echo "  Autoloop log   : $LOG_DIR/autoloop_bn.log"
+echo "  Autoloop log   : $LOG_DIR/autoloop_nf.log"
 echo ""
 echo "  Log rotation   : Sunday 2:00 AM IST weekly (truncates logs > 10 MB)"
 echo ""

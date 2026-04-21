@@ -5,7 +5,7 @@
 # Reserved loop-variable names (never reuse): _c  _vix  _sp  _nk
 # Every new feature needs .shift(1) on price inputs — no same-day values.
 # After editing FEATURE_COLS: verify len(FEATURE_COLS) == len(set(FEATURE_COLS))
-# Gate every change with: python3 autoexperiment_bn.py — keep only if >= 0.6175
+# Gate every change with: python3 autoexperiment_nf.py — keep only if >= 0.6175
 # ─────────────────────────────────────────────────────────────────────────────
 # ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
 # Autoexperiment composite gates directional signal quality — NOT P&L reality.
@@ -1313,7 +1313,7 @@ def get_today_features(feature_cols):
     today_ts   = pd.Timestamp(pd.Timestamp.now().date())
     today_rows = df[df["date"] == today_ts]
     if today_rows.empty:
-        # Pre-market: banknifty.csv has no today row yet (Dhan historical API
+        # Pre-market: nifty50.csv has no today row yet (Dhan historical API
         # only returns closed candles). Use the latest available row's features
         # — those ARE today's entry conditions (based on yesterday's close).
         if df.empty:
@@ -1362,7 +1362,7 @@ def predict_today():
 
     today_rows = trading[trading["date"] == today_ts]
     if today_rows.empty:
-        # Pre-market: banknifty.csv doesn't have today's candle yet.
+        # Pre-market: nifty50.csv doesn't have today's candle yet.
         # Use the latest available trading day's features — those represent
         # current market conditions (yesterday's close + macro data).
         if trading.empty:

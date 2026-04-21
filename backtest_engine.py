@@ -26,7 +26,7 @@ ITM_WALK_MAX     = 2    # probe up to 200pt ITM when capital is flush
 OTM_WALK_MAX     = 10   # probe up to 1000pt OTM when capital is thin
 _DEFAULT_IV      = 0.20 # assumed annualized IV for premium/delta approximation
 
-# BankNifty expiry timeline (4 phases):
+# Nifty50 expiry timeline (4 phases):
 # Phase 1: Sep 2021 – Feb 2024    → weekly, every Thursday
 # Phase 2: Mar 2024 – Nov 19 2024 → weekly, every Wednesday
 # Phase 3: Nov 20 2024 – Aug 2025 → monthly, last Wednesday (weekly discontinued)
@@ -66,7 +66,7 @@ def _baseline_lot_size(d):
 
 def get_lot_size(d):
     """
-    Return the correct BankNifty lot size for a historical trade date.
+    Return the correct Nifty50 lot size for a historical trade date.
 
     Priority:
       1. Active overrides from data/lot_size_overrides.json (written by
@@ -280,7 +280,7 @@ def load_all_signals(ml=False):
 
 
 def load_bn_ohlcv():
-    df = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+    df = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
     return df.set_index("date")
 
 
@@ -938,7 +938,7 @@ def run_range_validation():
     For each DTE bucket, compute ATM premium and check what % of days
     a given TP% would actually be hit by the favorable move.
     """
-    bn = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
+    bn = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
     bn["date_dt"]  = bn["date"].dt.date
     bn["fav_call"] = bn["high"]  - bn["open"]   # BN pts if trade is CALL
     bn["fav_put"]  = bn["open"]  - bn["low"]    # BN pts if trade is PUT
@@ -947,8 +947,8 @@ def run_range_validation():
     bn["dte"]      = bn["date_dt"].apply(get_dte)
 
     print(f"\n{'='*80}")
-    print(f"  BANKNIFTY DAILY MOVE ANALYSIS — {len(bn)} trading days")
-    print(f"  Source: data/banknifty.csv   (weekly expiry → Sep 2024, monthly after)")
+    print(f"  NIFTY50 DAILY MOVE ANALYSIS — {len(bn)} trading days")
+    print(f"  Source: data/nifty50.csv   (weekly expiry → Sep 2024, monthly after)")
     print(f"{'='*80}")
 
     # Overall directional move stats (CALL or PUT, whoever is right)
@@ -1418,7 +1418,7 @@ def print_summary(trade_df, monthly, threshold=None, ml=False):
     thr_label = f"±{threshold}" if threshold is not None else "±?"
 
     print(f"\n{'='*60}")
-    print(f"   BANKNIFTY OPTIONS BACKTEST — Sep 2021 to Apr 2026"
+    print(f"   NIFTY50 OPTIONS BACKTEST — Sep 2021 to Apr 2026"
           f"  [threshold {thr_label}]")
     print(f"{'='*60}")
     print(f"  Starting capital    : ₹{start_cap:>10,.0f}")

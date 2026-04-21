@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-optimize_params.py — Systematic parameter optimizer for BankNifty spread strategies.
+optimize_params.py — Systematic parameter optimizer for Nifty50 spread strategies.
 
 Finds optimal combination of:
   • VIX band (trade only when VIX in [vix_min, vix_max])
@@ -167,7 +167,7 @@ def _fmt(df, sort_col, ascending=False, head=25):
 def main():
     ap = argparse.ArgumentParser(description="Spread parameter optimizer")
     ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
-                    help="BNF=BankNifty (default), NF=Nifty50 weekly")
+                    help="NF=Nifty50 (default)")
     ap.add_argument("--entry-scan",  action="store_true",
                     help="Test 6 entry times 09:15–10:30 (requires ~3 min)")
     ap.add_argument("--save-trades", action="store_true",
@@ -181,7 +181,7 @@ def main():
 
     inst = args.instrument
     strategies = NF_STRATEGIES if inst == "NF" else BNF_STRATEGIES
-    inst_label = "Nifty50" if inst == "NF" else "BankNifty"
+    inst_label = "Nifty50"
 
     yr_note  = f" (year={args.year})"     if args.year    else ""
     dte_note = f" (DTE≤{args.max_dte})"   if args.max_dte else ""

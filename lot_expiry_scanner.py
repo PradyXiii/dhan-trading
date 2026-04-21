@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
-lot_expiry_scanner.py — Monthly NSE/Dhan scanner for BankNifty contract changes.
+lot_expiry_scanner.py — Monthly NSE/Dhan scanner for Nifty50 contract changes.
 
 Problem
 -------
-NSE and SEBI change BankNifty lot size and expiry day frequently. Recent history:
+NSE and SEBI change Nifty50 lot size and expiry day frequently. Recent history:
   - Apr 2024: SEBI mandated min contract value ₹15L → lot 15 → 30 (effective Nov 20 2024)
   - Jun 2025: lot 30 → 35 on first post-mandate monthly contract
   - Jan 2026: lot 35 → 30 revision
@@ -85,7 +85,7 @@ DHAN_HEADERS      = {
     "Content-Type": "application/json",
 }
 
-BN_SYMBOL_VARIANTS = ("BANKNIFTY", "NIFTY BANK", "NIFTYBANK", "BANK NIFTY")
+NF_SYMBOL_VARIANTS = ("NIFTY", "NIFTY50", "NIFTY 50")
 MONTH_MAP = {
     "JAN": 1,  "FEB": 2,  "MAR": 3,  "APR": 4,  "MAY": 5,  "JUN": 6,
     "JUL": 7,  "AUG": 8,  "SEP": 9,  "OCT": 10, "NOV": 11, "DEC": 12,
@@ -115,8 +115,8 @@ def _nse_session():
 
 def fetch_nse_lot_csv():
     """
-    Fetch fo_mktlots.csv from NSE. Returns list of dicts for BANKNIFTY:
-      [{"year": 2026, "month": 4, "lot_size": 30, "col_label": "APR-26"}, ...]
+    Fetch fo_mktlots.csv from NSE. Returns list of dicts for NIFTY:
+      [{"year": 2026, "month": 4, "lot_size": 65, "col_label": "APR-26"}, ...]
     First column tried: new archives URL. Falls back to old www1 URL.
     """
     session = _nse_session()
@@ -166,23 +166,23 @@ def fetch_nse_lot_csv():
     if not month_cols:
         return None
 
-    # Find BANKNIFTY row
-    bn_row = None
+    # Find NIFTY row (exact match — avoid matching BANKNIFTY)
+    nf_row = None
     for row in rows[1:]:
         if len(row) <= sym_idx:
             continue
         sym = row[sym_idx].strip().upper()
-        if sym in BN_SYMBOL_VARIANTS or "BANKNIFTY" in sym.replace(" ", ""):
-            bn_row = row
+        if sym in NF_SYMBOL_VARIANTS or sym == "NIFTY":
+            nf_row = row
             break
-    if bn_row is None:
+    if nf_row is None:
         return None
 
     contracts = []
     for col_idx, label, month, year in month_cols:
-        if col_idx >= len(bn_row):
+        if col_idx >= len(nf_row):
             continue
-        val = bn_row[col_idx].strip()
+        val = nf_row[col_idx].strip()
         try:
             lot = int(float(val))
             if lot > 0:
@@ -205,7 +205,7 @@ def fetch_nse_lot_csv():
 
 def fetch_dhan_current_lot():
     """
-    Query Dhan instrument master for BANKNIFTY FUT, extract lot size.
+    Query Dhan instrument master for NIFTY FUT, extract lot size.
     Returns int or None.
     """
     if not DHAN_TOKEN or not DHAN_CLIENT_ID:
@@ -218,13 +218,13 @@ def fetch_dhan_current_lot():
         )
         if r.status_code != 200:
             return None
-        # BANKNIFTY FUT/OPT rows contain SEM_LOT_UNITS column
+        # NIFTY FUT/OPT rows contain SEM_LOT_UNITS column
         reader = csv.DictReader(io.StringIO(r.text))
         for row in reader:
             sym = (row.get("SEM_TRADING_SYMBOL", "") or "").upper()
             name = (row.get("SM_SYMBOL_NAME", "") or "").upper()
             inst = (row.get("SEM_INSTRUMENT_NAME", "") or "").upper()
-            if ("BANKNIFTY" in sym or "BANKNIFTY" in name) and inst in ("OPTIDX", "FUTIDX"):
+            if (("NIFTY" in sym and "BANK" not in sym) or ("NIFTY" in name and "BANK" not in name)) and inst in ("OPTIDX", "FUTIDX"):
                 lot = row.get("SEM_LOT_UNITS") or row.get("SEM_LOT_SIZE") or ""
                 try:
                     lot_int = int(float(lot))
@@ -239,7 +239,7 @@ def fetch_dhan_current_lot():
 
 def fetch_dhan_expirylist():
     """
-    Get upcoming BankNifty expiries from Dhan. Returns list of date objects.
+    Get upcoming Nifty50 expiries from Dhan. Returns list of date objects.
     """
     if not DHAN_TOKEN or not DHAN_CLIENT_ID:
         return []
@@ -247,7 +247,7 @@ def fetch_dhan_expirylist():
         r = requests.post(
             "https://api.dhan.co/v2/optionchain/expirylist",
             headers=DHAN_HEADERS,
-            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
             timeout=10,
         )
         if r.status_code != 200:
@@ -486,7 +486,7 @@ def main():
     force   = "--force" in args
     today   = date.today()
 
-    print(f"BankNifty lot/expiry scanner — {today}")
+    print(f"Nifty50 lot/expiry scanner — {today}")
     print(f"{'='*60}")
 
     overrides = load_overrides()
@@ -496,7 +496,7 @@ def main():
     print("\n[1] Fetching NSE fo_mktlots.csv...")
     nse_contracts = fetch_nse_lot_csv()
     if nse_contracts:
-        print(f"    Parsed {len(nse_contracts)} BN contracts:")
+        print(f"    Parsed {len(nse_contracts)} NF contracts:")
         for c in nse_contracts[:6]:
             print(f"      {c['col_label']:10s} ({c['year']}-{c['month']:02d}): lot = {c['lot_size']}")
         source = "nse_csv"
@@ -510,7 +510,7 @@ def main():
         print("\n[2] Fetching Dhan scrip master for current lot...")
         dhan_lot = fetch_dhan_current_lot()
         if dhan_lot:
-            print(f"    Dhan current BN lot size: {dhan_lot}")
+            print(f"    Dhan current NF lot size: {dhan_lot}")
             source = "dhan_api"
         else:
             print("    Dhan fetch failed.")
@@ -599,7 +599,7 @@ def main():
     if alert_lines or force:
         if not alert_lines:
             alert_lines = ["No changes detected — scanner running normally."]
-        send_alert("BankNifty Contract Scanner", alert_lines)
+        send_alert("Nifty50 Contract Scanner", alert_lines)
 
     print(f"\n{'='*60}")
     print(f"Done. Log: {SCAN_LOG}")

@@ -39,8 +39,7 @@ def section(title):
 section("1. DATA FILES")
 
 CORE_CSVS = [
-    ("data/banknifty.csv",     "close",  3, 1500),
-    ("data/nifty50.csv",       "close",  3, 1500),
+    ("data/nifty50.csv",       "close",  3, 22000),
     ("data/india_vix.csv",     "close",  3, 1500),
     ("data/sp500.csv",         "close",  4, 1500),
     ("data/nikkei.csv",        "close",  4, 1500),
@@ -101,7 +100,7 @@ try:
 
     # New features added in this session
     for feat in ["adx14", "straddle_expansion", "rule_score_lag1",
-                 "prev_range_pct", "prev_body_pct", "bn_ret60", "bn_dist_high52"]:
+                 "prev_range_pct", "prev_body_pct", "nf_ret60", "nf_dist_high52"]:
         if feat in df_feat.columns:
             vals    = df_feat[feat].dropna()
             last_v  = vals.iloc[-1] if len(vals) else float("nan")
@@ -350,7 +349,7 @@ try:
         acc = recent["oracle_correct"].mean()
         check("Recent 10-trade accuracy", True, f"{acc:.0%}")
 except FileNotFoundError:
-    check("data/live_trades.csv", False, "FILE MISSING — run backfill_live_trades.py")
+    check("data/live_ic_trades.csv", False, "FILE MISSING — run trade_journal.py")
 except Exception as e:
     check("live_trades.csv", False, str(e)[:80])
 
@@ -425,7 +424,7 @@ try:
     jobs = {
         "auto_trader.py":        "0  4   * * 1-5",
         "model_evolver.py":      "30 17  * * 1-5",
-        "autoloop_bn.py":        "30 18  * * 1-5",
+        "autoloop_nf.py":        "30 18  * * 1-5",
         "midday_conviction.py":  "30 5   * * 1-5",
         "trade_journal.py":      "0  10  * * 1-5",
         "health_ping.py":        "35 3   * * 1-5",
@@ -495,7 +494,7 @@ try:
     dirty = [l for l in r.stdout.splitlines()
              if not l.startswith("??") and
              any(f in l for f in ["ml_engine", "auto_trader", "model_evolver",
-                                  "autoloop_bn", "trade_journal", "midday_conviction"])]
+                                  "autoloop_nf", "trade_journal", "midday_conviction"])]
     check("No uncommitted changes to key files", not dirty,
           "clean" if not dirty else f"uncommitted: {', '.join(dirty)}")
 except Exception as e:

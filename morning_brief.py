@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 """
-morning_brief.py — Pre-market BankNifty intelligence brief
+morning_brief.py — Pre-market Nifty50 IC intelligence brief
 ===========================================================
 Runs at 9:15 AM IST (15 min before auto_trader).
 

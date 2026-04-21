@@ -3,7 +3,7 @@
 """
 exit_positions.py — EOD position squareoff at 3:15 PM IST
 ==========================================================
-Closes any open BankNifty F&O positions via Dhan MARKET SELL.
+Closes any open Nifty50 F&O positions via Dhan MARKET SELL.
 MARGIN (NRML) positions do NOT auto-square off — this script does it.
 
 If SL or TP already fired, netQty will be 0 → nothing to do.
@@ -102,9 +102,9 @@ def _load_today_trade() -> dict:
         return {}
 
 
-def _get_today_bn_sells() -> list:
+def _get_today_nf_sells() -> list:
     """
-    Fetch today's tradebook from Dhan and return SELL fills for today's BN option.
+    Fetch today's tradebook from Dhan and return SELL fills for today's NF option.
     Returns list of fill dicts (may be empty on API failure).
     """
     try:
@@ -241,7 +241,7 @@ def _send_exit_telegram(today_trade: dict, sells: list):
     tp_price = float(today_trade.get("tp_price", 0))
     expiry   = today_trade.get("expiry", "?")
 
-    lot_size = 30  # BankNifty Jan 2026+
+    lot_size = 65  # Nifty50 Jan 2026+
 
     if sells:
         # Weighted average exit price across fills
@@ -389,13 +389,13 @@ def main():
         return
 
     positions = get_open_positions()
-    instr_label = "Nifty IC" if _load_today_trade().get("strategy") == "nf_iron_condor" else "BankNifty"
+    instr_label = "Nifty IC" if _load_today_trade().get("strategy") == "nf_iron_condor" else "Nifty50"
     if not positions:
         notify.log(f"No open {instr_label} positions — nothing to square off. SL/TP already hit.")
         # Send exit Telegram if we placed a trade today (SL or TP fired intraday)
         today_trade = _load_today_trade()
         if today_trade:
-            sells = [] if DRY_RUN else _get_today_bn_sells()
+            sells = [] if DRY_RUN else _get_today_nf_sells()
             _send_exit_telegram(today_trade, sells)
         _write_exit_marker()
         return

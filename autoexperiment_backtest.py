@@ -14,7 +14,7 @@ import-time side effects: _acquire_lock(), API client setup, etc.).
 Runs backtest_engine.run_backtest() with the current SL_PCT and RR values, computes
 a composite metric on a 0–1 scale, and prints a single JSON line.
 
-Used by: autoloop_bn.py (routes here when proposed change targets auto_trader.py)
+Used by: autoloop_nf.py (routes here when proposed change targets auto_trader.py)
 
 Usage:
     python3 autoexperiment_backtest.py
