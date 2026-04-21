@@ -1256,7 +1256,7 @@ def main():
 
     # ── Dhan API indices — incremental (only fetch since last CSV date) ──────
     print("\n=== Dhan API indices (incremental) ===")
-    for sec_id, name, csv_file in [("25", "BankNifty", "banknifty.csv"),
+    for sec_id, name, csv_file in [("25", "Bank Index", "banknifty.csv"),
                                     ("13", "Nifty50",   "nifty50.csv")]:
         path      = f"{DATA_DIR}/{csv_file}"
         from_date = _last_csv_date(path) or FROM_DATE
@@ -1315,7 +1315,7 @@ def main():
     print("\n=== FII/DII live snapshot ===")
     fetch_fii_today()
 
-    print("\n=== PCR live snapshot (BankNifty) ===")
+    print("\n=== PCR live snapshot (Nifty) ===")
     fetch_pcr_dhan_today()
 
     # NOTE: fetch_rollingoption (historical ATM option premiums) is intentionally
