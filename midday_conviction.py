@@ -228,12 +228,14 @@ def get_option_ltp(security_id: str, trade: dict | None = None) -> float | None:
         else:
             data  = r.json()
             items = data if isinstance(data, list) else data.get("data", [])
-            bn_positions = [
+            nf_positions = [
                 p for p in items
                 if int(p.get("netQty", 0)) > 0
                 and p.get("exchangeSegment", "") == "NSE_FNO"
-                and "BANKNIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
+                and "NIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
+                and "BANKNIFTY" not in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
             ]
+            bn_positions = nf_positions
             # Prefer exact security_id match
             ltp_from_pos = None
             for p in bn_positions:
@@ -427,7 +429,7 @@ def reassess(trade, bn_spot, option_ltp, macro) -> tuple[int, list, str]:
 # ── Reversal helpers ─────────────────────────────────────────────────────────
 
 def _check_position_open(security_id: str) -> bool:
-    """Return True if we have an open BankNifty NSE_FNO position right now.
+    """Return True if we have an open Nifty NSE_FNO position right now.
     Fail-open: returns True if the API is unreachable (prevents false skip)."""
     try:
         r = requests.get("https://api.dhan.co/v2/positions", headers=HEADERS, timeout=10)
@@ -437,10 +439,11 @@ def _check_position_open(security_id: str) -> bool:
         data  = r.json()
         items = data if isinstance(data, list) else data.get("data", [])
         for p in items:
+            sym = str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
             if (int(p.get("netQty", 0)) != 0
                     and p.get("exchangeSegment", "") == "NSE_FNO"
-                    and "BANKNIFTY" in str(
-                        p.get("tradingSymbol", p.get("securityId", ""))).upper()):
+                    and "NIFTY" in sym
+                    and "BANKNIFTY" not in sym):
                 return True
         return False
     except Exception as e:

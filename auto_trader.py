@@ -2235,7 +2235,7 @@ def main():
                 f"SELL  <code>{pe_short_sym}</code>  @ ₹{ic['pe_short_ltp']:.0f}\n"
                 f"BUY   <code>{pe_long_sym}</code>  @ ₹{ic['pe_long_ltp']:.0f}\n"
                 f"{lots} lot{'s' if lots > 1 else ''}  ·  Net credit ₹{net_credit:.0f}\n\n"
-                f"<i>PAPER_MODE=True — no real order placed.</i>"
+                f"<i>DRY RUN — no real order placed.</i>"
             )
             return
 

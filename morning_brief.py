@@ -33,20 +33,20 @@ MAX_LINES   = 10      # cap headlines fed to Claude
 
 # Banking-sector-specific RSS feeds only — no generic Sensex/Nifty noise
 NEWS_FEEDS = [
-    # ET Markets — Banking & Finance section
-    "https://economictimes.indiatimes.com/industry/banking/finance/rssfeeds/13358575.cms",
-    # Google News — BankNifty + RBI + banking events (not generic market moves)
-    ("https://news.google.com/rss/search?q=%22BankNifty%22+OR+%22RBI%22+OR"
-     "+%22HDFC+Bank%22+OR+%22SBI%22+OR+%22ICICI+Bank%22+OR+%22Axis+Bank%22"
-     "+OR+%22banking+sector%22+OR+%22bank+results%22"
+    # ET Markets — Economy & Policy section
+    "https://economictimes.indiatimes.com/economy/policy/rssfeeds/1207707168.cms",
+    # Google News — Nifty50 + macro catalysts (not generic market moves)
+    ("https://news.google.com/rss/search?q=%22Nifty%22+OR+%22RBI%22+OR"
+     "+%22India+GDP%22+OR+%22CPI+inflation%22+OR+%22FII+flows%22"
+     "+OR+%22NSE%22+OR+%22SEBI%22"
      "&hl=en-IN&gl=IN&ceid=IN:en"),
 ]
 
 
 # ─── Live price fetch ────────────────────────────────────────────────────────
 
-def _fetch_live_bn_spot() -> float | None:
-    """Get BankNifty current spot from Dhan LTP endpoint."""
+def _fetch_live_nf_spot() -> float | None:
+    """Get Nifty50 current spot from Dhan LTP endpoint."""
     try:
         headers = {
             "access-token": os.getenv("DHAN_ACCESS_TOKEN", ""),
@@ -55,16 +55,16 @@ def _fetch_live_bn_spot() -> float | None:
         }
         resp = requests.post(
             "https://api.dhan.co/v2/marketfeed/ltp",
-            headers=headers, json={"IDX_I": [25]}, timeout=10,
+            headers=headers, json={"IDX_I": [13]}, timeout=10,
         )
         if resp.status_code == 200:
             d        = resp.json()
             idx_data = (d.get("data") or {}).get("IDX_I") or d.get("IDX_I") or {}
-            ltp      = (idx_data.get(25) or idx_data.get("25") or {}).get("last_price")
-            if ltp and float(ltp) > 10000:
+            ltp      = (idx_data.get(13) or idx_data.get("13") or {}).get("last_price")
+            if ltp and float(ltp) > 5000:
                 return float(ltp)
     except Exception as e:
-        print(f"  BN spot fetch failed: {e}")
+        print(f"  NF spot fetch failed: {e}")
     return None
 
 
@@ -88,23 +88,23 @@ def _build_live_context() -> str:
     """Combine live + CSV data into a factual context block for Claude."""
     lines = []
 
-    # 1. BN live spot vs yesterday's close
-    bn_spot = _fetch_live_bn_spot()
+    # 1. Nifty50 live spot vs yesterday's close
+    nf_spot = _fetch_live_nf_spot()
     try:
-        bn_csv   = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
-        bn_prev  = float(bn_csv["close"].iloc[-1])
-        if bn_spot:
-            gap_pct = (bn_spot / bn_prev - 1) * 100
+        nf_csv   = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
+        nf_prev  = float(nf_csv["close"].iloc[-1])
+        if nf_spot:
+            gap_pct = (nf_spot / nf_prev - 1) * 100
             lines.append(
-                f"BankNifty NOW: {bn_spot:,.0f}  |  Yesterday close: {bn_prev:,.0f}  "
+                f"Nifty50 NOW: {nf_spot:,.0f}  |  Yesterday close: {nf_prev:,.0f}  "
                 f"|  Gap: {gap_pct:+.2f}%"
             )
         else:
-            chg = (bn_csv["close"].iloc[-1] / bn_csv["close"].iloc[-2] - 1) * 100
-            lines.append(f"BankNifty yesterday: {bn_prev:,.0f} ({chg:+.2f}%)")
+            chg = (nf_csv["close"].iloc[-1] / nf_csv["close"].iloc[-2] - 1) * 100
+            lines.append(f"Nifty50 yesterday: {nf_prev:,.0f} ({chg:+.2f}%)")
     except Exception:
-        if bn_spot:
-            lines.append(f"BankNifty NOW: {bn_spot:,.0f}")
+        if nf_spot:
+            lines.append(f"Nifty50 NOW: {nf_spot:,.0f}")
 
     # 2. India VIX from CSV (overnight VIX not available pre-market)
     try:
@@ -180,21 +180,21 @@ def _call_claude(headlines: list[str], live_ctx: str) -> dict:
 
     news_block = "\n".join(f"- {h}" for h in headlines) if headlines else "(no fresh banking news)"
 
-    prompt = f"""You are a pre-market analyst for BankNifty options trading.
+    prompt = f"""You are a pre-market analyst for Nifty50 Iron Condor options trading.
 
 LIVE MARKET DATA (as of 9:15 AM IST today):
 {live_ctx}
 
-BANKING-SPECIFIC NEWS (last 20 hours):
+NIFTY-SPECIFIC NEWS (last 20 hours):
 {news_block}
 
-TASK: Decide if there is an EVENT-DRIVEN catalyst that would push BankNifty strongly UP or DOWN today.
+TASK: Decide if there is an EVENT-DRIVEN catalyst that would push Nifty50 strongly UP or DOWN today (which would harm our Iron Condor position that benefits from Nifty staying range-bound).
 
 RULES:
-1. Focus ONLY on: RBI decisions, banking regulations, major bank earnings/results, FII flows, credit events, geopolitical shocks, US Fed policy, India CPI/GDP surprises.
+1. Focus ONLY on: RBI decisions, major policy changes, FII flows, geopolitical shocks, US Fed policy, India CPI/GDP surprises, F&O expiry effects.
 2. IGNORE headlines that simply describe today's price movement (e.g. "Sensex up 500 pts", "markets open flat") — those are already captured by the live price data above.
-3. If the live gap data already shows strong direction (e.g. BankNifty gap +0.8%), weight that heavily.
-4. If news is generic or no clear banking catalyst exists → return NEUTRAL with LOW confidence.
+3. If the live gap data already shows strong direction (e.g. Nifty gap +0.8%), weight that heavily.
+4. If news is generic or no clear macro catalyst exists → return NEUTRAL with LOW confidence.
 
 Reply with ONLY this JSON (one line, no markdown):
 {{"direction": "BULLISH|BEARISH|NEUTRAL", "confidence": "HIGH|MEDIUM|LOW", "reason": "one sentence citing specific catalyst or 'no clear catalyst'"}}"""
