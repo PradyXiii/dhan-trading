@@ -318,7 +318,7 @@ def _build_model(model_type, params):
 #  LIVE TRADE FEEDBACK — inject real outcomes + boost miss-day patterns
 # ─────────────────────────────────────────────────────────────────────────────
 
-LIVE_TRADES_PATH    = f"{DATA_DIR}/live_trades.csv"
+LIVE_TRADES_PATH    = f"{DATA_DIR}/live_ic_trades.csv"
 MIDDAY_CHECKPOINTS  = f"{DATA_DIR}/midday_checkpoints.csv"
 LIVE_INJECT_WEIGHT  = 10.0  # live trade rows are 10× more valuable than synthetic labels
 MIDDAY_MISS_WEIGHT  = 5.0   # midday reversal rows: confirmed wrong direction mid-session
@@ -875,7 +875,7 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
     live_section = ""
     try:
         import csv as _csv
-        journal_path = f"{DATA_DIR}/live_trades.csv"
+        journal_path = f"{DATA_DIR}/live_ic_trades.csv"
         if os.path.exists(journal_path):
             with open(journal_path) as f:
                 rows = list(_csv.DictReader(f))
