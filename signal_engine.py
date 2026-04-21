@@ -78,33 +78,31 @@ EVENT_DATES = {
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 def load_data():
-    """Load all CSVs and merge on date using BankNifty calendar as master."""
-    bn  = pd.read_csv(f"{DATA_DIR}/banknifty.csv",     parse_dates=["date"])
+    """Load all CSVs and merge on date using Nifty50 calendar as master."""
     nf  = pd.read_csv(f"{DATA_DIR}/nifty50.csv",       parse_dates=["date"])
     vix = pd.read_csv(f"{DATA_DIR}/india_vix.csv",     parse_dates=["date"])
     sp  = pd.read_csv(f"{DATA_DIR}/sp500.csv",         parse_dates=["date"])
     nk  = pd.read_csv(f"{DATA_DIR}/nikkei.csv",        parse_dates=["date"])
     spf = pd.read_csv(f"{DATA_DIR}/sp500_futures.csv", parse_dates=["date"])
 
-    bn  = bn [["date","open","high","low","close"]].rename(
-              columns={"open":"bn_open","high":"bn_high","low":"bn_low","close":"bn_close"})
-    nf  = nf [["date","close"]].rename(columns={"close":"nf_close"})
+    nf  = nf [["date","open","high","low","close"]].rename(
+              columns={"open":"nf_open","high":"nf_high","low":"nf_low","close":"nf_close"})
     vix = vix[["date","close"]].rename(columns={"close":"vix_close"})
     sp  = sp [["date","close"]].rename(columns={"close":"sp_close"})
     nk  = nk [["date","close"]].rename(columns={"close":"nk_close"})
     spf = spf[["date","open","close"]].rename(columns={"open":"spf_open","close":"spf_close"})
 
-    df = bn.copy()
-    for other in [nf, vix, sp, nk, spf]:
+    df = nf.copy()
+    for other in [vix, sp, nk, spf]:
         df = df.merge(other, on="date", how="left")
 
     df = df.sort_values("date").reset_index(drop=True)
 
     # Forward-fill global market data (handles weekends/holidays)
-    ff_cols = ["nf_close", "vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]
+    ff_cols = ["vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]
     df[ff_cols] = df[ff_cols].ffill(limit=3)
 
-    result = df.dropna(subset=["bn_close", "nf_close", "vix_close",
+    result = df.dropna(subset=["nf_close", "vix_close",
                                "sp_close", "nk_close", "spf_open", "spf_close"])
 
     # ── Data quality check ────────────────────────────────────────────────────
@@ -161,26 +159,23 @@ def compute_indicators(df):
     """Add all indicator columns to the dataframe."""
     d = df.copy()
 
-    # ── Core 8 ────────────────────────────────────────────────────────────────
-    d["ema20"]     = d["bn_close"].ewm(span=20, adjust=False).mean()
-    d["rsi14"]     = compute_rsi(d["bn_close"], period=14)
-    d["trend5"]    = (d["bn_close"] - d["bn_close"].shift(5)) / d["bn_close"].shift(5) * 100
+    # ── Core indicators ────────────────────────────────────────────────────────
+    d["ema20"]     = d["nf_close"].ewm(span=20, adjust=False).mean()
+    d["rsi14"]     = compute_rsi(d["nf_close"], period=14)
+    d["trend5"]    = (d["nf_close"] - d["nf_close"].shift(5)) / d["nf_close"].shift(5) * 100
     d["vix_dir"]   = d["vix_close"] - d["vix_close"].shift(1)
     d["sp500_chg"] = (d["sp_close"] - d["sp_close"].shift(1)) / d["sp_close"].shift(1) * 100
     d["nikkei_chg"]= (d["nk_close"] - d["nk_close"].shift(1)) / d["nk_close"].shift(1) * 100
     d["spf_gap"]   = (d["spf_open"] - d["spf_close"].shift(1)) / d["spf_close"].shift(1) * 100
-    bn_chg         = (d["bn_close"] - d["bn_close"].shift(1)) / d["bn_close"].shift(1) * 100
-    nf_chg         = (d["nf_close"] - d["nf_close"].shift(1)) / d["nf_close"].shift(1) * 100
-    d["bn_nf_div"] = bn_chg - nf_chg
 
-    # ── Round 1: HV20 + BN overnight gap ──────────────────────────────────────
-    log_ret    = np.log(d["bn_close"] / d["bn_close"].shift(1))
+    # ── HV20 + NF overnight gap ────────────────────────────────────────────────
+    log_ret    = np.log(d["nf_close"] / d["nf_close"].shift(1))
     d["hv20"]  = log_ret.rolling(20).std() * np.sqrt(252) * 100
-    d["bn_gap"]= (d["bn_open"] - d["bn_close"].shift(1)) / d["bn_close"].shift(1) * 100
+    d["nf_gap"]= (d["nf_open"] - d["nf_close"].shift(1)) / d["nf_close"].shift(1) * 100
 
     return d.dropna(subset=["ema20", "rsi14", "trend5", "vix_dir",
-                             "sp500_chg", "nikkei_chg", "spf_gap", "bn_nf_div",
-                             "hv20", "bn_gap"])
+                             "sp500_chg", "nikkei_chg", "spf_gap",
+                             "hv20", "nf_gap"])
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
@@ -210,13 +205,13 @@ def score_row(row):
     active = {}
 
     # ── ACTIVE: 4 India-specific technical signals ────────────────────────────
-    active["s_ema20"]     = 1  if row["bn_close"] > row["ema20"] else -1
-    active["s_trend5"]    = (1  if row["trend5"]    > 1.0  else
-                            (-1 if row["trend5"]    < -1.0 else 0))
-    active["s_vix"]       = (1  if row["vix_dir"]   < 0    else
-                            (-1 if row["vix_dir"]   > 0    else 0))
-    active["s_bn_nf_div"] = (1  if row["bn_nf_div"] > 0.5  else
-                            (-1 if row["bn_nf_div"] < -0.5 else 0))
+    active["s_ema20"]   = 1  if row["nf_close"] > row["ema20"] else -1
+    active["s_trend5"]  = (1  if row["trend5"]  > 1.0  else
+                          (-1 if row["trend5"]  < -1.0 else 0))
+    active["s_vix"]     = (1  if row["vix_dir"] < 0    else
+                          (-1 if row["vix_dir"] > 0    else 0))
+    active["s_nf_gap"]  = (1  if row["nf_gap"]  > 0.3  else
+                          (-1 if row["nf_gap"]  < -0.3 else 0))
 
     total = sum(active.values())
 
@@ -230,8 +225,6 @@ def score_row(row):
                             (-1 if row["spf_gap"]   < -0.2 else 0))
     inactive["s_hv20"]    = (1  if row["hv20"]   < 12.0 else
                             (-1 if row["hv20"]   > 20.0 else 0))
-    inactive["s_bn_gap"]  = (1  if row["bn_gap"] > 0.3  else
-                            (-1 if row["bn_gap"] < -0.3  else 0))
 
     return total, {**active, **inactive}
 
@@ -263,7 +256,7 @@ def generate_signals(df):
             "date":       trade_date,
             "weekday":    row["weekday"],
             "event_day":  event_flag,
-            "bn_close":   round(row["bn_close"], 2),
+            "nf_close":   round(row["nf_close"], 2),
             "ema20":      round(row["ema20"],    2),
             "rsi14":      round(row["rsi14"],    2),
             "trend5":     round(row["trend5"],   2),
@@ -271,9 +264,8 @@ def generate_signals(df):
             "sp500_chg":  round(row["sp500_chg"],  2),
             "nikkei_chg": round(row["nikkei_chg"], 2),
             "spf_gap":    round(row["spf_gap"],    2),
-            "bn_nf_div":  round(row["bn_nf_div"],  2),
+            "nf_gap":     round(row["nf_gap"],     2),
             "hv20":       round(row["hv20"],    2),
-            "bn_gap":     round(row["bn_gap"],  2),
             **{k: v for k, v in s.items()},
             "score":  score,
             "signal": signal,
@@ -302,9 +294,9 @@ def main():
     print(f"  Merged dataset : {len(df)} trading days  "
           f"({df['date'].min().date()} to {df['date'].max().date()})")
 
-    # 4 active indicators: EMA20, 5-day trend, VIX direction, BN-NF divergence
-    # Macro signals (SP500, Nikkei, SPF gap, BN gap) and RSI14/HV20 inactive — attribution showed drag
-    print(f"  Active indicators: 4/10  (EMA20, 5-day trend, VIX, BN-NF divergence)")
+    # 4 active indicators: EMA20, 5-day trend, VIX direction, NF overnight gap
+    # Macro signals (SP500, Nikkei, SPF gap) and RSI14/HV20 inactive — attribution showed drag
+    print(f"  Active indicators: 4/9  (EMA20, 5-day trend, VIX, NF overnight gap)")
 
     event_count = sum(1 for d in pd.date_range(df["date"].min(),
                                                df["date"].max(), freq="B")

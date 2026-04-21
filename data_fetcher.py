@@ -253,12 +253,12 @@ def fetch_fii_today():
 
 def fetch_pcr_dhan_today():
     """
-    Fetch BankNifty option chain from Dhan API, compute PCR, append to data/pcr_live.csv.
+    Fetch Nifty50 option chain from Dhan API, compute PCR, append to data/pcr_live.csv.
 
     Dhan option chain endpoint: POST /v2/optionchain
     PCR = sum(PUT OI) / sum(CALL OI) across all strikes for near expiry.
 
-    Response structure: data["data"]["oc"]["55900.000000"]["pe"]["oi"]
+    Response structure: data["data"]["oc"]["24600.000000"]["pe"]["oi"]
     Must call expirylist first — Expiry field cannot be empty.
     """
     from datetime import date as _date
@@ -272,7 +272,7 @@ def fetch_pcr_dhan_today():
         el_resp = requests.post(
             "https://api.dhan.co/v2/optionchain/expirylist",
             headers=HEADERS,
-            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
             timeout=10,
         )
         if el_resp.status_code == 200:
@@ -288,7 +288,7 @@ def fetch_pcr_dhan_today():
 
     # Step 2: fetch option chain with valid expiry
     payload = {
-        "UnderlyingScrip": 25,
+        "UnderlyingScrip": 13,
         "UnderlyingSeg":   "IDX_I",
         "Expiry":          expiry_str,
     }
@@ -393,7 +393,7 @@ def fetch_rollingoption(from_date, to_date):
             payload = {
                 "exchangeSegment": "NSE_FNO",
                 "interval":        15,         # 15-min bars; first bar open = 9:15 AM open
-                "securityId":      25,
+                "securityId":      13,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
                 "expiryCode":      1,          # nearest expiry (1 = current; 0 treated as missing)
@@ -493,7 +493,7 @@ def fetch_rollingoption(from_date, to_date):
 
 def fetch_iv_skew(from_date, to_date):
     """
-    Fetch BankNifty IV skew: ATM and OTM (ATM±3) implied volatilities.
+    Fetch Nifty50 IV skew: ATM and OTM (ATM±3) implied volatilities.
 
     Four series fetched per chunk:
       call_iv_atm  — ATM CALL IV at 9:15 AM open
@@ -542,7 +542,7 @@ def fetch_iv_skew(from_date, to_date):
             payload = {
                 "exchangeSegment": "NSE_FNO",
                 "interval":        15,
-                "securityId":      25,
+                "securityId":      13,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
                 "expiryCode":      1,
@@ -635,7 +635,7 @@ def fetch_iv_skew(from_date, to_date):
 
 def fetch_oi_surface(from_date, to_date):
     """
-    Fetch BankNifty open-interest surface: 7 strikes (ATM±3) × CE and PE.
+    Fetch Nifty50 open-interest surface: 7 strikes (ATM±3) × CE and PE.
 
     For each trading day, captures 9:15 AM open OI at:
       CE: ATM-3, ATM-2, ATM-1, ATM, ATM+1, ATM+2, ATM+3
@@ -695,7 +695,7 @@ def fetch_oi_surface(from_date, to_date):
             payload = {
                 "exchangeSegment": "NSE_FNO",
                 "interval":        15,
-                "securityId":      25,
+                "securityId":      13,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
                 "expiryCode":      1,
@@ -794,12 +794,12 @@ def fetch_oi_surface(from_date, to_date):
     return new_df
 
 
-def fetch_bn_intraday_15m(from_date, to_date):
+def fetch_nf_intraday_15m(from_date, to_date):
     """
-    Fetch BankNifty index 15-minute intraday candles for Opening Range Breakout.
+    Fetch Nifty50 index 15-minute intraday candles for Opening Range Breakout.
 
     Extracts only the 9:15-9:30 AM (first) candle of each trading day and saves:
-      date, orb_open, orb_high, orb_low, orb_close  → data/banknifty_15m_orb.csv
+      date, orb_open, orb_high, orb_low, orb_close  → data/nifty50_15m_orb.csv
 
     The Dhan /v2/charts/intraday endpoint caps each request at 90 days, so this
     chunks the range and retries gently on rate limits. ~2 min for 5 years.
@@ -808,7 +808,7 @@ def fetch_bn_intraday_15m(from_date, to_date):
       orb_range_pct   = (orb_high − orb_low) / spot × 100 (prior-day, shift(1))
       orb_break_side  = +1 if prev close > orb_high, −1 if < orb_low, 0 inside
     """
-    out_path = f"{DATA_DIR}/banknifty_15m_orb.csv"
+    out_path = f"{DATA_DIR}/nifty50_15m_orb.csv"
 
     start  = datetime.strptime(from_date, "%Y-%m-%d").date()
     end    = datetime.strptime(to_date,   "%Y-%m-%d").date()
@@ -818,7 +818,7 @@ def fetch_bn_intraday_15m(from_date, to_date):
     while current < end:
         chunk_end = min(current + timedelta(days=85), end)
         payload = {
-            "securityId":      "25",
+            "securityId":      "13",
             "exchangeSegment": "IDX_I",
             "instrument":      "INDEX",
             "interval":        "15",
@@ -834,7 +834,7 @@ def fetch_bn_intraday_15m(from_date, to_date):
                 timeout=45,
             )
             if resp.status_code != 200:
-                print(f"  bn_15m [{current}→{chunk_end}]: "
+                print(f"  nf_15m [{current}→{chunk_end}]: "
                       f"HTTP {resp.status_code} — {resp.text[:200]}")
                 time.sleep(0.6)
                 current = chunk_end + timedelta(days=1)
@@ -842,7 +842,7 @@ def fetch_bn_intraday_15m(from_date, to_date):
 
             d = resp.json()
             if not d.get("timestamp"):
-                print(f"  bn_15m [{current}→{chunk_end}]: empty response")
+                print(f"  nf_15m [{current}→{chunk_end}]: empty response")
                 time.sleep(0.4)
                 current = chunk_end + timedelta(days=1)
                 continue
@@ -863,16 +863,16 @@ def fetch_bn_intraday_15m(from_date, to_date):
             orb = orb.rename(columns={"open":"orb_open","high":"orb_high",
                                        "low":"orb_low","close":"orb_close"})
             rows.extend(orb.to_dict("records"))
-            print(f"  bn_15m [{current}→{chunk_end}]: {len(orb)} ORB candles")
+            print(f"  nf_15m [{current}→{chunk_end}]: {len(orb)} ORB candles")
 
         except Exception as e:
-            print(f"  bn_15m [{current}→{chunk_end}]: error — {e}")
+            print(f"  nf_15m [{current}→{chunk_end}]: error — {e}")
 
         time.sleep(0.5)
         current = chunk_end + timedelta(days=1)
 
     if not rows:
-        print("  bn_15m: no data fetched")
+        print("  nf_15m: no data fetched")
         return pd.DataFrame()
 
     new_df = (pd.DataFrame(rows)
@@ -891,13 +891,13 @@ def fetch_bn_intraday_15m(from_date, to_date):
 
     os.makedirs(DATA_DIR, exist_ok=True)
     combined.to_csv(out_path, index=False)
-    print(f"  → Saved banknifty_15m_orb.csv  ({len(combined)} rows)")
+    print(f"  → Saved nifty50_15m_orb.csv  ({len(combined)} rows)")
     return new_df
 
 
 def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
     """
-    Fetch BankNifty historical ATM PCR from Dhan /v2/charts/rollingoption.
+    Fetch Nifty50 historical ATM PCR from Dhan /v2/charts/rollingoption.
 
     ATM PCR = ATM PUT OI / ATM CALL OI (nearest expiry, EOD value).
     Uses 28-day chunks: ~72 API calls for 3 years. Completes in ~1 min.
@@ -929,7 +929,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
     while cur < end:
         chunk_count += 1
         cur = min(cur + timedelta(days=28), end) + timedelta(days=1)
-    print(f"  Fetching BankNifty PCR via Dhan rollingoption: {from_date} → {to_date}")
+    print(f"  Fetching Nifty50 PCR via Dhan rollingoption: {from_date} → {to_date}")
     print(f"  ↳ ~{chunk_count * 2} API calls ({chunk_count} chunks × 2 types) — should finish in <1 min")
 
     call_oi_by_date: dict = {}
@@ -951,7 +951,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
             payload = {
                 "exchangeSegment": "NSE_FNO",
                 "interval":        60,          # hourly — take EOD (last) value per day
-                "securityId":      25,
+                "securityId":      13,
                 "instrument":      "OPTIDX",
                 "expiryFlag":      expiry_flag,
                 "expiryCode":      1,
@@ -1024,7 +1024,7 @@ def fetch_pcr_historical(from_date="2022-01-01", to_date=None):
 
 def fetch_nse_pcr(from_date, to_date):
     """
-    Fetch BankNifty Put-Call Ratio from NSE historical data.
+    Fetch Nifty50 Put-Call Ratio from NSE historical data.
 
     NSE provides a daily bhav copy for F&O at:
     https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv  (lots reference)
@@ -1039,7 +1039,7 @@ def fetch_nse_pcr(from_date, to_date):
     NOTE: For historical PCR (2021-2026), users need to download NSE's
     historical F&O data manually from:
     https://www.nseindia.com/report-detail/fo_eq_security
-    Select: BankNifty | Expiry: All | From/To dates → download CSV
+    Select: Nifty | Expiry: All | From/To dates → download CSV
     Then run: python3 data_fetcher.py --process-pcr <downloaded_file.csv>
 
     Returns empty DataFrame if data not available.
@@ -1070,10 +1070,10 @@ def fetch_nse_fii_dii(from_date, to_date):
 
 def process_pcr_from_nse_bhavcopy(bhavcopy_file):
     """
-    Process NSE F&O bhavcopy CSV to extract daily PCR for BankNifty.
+    Process NSE F&O bhavcopy CSV to extract daily PCR for Nifty50.
 
     NSE bhavcopy columns include: SYMBOL, EXPIRY_DT, OPTION_TYP, OPEN_INT etc.
-    PCR = sum(PUT open interest) / sum(CALL open interest) for all BN strikes on that date.
+    PCR = sum(PUT open interest) / sum(CALL open interest) for all NF strikes on that date.
 
     Usage: python3 data_fetcher.py --process-pcr fo_mktlots_YYYYMMDD.csv
     """
@@ -1082,10 +1082,10 @@ def process_pcr_from_nse_bhavcopy(bhavcopy_file):
         df = pd.read_csv(bhavcopy_file)
         df.columns = [c.strip().lower() for c in df.columns]
 
-        # Filter BankNifty options
-        bn = df[df["symbol"].str.strip() == "BANKNIFTY"].copy()
+        # Filter Nifty50 options
+        bn = df[df["symbol"].str.strip() == "NIFTY"].copy()
         if bn.empty:
-            print("  No BANKNIFTY rows found in bhavcopy")
+            print("  No NIFTY rows found in bhavcopy")
             return pd.DataFrame()
 
         bn["date"] = pd.to_datetime(bn["timestamp"].str.strip()
@@ -1118,10 +1118,10 @@ def fix_dhan_dates():
         Thu NSE data → stored as Wed  (wrongly excluded as "Wednesday"/expiry)
         Fri NSE data → stored as Thu
 
-    Fix: add +1 day to all dates in banknifty.csv and nifty50.csv.
+    Fix: add +1 day to all dates in nifty50.csv.
     Weekend dates that result (from the 4 garbage Friday / 2 Saturday rows) are dropped.
     """
-    for fname in [f"{DATA_DIR}/banknifty.csv", f"{DATA_DIR}/nifty50.csv"]:
+    for fname in [f"{DATA_DIR}/nifty50.csv"]:
         if not os.path.exists(fname):
             print(f"  {fname}: not found, skipping")
             continue
@@ -1170,11 +1170,11 @@ def main():
             print(f"  Done. {len(df_oi)} new rows fetched.")
         return
 
-    # Handle --fetch-intraday: fetch BN 15-min bars for ORB features
+    # Handle --fetch-intraday: fetch NF 15-min bars for ORB features
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-intraday":
-        print("=== Historical BN 15-min Intraday (ORB 9:15 candles, Dhan) ===")
+        print("=== Historical NF 15-min Intraday (ORB 9:15 candles, Dhan) ===")
         os.makedirs(DATA_DIR, exist_ok=True)
-        df_orb = fetch_bn_intraday_15m(FROM_DATE, TO_DATE)
+        df_orb = fetch_nf_intraday_15m(FROM_DATE, TO_DATE)
         if not df_orb.empty:
             print(f"  Done. {len(df_orb)} new rows fetched.")
         return
@@ -1182,7 +1182,7 @@ def main():
     # Handle --fetch-pcr-historical flag
     if len(_sys.argv) >= 2 and _sys.argv[1] == "--fetch-pcr-historical":
         from_date = _sys.argv[2] if len(_sys.argv) >= 3 else "2022-01-01"
-        print(f"=== Historical BankNifty PCR from NSE bhavcopy ({from_date} → today) ===")
+        print(f"=== Historical Nifty PCR from NSE bhavcopy ({from_date} → today) ===")
         os.makedirs(DATA_DIR, exist_ok=True)
         fetch_pcr_historical(from_date=from_date)
         return
@@ -1206,8 +1206,7 @@ def main():
         print(f"\n=== Backfilling historical data from {FROM_DATE} ===")
         os.makedirs(DATA_DIR, exist_ok=True)
 
-        for sec_id, name, csv_file in [("25", "BankNifty", "banknifty.csv"),
-                                        ("13", "Nifty50",   "nifty50.csv")]:
+        for sec_id, name, csv_file in [("13", "Nifty50", "nifty50.csv")]:
             path     = f"{DATA_DIR}/{csv_file}"
             to_date  = _first_csv_date(path)
             if to_date is None or to_date <= FROM_DATE:
@@ -1256,8 +1255,7 @@ def main():
 
     # ── Dhan API indices — incremental (only fetch since last CSV date) ──────
     print("\n=== Dhan API indices (incremental) ===")
-    for sec_id, name, csv_file in [("25", "Bank Index", "banknifty.csv"),
-                                    ("13", "Nifty50",   "nifty50.csv")]:
+    for sec_id, name, csv_file in [("13", "Nifty50", "nifty50.csv")]:
         path      = f"{DATA_DIR}/{csv_file}"
         from_date = _last_csv_date(path) or FROM_DATE
         if from_date >= TO_DATE:

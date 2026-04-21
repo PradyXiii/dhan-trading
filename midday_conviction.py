@@ -3,7 +3,7 @@
 """
 midday_conviction.py — Intraday trade conviction check
 =======================================================
-Fetches current BN spot + option LTP + intraday macro, reassesses
+Fetches current NF spot + option LTP + intraday macro, reassesses
 whether the morning signal thesis still holds, sends Telegram summary.
 
 Usage:
@@ -64,13 +64,13 @@ def load_trade() -> dict | None:
     return t
 
 
-def get_bn_spot() -> float | None:
-    """Current BankNifty spot via Dhan option chain, with API structure unwrap."""
+def get_nf_spot() -> float | None:
+    """Current Nifty50 spot via Dhan option chain, with API structure unwrap."""
     try:
         r = requests.post(
             "https://api.dhan.co/v2/optionchain/expirylist",
             headers=HEADERS,
-            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
             timeout=10,
         )
         expiries = r.json().get("data", [])
@@ -81,7 +81,7 @@ def get_bn_spot() -> float | None:
         r2 = requests.post(
             "https://api.dhan.co/v2/optionchain",
             headers=HEADERS,
-            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
             timeout=10,
         )
         inner = r2.json().get("data") or {}
@@ -91,7 +91,7 @@ def get_bn_spot() -> float | None:
         spot = float(inner.get("last_price") or inner.get("underlyingPrice") or 0)
         return spot if spot > 0 else None
     except Exception as e:
-        _log(f"BN spot unavailable: {e}")
+        _log(f"NF spot unavailable: {e}")
         return None
 
 
@@ -152,7 +152,7 @@ def _get_ltp_from_option_chain(trade: dict) -> float | None:
             r = requests.post(
                 "https://api.dhan.co/v2/optionchain/expirylist",
                 headers=HEADERS,
-                json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I"},
+                json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
                 timeout=10,
             )
             expiry = r.json()["data"][0]
@@ -161,7 +161,7 @@ def _get_ltp_from_option_chain(trade: dict) -> float | None:
         r2 = requests.post(
             "https://api.dhan.co/v2/optionchain",
             headers=HEADERS,
-            json={"UnderlyingScrip": 25, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
             timeout=15,
         )
         data  = r2.json()
@@ -340,29 +340,29 @@ def reassess(trade, bn_spot, option_ltp, macro) -> tuple[int, list, str]:
     else:
         lines.append("⬜ Option LTP unavailable (SL/TP may have already fired)")
 
-    # ── Factor 2: BN spot trend ───────────────────────────────────────────────
+    # ── Factor 2: NF spot trend ───────────────────────────────────────────────
     if bn_spot and entry_spot:
         spot_chg = (bn_spot - entry_spot) / entry_spot * 100
         if bull:
             if spot_chg > 0.2:
-                lines.append(f"✅ BN spot +{spot_chg:.2f}%  ₹{bn_spot:,.0f} (entry ₹{entry_spot:,.0f})")
+                lines.append(f"✅ NF spot +{spot_chg:.2f}%  ₹{bn_spot:,.0f} (entry ₹{entry_spot:,.0f})")
                 score += 1
             elif spot_chg > -0.3:
-                lines.append(f"➡️ BN spot flat {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
+                lines.append(f"➡️ NF spot flat {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
             else:
-                lines.append(f"🔴 BN spot {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
+                lines.append(f"🔴 NF spot {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
                 score -= 1
         else:
             if spot_chg < -0.2:
-                lines.append(f"✅ BN spot {spot_chg:.2f}%  ₹{bn_spot:,.0f} (PUT thesis: BN falling)")
+                lines.append(f"✅ NF spot {spot_chg:.2f}%  ₹{bn_spot:,.0f} (PUT thesis: BN falling)")
                 score += 1
             elif spot_chg < 0.3:
-                lines.append(f"➡️ BN spot flat {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
+                lines.append(f"➡️ NF spot flat {spot_chg:+.2f}%  ₹{bn_spot:,.0f}")
             else:
-                lines.append(f"🔴 BN spot +{spot_chg:.2f}%  ₹{bn_spot:,.0f} (PUT headwind)")
+                lines.append(f"🔴 NF spot +{spot_chg:.2f}%  ₹{bn_spot:,.0f} (PUT headwind)")
                 score -= 1
     else:
-        lines.append("⬜ BN spot unavailable")
+        lines.append("⬜ NF spot unavailable")
 
     # ── Factor 3: SP500 futures (global risk sentiment) ───────────────────────
     if "sp500f_chg_pct" in macro:
@@ -463,7 +463,7 @@ def _detect_reversal(signal: str, conv_score: int,
         for line in factor_lines:
             if "🔴" not in line:
                 continue
-            if "BN spot" in line:
+            if "NF spot" in line:
                 reason_codes.append("BN_SELLING" if bull else "BN_RISING")
             elif "SP500" in line:
                 reason_codes.append("SP500_WEAK" if bull else "SP500_STRONG")
@@ -896,10 +896,10 @@ def main():
         return
 
     # ── [2] Fetch live data ────────────────────────────────────────────────────
-    bn_spot    = get_bn_spot()
+    bn_spot    = get_nf_spot()
     option_ltp = get_option_ltp(security_id, trade)
     macro      = get_macro()
-    _log(f"BN spot: {bn_spot}  |  LTP: {option_ltp}  |  Macro: {list(macro.keys())}")
+    _log(f"NF spot: {bn_spot}  |  LTP: {option_ltp}  |  Macro: {list(macro.keys())}")
 
     # ── [3] Reassess conviction ────────────────────────────────────────────────
     conv_score, factor_lines, _ = reassess(trade, bn_spot, option_ltp, macro)
@@ -949,7 +949,7 @@ def main():
         sl_line   = f"🛡️ Stop-loss at ₹{sl_price:.0f}"
         tp_line   = f"🎯 Target at ₹{tp_price:.0f}"
 
-    # BN spot line
+    # NF spot line
     if bn_spot and entry_spot:
         spot_chg = (bn_spot - entry_spot) / entry_spot * 100
         spot_line = (f"📍 Nifty at ₹{bn_spot:,.0f}  "

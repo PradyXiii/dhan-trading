@@ -61,7 +61,6 @@ def refresh_data():
     os.makedirs(DF_DIR, exist_ok=True)
 
     fetches = [
-        ("banknifty.csv",    lambda: fetch_dhan_index("25", "BankNifty", FROM_DATE, TO_DATE)),
         ("nifty50.csv",      lambda: fetch_dhan_index("13", "Nifty50",   FROM_DATE, TO_DATE)),
         ("india_vix.csv",    lambda: fetch_yfinance("^INDIAVIX",  "India VIX",  FROM_DATE, TO_DATE)),
         ("sp500.csv",        lambda: fetch_yfinance("^GSPC",      "S&P500",     FROM_DATE, TO_DATE)),
@@ -188,23 +187,23 @@ def compute_extended_features(df):
     else:
         d["fii_net_fut"] = 0.0
 
-    # BN 5-day momentum (different from trend5 which is pct chg over 5d)
-    d["bn_ret5"] = (d["bn_close"] / d["bn_close"].shift(5) - 1) * 100
+    # NF 5-day momentum (different from trend5 which is pct chg over 5d)
+    d["nf_ret5"] = (d["nf_close"] / d["nf_close"].shift(5) - 1) * 100
 
-    # BN volume ratio vs 20-day average
+    # NF volume ratio vs 20-day average
     if "volume" in d.columns:
-        d["bn_vol_ratio"] = d["volume"] / d["volume"].rolling(20, min_periods=5).mean()
-        d["bn_vol_ratio"] = d["bn_vol_ratio"].fillna(1.0)
+        d["nf_vol_ratio"] = d["volume"] / d["volume"].rolling(20, min_periods=5).mean()
+        d["nf_vol_ratio"] = d["nf_vol_ratio"].fillna(1.0)
     else:
-        d["bn_vol_ratio"] = 1.0
+        d["nf_vol_ratio"] = 1.0
 
     # ATR(14) as % of close — intraday range regime proxy
-    if all(c in d.columns for c in ["bn_high", "bn_low", "bn_close"]):
-        high_low  = d["bn_high"] - d["bn_low"]
-        high_prev = (d["bn_high"] - d["bn_close"].shift(1)).abs()
-        low_prev  = (d["bn_low"]  - d["bn_close"].shift(1)).abs()
+    if all(c in d.columns for c in ["nf_high", "nf_low", "nf_close"]):
+        high_low  = d["nf_high"] - d["nf_low"]
+        high_prev = (d["nf_high"] - d["nf_close"].shift(1)).abs()
+        low_prev  = (d["nf_low"]  - d["nf_close"].shift(1)).abs()
         tr        = pd.concat([high_low, high_prev, low_prev], axis=1).max(axis=1)
-        d["atr14_pct"] = tr.rolling(14, min_periods=5).mean() / d["bn_close"] * 100
+        d["atr14_pct"] = tr.rolling(14, min_periods=5).mean() / d["nf_close"] * 100
     else:
         d["atr14_pct"] = 0.0
 
@@ -213,12 +212,12 @@ def compute_extended_features(df):
 
 # Base features from ml_engine
 BASE_FEATURE_COLS = [
-    "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",
-    "ema20_pct", "trend5", "vix_dir", "bn_nf_div",
-    "rsi14", "hv20", "bn_gap",
+    "s_ema20", "s_trend5", "s_vix", "s_nf_gap",
+    "ema20_pct", "trend5", "vix_dir",
+    "rsi14", "hv20", "nf_gap",
     "sp500_chg", "nikkei_chg", "spf_gap",
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
-    "bn_ret1", "bn_ret20",
+    "nf_ret1", "nf_ret20",
     "dow", "dte",
 ]
 
@@ -227,7 +226,7 @@ EXTENDED_FEATURE_COLS = BASE_FEATURE_COLS + [
     "pcr", "pcr_ma5", "pcr_chg",
     "vix_open_chg",
     "fii_net_cash_z", "fii_net_fut",
-    "bn_ret5", "bn_vol_ratio", "atr14_pct",
+    "nf_ret5", "nf_vol_ratio", "atr14_pct",
 ]
 
 
@@ -799,7 +798,7 @@ _FEATURE_LABELS = {
     "vix_hv_ratio": "Fear index vs historical swings",
     "ema20_pct":    "How far Nifty is from its average",
     "dte":          "Days to expiry",
-    "bn_ret5":      "5-day Nifty momentum",
+    "nf_ret5":      "5-day Nifty momentum",
     "rsi14":        "Momentum strength (RSI)",
     "hv20":         "Recent volatility (20-day)",
     "vix_level":    "Absolute fear index level",
@@ -807,13 +806,12 @@ _FEATURE_LABELS = {
     "s_ema20":      "Above/below 20-day average signal",
     "s_trend5":     "5-day trend signal",
     "s_vix":        "VIX direction signal",
-    "s_bn_nf_div":  "Bank sector vs broad market signal",
-    "bn_nf_div":    "Bank sector vs broad market gap",
+    "s_nf_gap":     "Nifty overnight gap direction signal",
     "sp500_chg":    "US market daily move",
     "nikkei_chg":   "Japan market daily move",
     "spf_gap":      "US futures overnight gap",
-    "bn_ret1":      "Yesterday Nifty return",
-    "bn_ret20":     "1-month Nifty return",
+    "nf_ret1":      "Yesterday Nifty return",
+    "nf_ret20":     "1-month Nifty return",
     "dow":          "Day of week",
     "gold_ret":     "Gold daily move",
     "crude_ret":    "Crude oil daily move",
@@ -822,9 +820,9 @@ _FEATURE_LABELS = {
     "us10y_chg":    "US 10-year interest rate change",
     "pcr":          "Put-Call Ratio (options sentiment)",
     "fii_net_fut":  "Foreign investor futures activity",
-    "bn_vol_ratio": "Nifty trading volume vs normal",
+    "nf_vol_ratio": "Nifty trading volume vs normal",
     "atr14_pct":    "Expected intraday swing range",
-    "bn_gap":       "Nifty open gap vs yesterday",
+    "nf_gap":       "Nifty open gap vs yesterday",
     "vix_dir":      "VIX direction",
     "ema20_pct":    "Distance from 20-day moving average",
 }

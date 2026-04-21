@@ -2,7 +2,7 @@
 # DHAN API: always read docs/DHAN_API_V2_REFERENCE.md before any API work.
 # ─── BEFORE EDITING THIS FILE ────────────────────────────────────────────────
 # Read "ML FEATURE RULE" and "Known Gotchas" sections in CLAUDE.md first.
-# Reserved loop-variable names (never reuse): _c  _c_nf  _vix  _sp  _nk
+# Reserved loop-variable names (never reuse): _c  _vix  _sp  _nk
 # Every new feature needs .shift(1) on price inputs — no same-day values.
 # After editing FEATURE_COLS: verify len(FEATURE_COLS) == len(set(FEATURE_COLS))
 # Gate every change with: python3 autoexperiment_bn.py — keep only if >= 0.6175
@@ -16,7 +16,7 @@
 # See "REAL-OPTIONS RULE" in CLAUDE.md.
 # ─────────────────────────────────────────────────────────────────────────────
 """
-ml_engine.py — Walk-forward ML direction engine for BankNifty options.
+ml_engine.py — Walk-forward ML direction engine for Nifty50 Iron Condor.
 
 Design intent
 -------------
@@ -143,16 +143,14 @@ while i < len(_args):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_all_data():
-    bn  = pd.read_csv(f"{DATA_DIR}/banknifty.csv",     parse_dates=["date"])
     nf  = pd.read_csv(f"{DATA_DIR}/nifty50.csv",       parse_dates=["date"])
     vix = pd.read_csv(f"{DATA_DIR}/india_vix.csv",     parse_dates=["date"])
     sp  = pd.read_csv(f"{DATA_DIR}/sp500.csv",         parse_dates=["date"])
     nk  = pd.read_csv(f"{DATA_DIR}/nikkei.csv",        parse_dates=["date"])
     spf = pd.read_csv(f"{DATA_DIR}/sp500_futures.csv", parse_dates=["date"])
 
-    bn  = bn [["date","open","high","low","close"]].rename(columns={
-               "open":"bn_open","high":"bn_high","low":"bn_low","close":"bn_close"})
-    nf  = nf [["date","close"]].rename(columns={"close":"nf_close"})
+    nf  = nf [["date","open","high","low","close"]].rename(columns={
+               "open":"nf_open","high":"nf_high","low":"nf_low","close":"nf_close"})
     # Keep VIX open so we can compute vix_open_chg at 9:15 AM
     vix_cols = ["date","close"] + (["open"] if "open" in vix.columns else [])
     vix = vix[vix_cols].rename(columns={"open":"vix_open","close":"vix_close"})
@@ -160,14 +158,14 @@ def load_all_data():
     nk  = nk [["date","close"]].rename(columns={"close":"nk_close"})
     spf = spf[["date","open","close"]].rename(columns={"open":"spf_open","close":"spf_close"})
 
-    df = bn.copy()
-    for other in [nf, vix, sp, nk, spf]:
+    df = nf.copy()
+    for other in [vix, sp, nk, spf]:
         df = df.merge(other, on="date", how="left")
 
     df = df.sort_values("date").reset_index(drop=True)
-    ff_cols = ["nf_close","vix_close","sp_close","nk_close","spf_open","spf_close"]
+    ff_cols = ["vix_close","sp_close","nk_close","spf_open","spf_close"]
     df[ff_cols] = df[ff_cols].ffill(limit=3)
-    df = df.dropna(subset=["bn_close","nf_close","vix_close","sp_close",
+    df = df.dropna(subset=["nf_close","vix_close","sp_close",
                             "nk_close","spf_open","spf_close"])
 
     # ── Global macro: crude oil, dollar index, US 10Y yield (optional) ─────────
@@ -212,8 +210,8 @@ def load_all_data():
     else:
         df["bankbees_vol"] = np.nan
 
-    # BN 15-min intraday for ORB (9:15 candle) — optional
-    _orb_path = f"{DATA_DIR}/banknifty_15m_orb.csv"
+    # NF 15-min intraday for ORB (9:15 candle) — optional
+    _orb_path = f"{DATA_DIR}/nifty50_15m_orb.csv"
     _ORB_COLS = ["orb_high", "orb_low", "orb_close"]
     if os.path.exists(_orb_path):
         try:
@@ -349,17 +347,16 @@ def _rsi(series, period=14):
 
 def compute_features(df):
     """
-    Compute 21-feature matrix. All features use yesterday's close (_c) so
+    Compute feature matrix. All features use yesterday's NF close (_c) so
     that training and live prediction see identical inputs — at 9:15 AM the
     current day's close is unknown; only the prior day's close is available.
     """
     d = df.copy()
-    # Shift BN and NF close by 1: yesterday's close is what's known at 9:15 AM.
-    # Every rolling/ewm/pct_change on price must operate on _c, not bn_close,
+    # Shift NF close by 1: yesterday's close is what's known at 9:15 AM.
+    # Every rolling/ewm/pct_change on price must operate on _c, not nf_close,
     # to avoid training on data that leaks the same-day close into the label.
     # Coerce to numeric — incremental CSV writes can leave object dtype, which breaks arithmetic.
-    _c    = pd.to_numeric(d["bn_close"],  errors="coerce").shift(1)   # yesterday's BN close
-    _c_nf = pd.to_numeric(d["nf_close"],  errors="coerce").shift(1)   # yesterday's NF close
+    _c    = pd.to_numeric(d["nf_close"],  errors="coerce").shift(1)   # yesterday's NF close
     _vix  = pd.to_numeric(d["vix_close"], errors="coerce").shift(1).clip(8, 85)  # yesterday's India VIX; clip outliers from yfinance data errors
     _sp   = pd.to_numeric(d["sp_close"],  errors="coerce").shift(1)   # yesterday's S&P — closes 1:30 AM IST, not known at 9:30 AM IST
     _nk   = pd.to_numeric(d["nk_close"],  errors="coerce").shift(1)   # yesterday's Nikkei — full-day close is noon IST, after trade entry
@@ -372,19 +369,16 @@ def compute_features(df):
     d["sp500_chg"]  = (_sp / _sp.shift(1) - 1) * 100
     d["nikkei_chg"] = (_nk / _nk.shift(1) - 1) * 100
     d["spf_gap"]    = (d["spf_open"] - d["spf_close"].shift(1)) / d["spf_close"].shift(1) * 100
-    bn_chg          = (_c / _c.shift(1) - 1) * 100
-    nf_chg          = (_c_nf / _c_nf.shift(1) - 1) * 100
-    d["bn_nf_div"]  = bn_chg - nf_chg
     log_ret         = np.log(_c / _c.shift(1))
     d["hv20"]       = log_ret.rolling(20).std() * np.sqrt(252) * 100
-    d["bn_gap"]     = (d["bn_open"] - _c) / _c * 100
+    d["nf_gap"]     = (d["nf_open"] - _c) / _c * 100
 
     # ── Rule-based score (4 active indicators) ────────────────────────────────
-    d["s_ema20"]     = np.where(_c > d["ema20"], 1, -1)
-    d["s_trend5"]    = np.where(d["trend5"] > 1.0, 1, np.where(d["trend5"] < -1.0, -1, 0))
-    d["s_vix"]       = np.where(d["vix_dir"] < 0,  1, np.where(d["vix_dir"] > 0, -1, 0))
-    d["s_bn_nf_div"] = np.where(d["bn_nf_div"] > 0.5, 1, np.where(d["bn_nf_div"] < -0.5, -1, 0))
-    d["rule_score"]  = d["s_ema20"] + d["s_trend5"] + d["s_vix"] + d["s_bn_nf_div"]
+    d["s_ema20"]   = np.where(_c > d["ema20"], 1, -1)
+    d["s_trend5"]  = np.where(d["trend5"] > 1.0, 1, np.where(d["trend5"] < -1.0, -1, 0))
+    d["s_vix"]     = np.where(d["vix_dir"] < 0,  1, np.where(d["vix_dir"] > 0, -1, 0))
+    d["s_nf_gap"]  = np.where(d["nf_gap"] > 0.3, 1, np.where(d["nf_gap"] < -0.3, -1, 0))
+    d["rule_score"]  = d["s_ema20"] + d["s_trend5"] + d["s_vix"] + d["s_nf_gap"]
     d["rule_signal"] = np.where(d["rule_score"] >= SCORE_THRESHOLD, "CALL",
                        np.where(d["rule_score"] <= -SCORE_THRESHOLD, "PUT", "NONE"))
 
@@ -396,28 +390,28 @@ def compute_features(df):
     # prev_range_pct: yesterday's high-low range as % of close.
     #   High range day → today likely high-range too (volatility clustering).
     #   Low range day → probably quiet again; SL/TP unlikely to be hit cleanly.
-    _ph = d["bn_high"].shift(1)
-    _pl = d["bn_low"].shift(1)
-    _po = d["bn_open"].shift(1)
+    _ph = d["nf_high"].shift(1)
+    _pl = d["nf_low"].shift(1)
+    _po = d["nf_open"].shift(1)
     d["prev_range_pct"]  = (_ph - _pl) / _c * 100
     # prev_body_pct: candle body / range. Close to 1 = strong trending candle
     # (high directional conviction); close to 0 = doji/indecision.
     d["prev_body_pct"]   = ((_c - _po) / (_ph - _pl).replace(0, np.nan)).fillna(0.0)
-    # bn_ret60: 3-month return — medium-term trend regime.
+    # nf_ret60: 3-month return — medium-term trend regime.
     #   Positive = bull phase (favour CALL); negative = bear phase (favour PUT).
-    d["bn_ret60"]        = (_c / _c.shift(60) - 1) * 100
-    # bn_dist_high52: % below the 52-week rolling high.
+    d["nf_ret60"]        = (_c / _c.shift(60) - 1) * 100
+    # nf_dist_high52: % below the 52-week rolling high.
     #   Near 0 = at all-time-high territory → strong bull momentum.
     #   Very negative = deep correction → potential mean-reversion.
-    d["bn_dist_high52"]  = (_c / _c.rolling(252, min_periods=60).max() - 1) * 100
+    d["nf_dist_high52"]  = (_c / _c.rolling(252, min_periods=60).max() - 1) * 100
 
     # ── Short-term momentum ────────────────────────────────────────────────
-    d["bn_ret5"]       = (_c / _c.shift(5) - 1) * 100
+    d["nf_ret5"]       = (_c / _c.shift(5) - 1) * 100
 
     # ── ADX14 (Average Directional Index) ──────────────────────────────────
     # Measures trend strength (0-100). High ADX = strong trend, directional signals reliable.
-    _ph_adx = d["bn_high"].shift(1)   # yesterday's high
-    _pl_adx = d["bn_low"].shift(1)    # yesterday's low
+    _ph_adx = d["nf_high"].shift(1)   # yesterday's high
+    _pl_adx = d["nf_low"].shift(1)    # yesterday's low
     _plus_dm  = (_ph_adx - _ph_adx.shift(1)).clip(lower=0)
     _minus_dm = (_pl_adx.shift(1) - _pl_adx).clip(lower=0)
     # Zero out when the other DM is larger
@@ -440,7 +434,7 @@ def compute_features(df):
     # When ADX is high (strong trend), trend5 direction is more predictive
     d["adx_trend_interact"] = d["adx14"] * d["s_ema20"] / 100.0  # scaled
     # ADX-weighted gap: strong trend + gap = likely continuation
-    d["adx_gap_interact"]   = d["adx14"] * d["bn_gap"] / 100.0
+    d["adx_gap_interact"]   = d["adx14"] * d["nf_gap"] / 100.0
 
     # ── VIX open direction at 9:15 AM ────────────────────────────────────────
     # Moved here (before interaction features) so interactions can safely reference it.
@@ -452,12 +446,12 @@ def compute_features(df):
 
     # ── Base features — ALL computed before interaction section ──────────────
     # Moved here so any interaction feature (including autoloop-added ones) can
-    # safely reference vix_pct_chg, vix_hv_ratio, bn_ret1/20, dow, dte, etc.
+    # safely reference vix_pct_chg, vix_hv_ratio, nf_ret1/20, dow, dte, etc.
     d["vix_pct_chg"]   = d["vix_dir"] / _vix.shift(1) * 100
     d["vix_hv_ratio"]  = _vix / d["hv20"].replace(0, np.nan)
-    d["bn_ret1"]        = (_c / _c.shift(1) - 1) * 100
-    d["bn_ret20"]       = (_c / _c.shift(20) - 1) * 100
-    d["bn_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
+    d["nf_ret1"]        = (_c / _c.shift(1) - 1) * 100
+    d["nf_ret20"]       = (_c / _c.shift(20) - 1) * 100
+    d["nf_dist_high20"] = (_c / _c.rolling(20).max() - 1) * 100
     d["dow"]           = d["date"].dt.weekday
     d["dte"]           = d["date"].apply(
                              lambda x: get_dte(x.date() if hasattr(x, "date") else x))
@@ -467,13 +461,13 @@ def compute_features(df):
     # just before the return statement. Never insert in the middle of this section.
 
     # Gap-momentum alignment: gap in same direction as 5-day momentum → continuation
-    d["gap_mom_align"]    = d["bn_gap"] * d["bn_ret5"]
+    d["gap_mom_align"]    = d["nf_gap"] * d["nf_ret5"]
 
     # VIX-trend interaction: VIX falling + bullish trend = strong CALL signal
     d["vix_trend_interact"] = d["vix_dir"] * d["s_ema20"]
 
     # Prev-day body conviction aligned with short-term momentum
-    d["prev_body_momentum"] = d["prev_body_pct"] * d["bn_ret5"]
+    d["prev_body_momentum"] = d["prev_body_pct"] * d["nf_ret5"]
 
     # IV × SPF gap: when IV is high, global overnight signal is more decisive
     # iv_proxy is computed later, so we compute a local version here
@@ -485,7 +479,7 @@ def compute_features(df):
     d["iv_spf_interaction"] = _iv_local * d["spf_gap"]
 
     # 52-week high regime × EMA trend: near highs + bullish EMA = strong CALL
-    d["high52_ema_interact"] = d["bn_dist_high52"] * d["s_ema20"]
+    d["high52_ema_interact"] = d["nf_dist_high52"] * d["s_ema20"]
 
     # ── NEW: PCR momentum signals ─────────────────────────────────────────────
     # pcr_ma5: 5-day smoothed PCR. Trend in sentiment is more reliable than
@@ -548,7 +542,7 @@ def compute_features(df):
         # iv_proxy: average of call/put vs formula premium; z-scored over 60d
         _avg_prem    = ((_cp + _pp) / 2).fillna(np.nan)
         _dte_vals    = d["date"].apply(lambda x: get_dte(x.date() if hasattr(x, "date") else x))
-        _formula_p   = d["bn_open"] * PREMIUM_K * (_dte_vals ** 0.5)
+        _formula_p   = d["nf_open"] * PREMIUM_K * (_dte_vals ** 0.5)
         _iv_raw      = (_avg_prem / _formula_p.replace(0, np.nan)).fillna(1.0)
         _iv_mu       = _iv_raw.rolling(60, min_periods=10).mean().fillna(1.0)
         _iv_std      = _iv_raw.rolling(60, min_periods=10).std().replace(0, np.nan)
@@ -677,15 +671,6 @@ def compute_features(df):
     # Percentile rank 0-1 normalizes across regimes. Uses yesterday's VIX (_vix already shifted).
     d["vix_pct_rank_252"] = _vix.rolling(252, min_periods=60).rank(pct=True).fillna(0.5)
 
-    # ── BN-Nifty relative strength ───────────────────────────────────────────
-    # bn_nifty_rs:        BN / Nifty ratio (prior-day closes) — absolute leadership
-    # bn_nifty_rs_slope5: 5-day % change in that ratio — leadership momentum
-    # Different from bn_nf_div (which is single-day Δ% diff): this captures sustained
-    # outperformance/underperformance rather than one-day swings.
-    _rs = _c / _c_nf.replace(0, np.nan)
-    d["bn_nifty_rs"]        = _rs.ffill().fillna(1.0)
-    d["bn_nifty_rs_slope5"] = ((_rs / _rs.shift(5) - 1) * 100).fillna(0.0)
-
     # ── Bank ETF flow (BANKBEES) ─────────────────────────────────────────────
     # bankbees_ret1: prior-day BANKBEES return — domestic institutional bank-sector flow
     # bankbees_vol_z: volume z-score over 60d — unusual flow detection
@@ -735,11 +720,11 @@ def compute_features(df):
     if "orb_high" in d.columns and "orb_low" in d.columns:
         _orb_h = pd.to_numeric(d["orb_high"], errors="coerce").shift(1)
         _orb_l = pd.to_numeric(d["orb_low"],  errors="coerce").shift(1)
-        _bn_prev_close = _c  # _c is already shift(1)
+        _nf_prev_close = _c  # _c is already shift(1)
         _range = (_orb_h - _orb_l).replace(0, np.nan)
         d["orb_range_pct"] = (_range / _c * 100).fillna(0.0)
-        d["orb_break_side"] = np.where(_bn_prev_close > _orb_h, 1,
-                              np.where(_bn_prev_close < _orb_l, -1, 0))
+        d["orb_break_side"] = np.where(_nf_prev_close > _orb_h, 1,
+                              np.where(_nf_prev_close < _orb_l, -1, 0))
     else:
         d["orb_range_pct"]  = 0.0
         d["orb_break_side"] = 0
@@ -749,24 +734,24 @@ def compute_features(df):
     # reference ANY column that exists earlier in this function without KeyError.
 
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
-           "bn_nf_div","hv20","bn_gap","vix_pct_chg","vix_hv_ratio","bn_ret20"]
+           "hv20","nf_gap","vix_pct_chg","vix_hv_ratio","nf_ret20"]
     return d.dropna(subset=req)
 
 
 # 63 features fed into the RF
 FEATURE_COLS = [
     # Rule-based score components (discrete ±1 signals) + yesterday's conviction
-    "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div", "rule_score_lag1",
+    "s_ema20", "s_trend5", "s_vix", "s_nf_gap", "rule_score_lag1",
     # Continuous versions of same signals
-    "ema20_pct", "trend5", "vix_dir", "bn_nf_div",
+    "ema20_pct", "trend5", "vix_dir",
     # Additional technical indicators
-    "rsi14", "hv20", "bn_gap", "adx14",
+    "rsi14", "hv20", "nf_gap", "adx14",
     # Global market
     "sp500_chg", "nikkei_chg", "spf_gap",
     # Volatility regime
     "vix_level", "vix_pct_chg", "vix_hv_ratio",
     # Momentum & drawdown
-    "bn_ret1", "bn_ret20", "bn_dist_high20",
+    "nf_ret1", "nf_ret20", "nf_dist_high20",
     # Calendar
     "dow", "dte",
     # VIX opening direction at 9:15 AM (risk-off/on signal at trade entry)
@@ -779,23 +764,23 @@ FEATURE_COLS = [
     "prev_range_pct",  # yesterday's H-L range % — predicts today's range via volatility clustering
     "prev_body_pct",   # yesterday's body/range ratio — strong candle = trend continuation
     # Medium/long-term trend regime
-    "bn_ret60",        # 3-month return — bull vs bear phase
-    "bn_dist_high52",  # % below 52-week high — momentum / overbought signal
+    "nf_ret60",        # 3-month return — bull vs bear phase
+    "nf_dist_high52",  # % below 52-week high — momentum / overbought signal
     # Interaction features
-    "bn_ret5",              # 5-day momentum — short-term trend
-    "gap_mom_align",        # bn_gap × bn_ret5 — gap aligned with momentum
+    "nf_ret5",              # 5-day momentum — short-term trend
+    "gap_mom_align",        # nf_gap × nf_ret5 — gap aligned with momentum
     "iv_spf_interaction",   # iv_proxy × spf_gap — IV amplifies global signal
     "high52_ema_interact",  # dist_high52 × s_ema20 — regime × trend
     # VIX-trend interaction
     "vix_trend_interact",   # vix_dir × s_ema20 — VIX decline + bullish trend
     # Prev-day conviction × momentum
-    "prev_body_momentum",   # prev_body_pct × bn_ret5 — candle conviction + momentum
+    "prev_body_momentum",   # prev_body_pct × nf_ret5 — candle conviction + momentum
     # Options/flow features (already computed)
     "pcr_ma5",              # 5-day smoothed put-call ratio
     "fii_net_cash_z",       # z-scored FII net cash flow
     # ADX interaction features (adx14 itself is already listed above)
     "adx_trend_interact",   # ADX × s_ema20 — strong trend amplifies direction
-    "adx_gap_interact",     # ADX × bn_gap — strong trend + gap = continuation
+    "adx_gap_interact",     # ADX × nf_gap — strong trend + gap = continuation
     # IV skew dynamics (from options_iv_skew.csv — populated by data_fetcher.py --fetch-options)
     "call_skew",    # OTM call IV − ATM call IV — upside tail risk pricing
     "put_skew",     # OTM put IV  − ATM put IV  — downside tail risk pricing (normally +ve)
@@ -812,16 +797,14 @@ FEATURE_COLS = [
     # Max pain + GEX (written daily by auto_trader into options_atm_daily.csv)
     "max_pain_dist_prev",  # % distance spot vs max-pain strike (prior day)
     "gex_flag_prev",       # +1 ranging / -1 trending / 0 unknown (dealer gamma regime)
-    # VIX percentile + relative strength
+    # VIX percentile rank
     "vix_pct_rank_252",    # VIX 252-day percentile — regime-normalized fear level
-    "bn_nifty_rs",         # BN/Nifty ratio — sector leadership level
-    "bn_nifty_rs_slope5",  # 5-day % change in BN/Nifty ratio — leadership momentum
     # Bank sector ETF flow + breadth (requires yfinance BANKBEES + top-5 stocks)
     "bankbees_ret1",       # BANKBEES prior-day return — domestic bank ETF flow
     "bankbees_vol_z",      # BANKBEES volume z-score (60d) — unusual flow detection
-    "bank_breadth_d1",     # % of top-5 BN constituents up yesterday — move conviction
+    "bank_breadth_d1",     # % of top-5 NF constituents up yesterday — move conviction
     "bank_breadth_z",      # 60d z-score of breadth — regime detector
-    # Opening range breakout (prior day's 9:15 candle — from banknifty_15m_orb.csv)
+    # Opening range breakout (prior day's 9:15 candle — from nifty50_15m_orb.csv)
     "orb_range_pct",       # prior-day 9:15 candle range as % of spot — vol proxy
     "orb_break_side",      # +1/-1/0 — did prev close break above/below/inside 9:15 range
 ]
@@ -831,22 +814,22 @@ FEATURE_COLS = [
 #  LABEL COMPUTATION — binary direction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_outcome(bn_open, bn_high, bn_low, bn_close, signal, premium):
+def simulate_outcome(o, h, l, c, signal, premium):
     """Simulate WIN/LOSS/PARTIAL for one trade (mirrors backtest_engine exactly)."""
     sl_pts = (SL_PCT * premium) / 0.5
     tp_pts = (TP_PCT * premium) / 0.5
 
     if signal == "CALL":
-        sl_hit = bn_low  <= bn_open - sl_pts
-        tp_hit = bn_high >= bn_open + tp_pts
+        sl_hit = l <= o - sl_pts
+        tp_hit = h >= o + tp_pts
         if sl_hit and tp_hit:
-            return "WIN" if bn_close > bn_open else "LOSS"
+            return "WIN" if c > o else "LOSS"
         return "WIN" if tp_hit else ("LOSS" if sl_hit else "PARTIAL")
     else:
-        sl_hit = bn_high >= bn_open + sl_pts
-        tp_hit = bn_low  <= bn_open - tp_pts
+        sl_hit = h >= o + sl_pts
+        tp_hit = l <= o - tp_pts
         if sl_hit and tp_hit:
-            return "WIN" if bn_close < bn_open else "LOSS"
+            return "WIN" if c < o else "LOSS"
         return "WIN" if tp_hit else ("LOSS" if sl_hit else "PARTIAL")
 
 
@@ -864,7 +847,7 @@ def compute_labels(df):
     """
     rows = []
     for _, r in df.iterrows():
-        o, h, l, c = r["bn_open"], r["bn_high"], r["bn_low"], r["bn_close"]
+        o, h, l, c = r["nf_open"], r["nf_high"], r["nf_low"], r["nf_close"]
         date  = r["date"]
         dte   = get_dte(date.date() if hasattr(date, "date") else date)
         formula_prem = o * PREMIUM_K * (dte ** 0.5)
@@ -1062,16 +1045,16 @@ def generate_ml_signals(mode="direction", ml_threshold=0.55):
     merged["score"]     = merged["rule_score"]
     merged["threshold"] = 1
 
-    for col in ["bn_close","ema20","rsi14","trend5","vix_dir",
-                "sp500_chg","nikkei_chg","spf_gap","bn_nf_div","hv20","bn_gap"]:
+    for col in ["nf_close","ema20","rsi14","trend5","vix_dir",
+                "sp500_chg","nikkei_chg","spf_gap","hv20","nf_gap"]:
         if col in merged.columns:
             merged[col] = merged[col].round(2)
 
     out_cols = [
         "date", "weekday", "event_day",
-        "bn_close", "ema20", "rsi14", "trend5", "vix_dir",
-        "sp500_chg", "nikkei_chg", "spf_gap", "bn_nf_div", "hv20", "bn_gap",
-        "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div",
+        "nf_close", "ema20", "rsi14", "trend5", "vix_dir",
+        "sp500_chg", "nikkei_chg", "spf_gap", "hv20", "nf_gap",
+        "s_ema20", "s_trend5", "s_vix", "s_nf_gap",
         "rule_score", "rule_signal",
         "ml_signal", "ml_p_call", "ml_p_put", "ml_conf", "ml_trained",
         "call_out", "put_out", "label",

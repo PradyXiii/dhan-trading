@@ -408,7 +408,7 @@ def refresh_data_and_signal():
         if r2.returncode != 0:
             die(f"signal_engine.py failed:\n{r2.stderr[-200:]}")
     except subprocess.TimeoutExpired:
-        die("signal_engine.py timed out (60s). Check if banknifty.csv / nifty50.csv are valid.")
+        die("signal_engine.py timed out (60s). Check if nifty50.csv is valid.")
     except FileNotFoundError:
         die("signal_engine.py not found. Check working directory.")
 
@@ -1350,8 +1350,8 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
     spot = last_spot or _get_bn_ltp()
     if not spot:
         try:
-            bn_df = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
-            spot = float(bn_df.iloc[-1]["close"])
+            nf_df = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
+            spot = float(nf_df.iloc[-1]["close"])
             notify.log(f"Using stale CSV spot ₹{spot:,.0f}")
         except Exception:
             return None, None, None, 0, None, -1
@@ -1432,9 +1432,9 @@ def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
 
     # ── Final fallback: CSV close (stale — warn loudly) ───────────────────────
     try:
-        bn_df      = pd.read_csv(f"{DATA_DIR}/banknifty.csv", parse_dates=["date"])
-        csv_close  = spot_fallback or float(bn_df.iloc[-1]["close"])
-        csv_date   = bn_df.iloc[-1]["date"]
+        nf_df      = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
+        csv_close  = spot_fallback or float(nf_df.iloc[-1]["close"])
+        csv_date   = nf_df.iloc[-1]["date"]
         atm_strike = round(csv_close / 100) * 100
         notify.log(
             f"⚠️  Option chain AND LTP unavailable — using stale CSV close "
@@ -2519,7 +2519,7 @@ def main():
     if chain_sig:
         _append_chain_signals(chain_sig, spot)
 
-    sig_spot = float(sig.get("bn_close") or 0)
+    sig_spot = float(sig.get("nf_close") or 0)
     if not DRY_RUN and sig_spot > 0 and spot > 0:
         spot_gap_pct = abs(spot - sig_spot) / sig_spot
         if spot_gap_pct >= ENTRY_SPOT_GAP_THRESHOLD:
