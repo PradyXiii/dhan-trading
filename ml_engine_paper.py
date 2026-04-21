@@ -5,7 +5,7 @@
 # Reserved loop-variable names (never reuse): _c  _vix  _sp  _nk
 # Every new feature needs .shift(1) on price inputs — no same-day values.
 # After editing FEATURE_COLS: verify len(FEATURE_COLS) == len(set(FEATURE_COLS))
-# Gate every change with: python3 autoexperiment_nf.py — keep only if >= 0.6175
+# Gate every change with: python3 autoexperiment_nf.py — keep only if >= 0.5358 (NF baseline)
 # ─────────────────────────────────────────────────────────────────────────────
 # ─── REAL-OPTIONS RULE (April 2026) ──────────────────────────────────────────
 # Autoexperiment composite gates directional signal quality — NOT P&L reality.

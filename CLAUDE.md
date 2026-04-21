@@ -214,7 +214,7 @@ The docs have the exact answer. Read them first, always.
 3. Add the feature name once to `FEATURE_COLS` — then check: `len(FEATURE_COLS) == len(set(FEATURE_COLS))` (duplicates inflate importance silently)
 4. If feature needs a new data file: `python3 data_fetcher.py` then `python3 data_fetcher.py --backfill` (new CSVs start with 1 row — zero importance until backfilled)
 5. Run `python3 ml_engine.py --analyze` — feature importance must be > 0
-6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.6175** (current best)
+6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.5358** (current NF baseline, post BN→NF migration)
 7. Commit + push to `main`
 
 ---

@@ -35,33 +35,13 @@ WEDNESDAY_WEEKLY_START = _date(2024,  3,  1)   # weekly shifted Thu → Wed
 WEEKLY_DISCONTINUED    = _date(2024, 11, 20)   # SEBI: weekly BN options removed
 TUESDAY_EXPIRY_FROM    = _date(2025,  9,  1)   # NSE: monthly shifted Wed → Tue
 
-# ── Historical lot sizes ──────────────────────────────────────────────────────
-# SEBI mandate (min contract value ₹15L) drove these changes.
-# Source: NSE circulars / PL Capital research
-#
-# Timeline:
-#   Before Nov 20 2024         → lot = 15
-#   Nov 20 2024 – Jun 25 2025  → lot = 30
-#     (Apr/May/Jun 2025 monthly contracts pre-existed the Apr 24 mandate,
-#      so they kept lot=30 through their June 25 2025 expiry)
-#   Jun 26 2025 – Jan 26 2026  → lot = 35
-#     (Jul 2025 was first monthly contract created after Apr 24 → lot=35)
-#   Jan 27 2026 onwards        → lot = 30  (current)
-
-_LOT_15_UNTIL = _date(2024, 11, 20)   # SEBI mandate: 15 → 30
-_LOT_35_FROM  = _date(2025,  6, 26)   # day after Jun 2025 expiry: 30 → 35
-_LOT_30B_FROM = _date(2026,  1, 27)   # first Jan 2026 monthly expiry: 35 → 30
+# ── Nifty50 lot size timeline ─────────────────────────────────────────────────
+# NSE revised Nifty50 lot size from 75 → 65 on Jan 6 2026. History before that
+# date uses lot=75. (See _NF_LOT_65_FROM constant below for the same value.)
 
 def _baseline_lot_size(d):
-    """Hardcoded baseline timeline — canonical source of truth."""
-    if d < _LOT_15_UNTIL:
-        return 15   # Sep 2021 – Nov 2024
-    elif d < _LOT_35_FROM:
-        return 30   # Nov 2024 – Jun 2025
-    elif d < _LOT_30B_FROM:
-        return 35   # Jul 2025 – Jan 2026
-    else:
-        return 30   # Jan 2026 onwards
+    """Nifty50 lot size baseline — canonical source of truth."""
+    return 65 if d >= _date(2026, 1, 6) else 75
 
 
 def get_lot_size(d):

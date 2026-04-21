@@ -1108,40 +1108,39 @@ def process_pcr_from_nse_bhavcopy(bhavcopy_file):
 
 def fix_dhan_dates():
     """
-    One-time patch for the Dhan API timezone bug.
+    Clean stray weekend rows from nifty50.csv.
 
-    Root cause: Dhan timestamps are midnight IST (UTC+5:30).  When parsed as UTC
-    the date rolls back to the previous calendar day, so every weekday shifts:
-        Mon NSE data → stored as Sun
-        Tue NSE data → stored as Mon
-        Wed NSE data → stored as Tue  (expiry day — wrongly included as "Tuesday")
-        Thu NSE data → stored as Wed  (wrongly excluded as "Wednesday"/expiry)
-        Fri NSE data → stored as Thu
+    The Dhan historical API timestamps are midnight IST (UTC+5:30). The
+    fetcher already adds +5:30h before .normalize() so dates are correct at
+    fetch time (see fetch_dhan_index). A small handful of rows may still
+    land on Saturday/Sunday due to DST-like edge cases in older fetches —
+    this function drops them without touching valid weekday rows.
 
-    Fix: add +1 day to all dates in nifty50.csv.
-    Weekend dates that result (from the 4 garbage Friday / 2 Saturday rows) are dropped.
+    Safe to re-run. No longer shifts dates — previous implementation was
+    destructive if run on already-correct data.
     """
     for fname in [f"{DATA_DIR}/nifty50.csv"]:
         if not os.path.exists(fname):
             print(f"  {fname}: not found, skipping")
             continue
         df = pd.read_csv(fname, parse_dates=["date"])
-        before = df["date"].dt.day_name().value_counts().sort_index()
-        df["date"] = df["date"] + pd.Timedelta(days=1)
-        df = df[df["date"].dt.weekday < 5]           # drop any resulting weekend rows
-        df = (df.drop_duplicates("date")
+        before = len(df)
+        before_dist = df["date"].dt.day_name().value_counts().sort_index()
+        weekend_rows = df[df["date"].dt.weekday >= 5]
+        df = (df[df["date"].dt.weekday < 5]
+                .drop_duplicates("date")
                 .sort_values("date")
                 .reset_index(drop=True))
-        after = df["date"].dt.day_name().value_counts().sort_index()
         df.to_csv(fname, index=False)
-        print(f"\n  {fname}  ({len(df)} rows)")
-        print(f"  {'Day':<12} {'Before':>8}  {'After':>8}")
-        print(f"  {'─'*32}")
+        print(f"\n  {fname}")
+        print(f"  Rows: {before} → {len(df)}  (dropped {len(weekend_rows)} weekend row(s))")
+        if len(weekend_rows):
+            print(f"  Dropped weekend dates: {weekend_rows['date'].dt.strftime('%Y-%m-%d (%A)').tolist()[:10]}")
+        print(f"  Weekday distribution:")
         for day in ["Monday","Tuesday","Wednesday","Thursday","Friday"]:
-            b = before.get(day, 0)
-            a = after.get(day, 0)
-            print(f"  {day:<12} {b:>8}  {a:>8}")
-    print(f"\n  Done. Re-run: python3 signal_engine.py && python3 backtest_engine.py")
+            a = df[df["date"].dt.day_name() == day].shape[0]
+            print(f"    {day:<12} {a}")
+    print(f"\n  Done. Safe to re-run.")
 
 
 def main():

@@ -287,12 +287,12 @@ def save_overrides(data):
 
 def load_expiry_status():
     if not EXPIRY_STATUS.exists():
-        return {"expected_day": "tuesday", "last_verified": None, "pattern": "monthly_last_tuesday"}
+        return {"expected_day": "tuesday", "last_verified": None, "pattern": "weekly_tuesday"}
     try:
         with open(EXPIRY_STATUS) as f:
             return json.load(f)
     except Exception:
-        return {"expected_day": "tuesday", "last_verified": None, "pattern": "monthly_last_tuesday"}
+        return {"expected_day": "tuesday", "last_verified": None, "pattern": "weekly_tuesday"}
 
 
 def save_expiry_status(data):
