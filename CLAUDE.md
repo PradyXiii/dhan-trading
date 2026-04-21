@@ -121,7 +121,7 @@ Trades CALL and PUT signal days — 235 trades/year (weekly expiry)
 
 ### Why NF IC beats BNF IC
 
-BNF lost weekly expiry (SEBI mandate, Nov 20 2024) → monthly contracts → 15-22 DTE → gamma risk dominates theta → IC WR collapsed 70%→27% in 2025. NF kept weekly Thursday expiry. Every NF trade is naturally DTE≤7.
+BNF lost weekly expiry (SEBI mandate, Nov 20 2024) → monthly contracts → 15-22 DTE → gamma risk dominates theta → IC WR collapsed 70%→27% in 2025. NF kept weekly Tuesday expiry. Every NF trade is naturally DTE≤7.
 
 ### ⚠️ MANDATORY LIVE PLACEMENT ORDER: BUY FIRST, THEN SELL
 
@@ -434,7 +434,7 @@ Live overrides stored in `data/lot_size_overrides.json` (written by `lot_expiry_
 
 ## Nifty50 Expiry
 
-Nifty50 has **weekly Thursday expiry** (SEBI mandate — never changed to monthly).
+Nifty50 has **weekly Tuesday expiry** (confirmed via Dhan expirylist API — never changed to monthly).
 Every NF IC trade is naturally DTE ≤ 7. All 5 weekdays are valid entry days.
 
 ---

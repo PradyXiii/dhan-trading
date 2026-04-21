@@ -42,15 +42,14 @@ backtest_results/
 !.claude/hooks/*.sh
 
 # Local-only scripts (VM only, never published)
+portfolio.py
 portfolio_tracker.py
 refresh_token.py
 test_order.py
 validate_token_renewal.py
+scripts/
 logs/
 models/
 
 # GAS morning brief scripts — never committed (contain private prompts/logic)
 *.gs
-
-# MCX commodity extension lives on branch claude/mcx-commodity-trading — never on BN
-commodity/

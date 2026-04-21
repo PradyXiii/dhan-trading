@@ -88,11 +88,11 @@ Every Sunday, 2:00 AM IST
 
 | | |
 |---|---|
-| Instrument | Nifty50 options (weekly Thursday expiry) |
+| Instrument | Nifty50 options (weekly Tuesday expiry) |
 | Trading days | All 5 weekdays — every day is a valid IC day |
 | Structure | SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE |
 | Spread width | 150 pts per side (NF strike spacing = 50 pts, ATM ± 3 strikes) |
-| Net credit | ~₹108/lot average at entry |
+| Net credit | ~₹134/lot average at entry |
 | Stop-loss | Total spread cost grows to net_credit × 1.5 (50% loss of credit) |
 | Take-profit | Total spread cost falls to net_credit × 0.10 (retain 90% of credit) |
 | Risk per trade | 5% of available capital |
@@ -103,7 +103,7 @@ Every Sunday, 2:00 AM IST
 
 ### Why Iron Condor works on Nifty50
 
-Weekly Thursday expiry means every IC is naturally DTE ≤ 7. Theta (time decay) destroys option premium from both sides simultaneously. The IC wins when Nifty stays within the wings — which happens ~85% of the time. The max-loss scenario (one wing blown through) is capped by the long legs.
+Weekly Tuesday expiry means every IC is naturally DTE ≤ 7. Theta (time decay) destroys option premium from both sides simultaneously. The IC wins when Nifty stays within the wings — which happens ~85% of the time. The max-loss scenario (one wing blown through) is capped by the long legs.
 
 ### Order placement sequence (mandatory)
 
@@ -121,7 +121,7 @@ Never reverse this — full unhedged margin triggered on short legs if long not 
 
 Signal engine and ML model still vote on CALL vs PUT (which side of the market is favored). The IC trades BOTH sides regardless — the signal just determines which days the system enters (CALL signal → market expected to hold or rise moderately, PUT signal → hold or fall moderately; both suit IC). No VIX or ML confidence filter applied — maximum trade frequency gives maximum P&L.
 
-**63 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
+**60 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
 
 **Nightly model competition:** RF, XGBoost, LightGBM, CatBoost compete via Optuna HPO (30 trials each = 120 total). Winner saved as champion.pkl. Full 4-model ensemble saved for live voting.
 
@@ -263,7 +263,7 @@ python3 lot_expiry_scanner.py --show
 
 **Iron Condor over naked options** — Real 1-min backtest (2021–2026, 1114 trades) confirmed IC wins ~85% of the time on NF weekly expiry. Naked long-option buying on the same data was a net loser due to theta decay and IV crush. IC collects premium from both sides simultaneously.
 
-**Weekly Thursday expiry** — Nifty50 kept weekly Thursday expiry (SEBI mandate). Every IC is naturally DTE ≤ 7, maximising theta decay benefit. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
+**Weekly Tuesday expiry** — Nifty50 has weekly Tuesday expiry (confirmed via Dhan expirylist API). Every IC is naturally DTE ≤ 7, maximising theta decay benefit. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
 
 **Real 1-min option data** — All backtests use actual Dhan 1-min option bars from `data/nifty_options_cache/`. OHLCV-formula estimates are never used for strategy decisions — formula can't see theta decay, IV crush, or slippage.
 
