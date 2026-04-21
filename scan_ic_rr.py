@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from backtest_spreads import run_spread_backtest, _DATA_CACHE, NIFTY_STRATEGIES
 
 SL_VALS = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
-TP_VALS = [0.40, 0.50, 0.55, 0.60, 0.65, 0.70, 0.80, 0.90]
+TP_VALS = [0.40, 0.50, 0.55, 0.60, 0.65, 0.70, 0.80, 0.90, 0.95, 1.00]
 YEARS   = 4.75   # Aug 2021 – Apr 2026
 
 ap = argparse.ArgumentParser()
@@ -34,8 +34,8 @@ print(f"Data loaded. Reference: {len(_ref[_ref.result.isin(['SL','TP','EOD'])])}
       f"{len(_ref)} rows total\n")
 
 print(f"Scanning {len(SL_VALS)} × {len(TP_VALS)} = {len(SL_VALS)*len(TP_VALS)} combos...")
-print(f"{'sl':>5} {'tp':>5} {'rr':>5} {'trades':>7} {'wr':>7} {'pnl_L':>8} {'yr_L':>8} {'dd_L':>8}")
-print("-" * 60)
+print(f"{'sl':>5} {'tp':>5} {'rr':>5} {'trades':>7} {'wr':>7} {'pnl_L':>8} {'yr_L':>8} {'dd_L':>8} {'tp_hits':>8} {'eod_wins':>9}")
+print("-" * 80)
 
 rows = []
 orig_sl = NIFTY_STRATEGIES["nf_iron_condor"]["sl_frac"]
@@ -56,19 +56,24 @@ for sl in SL_VALS:
         wr   = wins.mean()
         pnl  = active["pnl"].sum()
         rr   = round(tp / sl, 2)
+        n_tp   = int((active["result"] == "TP").sum())
+        n_eod_win = int(((active["result"] == "EOD") & (active["pnl"] > 0)).sum())
 
         rows.append({
-            "sl_frac":  sl,
-            "tp_frac":  tp,
-            "rr":       rr,
-            "trades":   len(active),
-            "wr":       round(wr, 4),
-            "pnl_L":    round(pnl / 1e5, 2),
-            "pnl_yr_L": round(pnl / YEARS / 1e5, 2),
-            "max_dd_L": round(dd / 1e5, 2),
+            "sl_frac":    sl,
+            "tp_frac":    tp,
+            "rr":         rr,
+            "trades":     len(active),
+            "wr":         round(wr, 4),
+            "pnl_L":      round(pnl / 1e5, 2),
+            "pnl_yr_L":   round(pnl / YEARS / 1e5, 2),
+            "max_dd_L":   round(dd / 1e5, 2),
+            "tp_hits":    n_tp,
+            "eod_wins":   n_eod_win,
         })
         print(f"{sl:>5.2f} {tp:>5.2f} {rr:>5.2f} {len(active):>7} {wr:>7.1%} "
-              f"{pnl/1e5:>8.1f} {pnl/YEARS/1e5:>8.1f} {dd/1e5:>8.2f}")
+              f"{pnl/1e5:>8.1f} {pnl/YEARS/1e5:>8.1f} {dd/1e5:>8.2f} "
+              f"{n_tp:>8} {n_eod_win:>9}")
 
 # Restore defaults
 NIFTY_STRATEGIES["nf_iron_condor"]["sl_frac"] = orig_sl
