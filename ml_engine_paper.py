@@ -16,27 +16,47 @@
 # See "REAL-OPTIONS RULE" in CLAUDE.md.
 # ─────────────────────────────────────────────────────────────────────────────
 """
-ml_engine_paper.py — Paper copy of ml_engine.py for autoresearch experiments.
+ml_engine.py — Walk-forward ML direction engine for Nifty50 Iron Condor.
 
-Same direction-oracle design as ml_engine.py — predicts CALL/PUT for the
-credit-spread router in auto_trader.py (CALL → Bear Call Spread, PUT → Bull Put).
-Autoresearcher (autoloop_nf.py) edits THIS file first, evaluates via
-autoexperiment_nf.py, and only promotes to ml_engine.py after 3 consecutive
-nights of outperformance.
+Design intent
+-------------
+The ML engine is a DIRECTION ORACLE, not a filter. It does not reduce the number
+of trades — it takes the same eligible trading days and predicts the better direction
+(CALL or PUT) using pattern recognition across all indicators.
+
+The CALL/PUT direction feeds the credit-spread router in auto_trader.py:
+  CALL signal → Bear Call Spread (SELL ATM CE + BUY ATM+300 CE) — fade upside
+  PUT  signal → Bull Put  Spread (SELL ATM PE + BUY ATM-300 PE) — fade downside
+The ML predicts directional bias; spread structure provides theta + IV crush edge.
 
 For every Mon/Tue/Thu/Fri:
-  1. Compute 63 features (FEATURE_COLS, may diverge from live during experiments).
-  2. Walk-forward RandomForest outputs P(CALL), P(PUT).
-  3. Signal = argmax(P(CALL), P(PUT)) — always a direction.
+  1. Compute 63 features (FEATURE_COLS) from OHLCV + global + macro + options data.
+  2. Walk-forward RandomForest (train on past, predict present) outputs:
+       P(CALL) = probability the day favours a bullish options trade
+       P(PUT)  = probability the day favours a bearish options trade
+  3. Signal = argmax(P(CALL), P(PUT)) — ALWAYS a direction, no skipping.
   4. Event days (RBI MPC, Budget) → NONE override.
   5. Pre-warmup (first 252 days) → fallback to rule-based direction.
 
+Result: same trade count as rule-based; ML improves directional accuracy.
+
+Labels for training
+-------------------
+Binary direction label derived from naked-option SL/TP simulation (legacy from
+pre-spread era — kept because directional accuracy still matters for spread
+selection; the labels measure "which side moved more on the day"):
+  CALL  if CALL trade wins and PUT does not  (definitive bullish day)
+  PUT   if PUT  trade wins and CALL does not (definitive bearish day)
+  tie   if both win or both lose             (argmax tiebreak from close vs open)
+
+No NONE class — every day gets a direction label, so the RF always outputs one.
+
 Modes
 -----
-  python3 ml_engine_paper.py                  # walk-forward training
-  python3 ml_engine_paper.py --predict-today  # fast single prediction
-  python3 ml_engine_paper.py --analyze        # feature importance
-  python3 autoexperiment_nf.py --module ml_engine_paper  # eval composite score
+  python3 ml_engine.py                  # direction oracle (default, all trades)
+  python3 ml_engine.py --filter 0.60    # confidence gate: fewer trades, higher WR
+  python3 ml_engine.py --analyze        # feature importance + confusion matrix
+  python3 backtest_engine.py --ml       # backtest with signals_ml.csv
 """
 
 import os
