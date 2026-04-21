@@ -47,6 +47,21 @@ JOURNAL_CSV     = f"{DATA_DIR}/live_trades.csv"
 SPREAD_CSV      = f"{DATA_DIR}/live_spread_trades.csv"
 
 SPREAD_STRATEGIES = {"bear_call_credit", "bull_put_credit"}
+IC_STRATEGIES     = {"nf_iron_condor"}
+
+IC_CSV    = f"{DATA_DIR}/live_ic_trades.csv"
+IC_FIELDS = [
+    "date", "strategy", "signal",
+    "ce_short_strike", "ce_long_strike",
+    "pe_short_strike", "pe_long_strike",
+    "spread_width", "lots", "lot_size", "dte", "spot_at_signal",
+    "ce_short_entry", "ce_long_entry", "ce_net_credit",
+    "pe_short_entry", "pe_long_entry", "pe_net_credit",
+    "net_credit",
+    "exit_reason", "exit_time",
+    "pnl_inr", "pnl_pct_of_credit",
+    "oracle_correct", "signal_score", "ml_conf",
+]
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -111,11 +126,10 @@ def _get_tradebook():
 
     data = resp.json()
     trades = data if isinstance(data, list) else data.get("data", [])
-    return [
-        t for t in trades
-        if "BANKNIFTY" in str(t.get("tradingSymbol", t.get("securityId", ""))).upper()
-        and t.get("exchangeSegment", "") == "NSE_FNO"
-    ]
+    def _is_nf_or_bnf(t):
+        sym = str(t.get("tradingSymbol", t.get("securityId", ""))).upper()
+        return ("NIFTY" in sym) and t.get("exchangeSegment", "") == "NSE_FNO"
+    return [t for t in trades if _is_nf_or_bnf(t)]
 
 
 def _parse_fills(trades):
@@ -242,6 +256,101 @@ def _append_spread_row(row: dict):
         writer.writerow(row)
 
 
+def _journal_ic(intent: dict, today_label: str):
+    """Journal a Nifty50 Iron Condor trade (4-leg IC schema)."""
+    paper         = (intent.get("order_mode") == "PAPER" or intent.get("mode") == "PAPER")
+    signal        = intent["signal"]
+    lots          = int(intent.get("lots", 1))
+    lot_size      = int(intent.get("lot_size", 65))
+    dte           = float(intent.get("dte", 0))
+    spot          = float(intent.get("spot_at_signal", 0))
+    net_credit    = float(intent.get("net_credit", 0))
+    ce_short_strike = float(intent.get("ce_short_strike", 0))
+    ce_long_strike  = float(intent.get("ce_long_strike",  0))
+    pe_short_strike = float(intent.get("pe_short_strike", 0))
+    pe_long_strike  = float(intent.get("pe_long_strike",  0))
+    ce_short_entry  = float(intent.get("ce_short_entry",  0))
+    ce_long_entry   = float(intent.get("ce_long_entry",   0))
+    pe_short_entry  = float(intent.get("pe_short_entry",  0))
+    pe_long_entry   = float(intent.get("pe_long_entry",   0))
+    ce_net_credit   = float(intent.get("ce_net_credit",   0))
+    pe_net_credit   = float(intent.get("pe_net_credit",   0))
+    score         = int(intent.get("signal_score", 0))
+    ml_conf       = float(intent.get("ml_conf", 0))
+
+    exit_reason   = intent.get("exit_reason", "") or "OPEN"
+    exit_time     = intent.get("exit_time", "")
+    pnl_inr       = float(intent.get("pnl_inr", 0))
+
+    pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
+
+    oracle_correct = None
+    if exit_reason == "TP":
+        oracle_correct = True
+    elif exit_reason == "SL":
+        oracle_correct = False
+    elif exit_reason in ("EOD", "OPEN"):
+        oracle_correct = pnl_inr > 0
+
+    row = {
+        "date":              date.today().isoformat(),
+        "strategy":          "nf_iron_condor",
+        "signal":            signal,
+        "ce_short_strike":   ce_short_strike,
+        "ce_long_strike":    ce_long_strike,
+        "pe_short_strike":   pe_short_strike,
+        "pe_long_strike":    pe_long_strike,
+        "spread_width":      150,
+        "lots":              lots,
+        "lot_size":          lot_size,
+        "dte":               dte,
+        "spot_at_signal":    spot,
+        "ce_short_entry":    ce_short_entry,
+        "ce_long_entry":     ce_long_entry,
+        "ce_net_credit":     ce_net_credit,
+        "pe_short_entry":    pe_short_entry,
+        "pe_long_entry":     pe_long_entry,
+        "pe_net_credit":     pe_net_credit,
+        "net_credit":        net_credit,
+        "exit_reason":       exit_reason,
+        "exit_time":         exit_time,
+        "pnl_inr":           pnl_inr,
+        "pnl_pct_of_credit": round(pnl_pct, 1),
+        "oracle_correct":    oracle_correct if oracle_correct is not None else "",
+        "signal_score":      score,
+        "ml_conf":           round(ml_conf, 4),
+    }
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    file_exists = os.path.exists(IC_CSV)
+    with open(IC_CSV, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=IC_FIELDS, extrasaction="ignore")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+    notify.log(f"IC journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
+
+    emoji    = {"TP": "🟢", "SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
+    pnl_sign = "+" if pnl_inr >= 0 else ""
+    mode_tag = "[PAPER] " if paper else ""
+
+    lines = [
+        f"📓 <b>{mode_tag}IC Journal · {today_label}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Nifty50 Iron Condor  ·  {signal}  ·  {lots} lot",
+        f"CE  SELL {int(ce_short_strike)} / BUY {int(ce_long_strike)}  → credit ₹{ce_net_credit:.0f}",
+        f"PE  SELL {int(pe_short_strike)} / BUY {int(pe_long_strike)}  → credit ₹{pe_net_credit:.0f}",
+        f"Total credit  ₹{net_credit:.0f} / lot",
+        "",
+        (f"Exit  {emoji} {exit_reason}" + (f"  at {exit_time} IST" if exit_time else ""))
+        if exit_reason != "OPEN" else "Exit  🔓 position still open",
+        "",
+        f"<b>P&amp;L  {pnl_sign}₹{pnl_inr:,.0f}  ({pnl_sign}{pnl_pct:.0f}% of max credit)</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    notify.send("\n".join(lines))
+
+
 def _journal_spread(intent: dict, today_label: str):
     """
     Journal a credit-spread trade.
@@ -360,7 +469,10 @@ def main():
         notify.log("No today_trade.json found — no trade was placed today or file is missing. Nothing to journal.")
         return
 
-    # Branch: credit spread trades have their own journal + schema
+    # Branch by strategy
+    if intent.get("strategy") in IC_STRATEGIES:
+        _journal_ic(intent, today_label)
+        return
     if intent.get("strategy") in SPREAD_STRATEGIES:
         _journal_spread(intent, today_label)
         return
@@ -387,7 +499,7 @@ def main():
     else:
         trades = _get_tradebook()
         if not trades:
-            notify.log("No BANKNIFTY trades found in tradebook — position may have been placed as AMO or API issue.")
+            notify.log("No NIFTY trades found in tradebook — position may have been placed as AMO or API issue.")
             return
         buy_price, buy_qty, sell_price, sell_qty, sell_time = _parse_fills(trades)
 

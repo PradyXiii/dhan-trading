@@ -1,13 +1,8 @@
-# BankNifty Options Auto-Trader
+# Nifty50 Iron Condor Auto-Trader
 
-Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, sizes a credit spread (Bear Call or Bull Put — sells ATM, buys ATM±300 hedge), places both legs via Dhan, and sends a Telegram alert. `spread_monitor.py` watches every 1 minute during market hours and exits both legs automatically on SL or TP hit. Every weeknight at midnight an AI-driven experiment loop tries to improve the model — keeping what works, reverting what doesn't. Nothing to do during market hours.
+Fully automated Nifty50 options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, builds a 4-leg Iron Condor (SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE), places all 4 legs via Dhan, and sends a Telegram alert. `spread_monitor.py` watches every 1 minute during market hours and exits all 4 legs automatically on SL or TP hit. Every weeknight at 11 PM an ML model retrains. Every night at midnight an AI experiment loop tries to improve the model.
 
-> **Currently in PAPER MODE (April 2026).** Strategy pivoted from naked-options buying (-₹1,006/trade in real-options backtest) to credit spreads. Live orders disabled until 30+ days of net-positive paper P&L. See CLAUDE.md "PAPER MODE" section.
-
----
-
-> **Disclaimer**
-> This project is for educational and research purposes only. Nothing here is financial advice or a recommendation to trade. Options trading involves substantial risk of loss. Past results do not guarantee future performance. Trade at your own risk. Consult a SEBI-registered advisor before making any real trading decisions.
+> **Disclaimer:** This project is for educational and research purposes only. Nothing here is financial advice. Options trading involves substantial risk of loss. Past results do not guarantee future performance. Trade at your own risk. Consult a SEBI-registered advisor before making any real trading decisions.
 
 ---
 
@@ -15,189 +10,167 @@ Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM 
 
 ```
 Every 5 minutes (all 7 days)
-  └── renew_token.py         — checks if token is 23h50m old, renews if so
-                               (never lets it expire, no manual action needed)
+  └── renew_token.py         — checks if Dhan token is 23h50m old, renews if so
 
 8:50 AM IST, Mon–Fri
   └── health_ping.py
-        — Pre-market heartbeat: Dhan token, signal freshness, capital,
-          stale lock-file, critical alert log
-        — Sends a single "all clear" (or alarm) to Telegram
+        — Pre-market heartbeat: token, capital, signal freshness, lock file
+        — Sends "all clear" or alarm to Telegram
 
 9:15 AM IST, Mon–Fri
   └── morning_brief.py
-        — Fetches BankNifty news headlines, asks Claude for sentiment
-          (bullish / bearish / neutral), writes data/news_sentiment.json
-        — Consumed by auto_trader.py as one additional vote
+        — Fetches Nifty50 headlines, asks Claude for sentiment
+        — Writes data/news_sentiment.json (consumed by auto_trader.py as one vote)
 
 9:30 AM IST, Mon–Fri
   └── auto_trader.py
         1. Pull latest market data
-        2. Run rule-based signal engine  →  CALL / PUT / NONE
-        3. Run ML direction model        →  overrides rules when confident
-        4. Pick credit spread legs       →  CALL → Bear Call (SELL ATM CE + BUY ATM+300 CE)
-                                            PUT  → Bull Put  (SELL ATM PE + BUY ATM-300 PE)
-        5. Size the position (lots)      →  5% of capital at risk, min 1 lot, max 1 (paper rebuild)
-        6. Place both legs via Dhan      →  BUY hedge first (margin rule), then SELL credit leg
+        2. Rule-based signal engine        →  CALL / PUT
+        3. ML direction model              →  overrides rules when confident
+        4. Build Iron Condor legs          →  SELL ATM CE + BUY ATM+150 CE
+                                               SELL ATM PE + BUY ATM-150 PE
+        5. Size position (lots)            →  5% of capital at risk, max 10 lots
+        6. Place 4 legs via Dhan           →  BUY long wings first (margin rule),
+                                               then SELL short legs
         7. Send Telegram alert
 
-Every 1 min, 9:30 AM–3:29 PM IST
+Every 1 min, 9:30 AM–3:14 PM IST
   └── spread_monitor.py
-        — Fetches live LTPs for both spread legs via Dhan marketfeed/ltp
-        — SL fires if spread cost ≥ net_credit × 1.5 (50% loss of credit)
-        — TP fires if spread cost ≤ net_credit × 0.35 (65% of credit kept)
-        — On hit: BUY back short leg, SELL long leg, mark exit_done in today_trade.json
-        — fcntl lock prevents overlap; paper mode skips real orders
+        — Fetches live LTPs for all 4 IC legs
+        — SL fires if total spread cost ≥ net_credit × 1.5  (50% loss)
+        — TP fires if total spread cost ≤ net_credit × 0.10 (90% of credit kept)
+        — On hit: closes all 4 legs, marks exit in today_trade.json
 
 11:00 AM IST, Mon–Fri
   └── midday_conviction.py
-        — Reassesses the morning thesis using intraday BN spot, option LTP,
-          and macro tape (S&P futures, DXY, VIX, crude oil intraday)
-        — Detects reversals and writes data/midday_checkpoints.csv
-          (the evolver uses reversal days to boost miss-pattern training)
-        — Sends a Telegram conviction summary in plain English
+        — Checks all 4 IC leg LTPs + macro (S&P futures, DXY, VIX, crude)
+        — Sends plain-English IC health summary to Telegram
+        — Writes data/midday_checkpoints.csv (evolver uses reversal days)
 
 3:15 PM IST, Mon–Fri
   └── exit_positions.py
-        — Closes any open BankNifty NRML positions not already hit by SL/TP
+        — Closes any open Nifty NRML positions not already hit by SL/TP
         — Prevents unintended overnight carry
 
 3:30 PM IST, Mon–Fri
   └── trade_journal.py
-        — Reads Dhan tradebook for actual fill prices
-        — Compares oracle intent vs actual entry/exit
-        — Computes slippage, P&L, exit reason (SL/TP/TRAIL/EOD)
-        — Appends row to data/live_trades.csv
+        — Reads exit data from today_trade.json
+        — Computes P&L, exit reason (SL/TP/EOD)
+        — Appends row to data/live_ic_trades.csv
         — Sends EOD journal to Telegram
 
 11:00 PM IST, Mon–Fri
   └── model_evolver.py
-        — Retrains the ML brain: Optuna HPO across RF + XGBoost + LightGBM + CatBoost
-        — Injects live trade outcomes as real-label training signal (10× weight)
-        — Boosts historical rows matching miss-day patterns to reduce repeat errors
-        — Picks the best model, saves it as models/champion.pkl
-        — Also saves 4-model ensemble at models/ensemble/*.pkl
-        — Sends a plain-English brain-training report to Telegram
+        — Retrains ML brain: Optuna HPO across RF + XGBoost + LightGBM + CatBoost
+        — Injects live trade outcomes as real-label signal (10× weight)
+        — Saves models/champion.pkl + models/ensemble/*.pkl
+        — Sends plain-English brain-training report to Telegram
 
 Midnight IST, Mon–Fri
   └── autoloop_bn.py  (Autoresearch)
-        — Claude AI proposes one small code change per experiment (feature or signal tweak)
-        — autoexperiment_bn.py evaluates it: trains RF on all data, tests on last 252 days
-        — If score improves: change is committed to git
-        — If score drops: change is reverted, next idea tried
-        — Paper model accumulates wins across 3 nights before auto-promoting to live
-        — Sends Telegram summary after each run
+        — Claude AI proposes one small code change per experiment
+        — autoexperiment_bn.py evaluates on last 252 trading days
+        — Improvements committed; regressions reverted
+        — Paper model accumulates 3-night winning streak before auto-promoting to live
 
 1st of every month, 10:00 AM IST
   └── lot_expiry_scanner.py
-        — Checks if NSE has changed BankNifty lot size or expiry structure
-        — Alerts via Telegram if anything has changed
+        — Checks if NSE has changed Nifty50 lot size or expiry structure
+        — Alerts via Telegram if anything changed
 
 Every Sunday, 2:00 AM IST
-  └── Log rotation — trims any logs over 10 MB to the last 1000 lines
+  └── Log rotation — trims logs over 10 MB
 ```
 
 ---
 
-## Trade parameters
+## Strategy: Nifty50 Iron Condor
 
 | | |
 |---|---|
-| Instrument | BankNifty options (monthly last-Tuesday expiry, Phase 4 Sep 2025+) |
-| Trading days | All 5 weekdays — Wednesday is a normal day (not expiry day) |
-| Strategy | Credit spread (Bear Call on CALL signal, Bull Put on PUT signal) |
-| Direction | CALL or PUT — decided by ML oracle, informed by rule-based score |
-| Legs | Short ATM + Long ATM±300 (300pt spread width, locked from backtest) |
-| Stop-loss | Spread cost grows to net_credit × 1.5 (50% of credit lost) |
-| Take-profit | Spread cost falls to net_credit × 0.35 (65% of credit kept) |
+| Instrument | Nifty50 options (weekly Thursday expiry) |
+| Trading days | All 5 weekdays — every day is a valid IC day |
+| Structure | SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE |
+| Spread width | 150 pts per side (NF strike spacing = 50 pts, ATM ± 3 strikes) |
+| Net credit | ~₹108/lot average at entry |
+| Stop-loss | Total spread cost grows to net_credit × 1.5 (50% loss of credit) |
+| Take-profit | Total spread cost falls to net_credit × 0.10 (retain 90% of credit) |
 | Risk per trade | 5% of available capital |
-| Minimum trade | 1 lot (always trades if margin permits) |
-| Max lots | 1 during PAPER rebuild (was 20 — restore after 30 days net-positive paper P&L) |
-| Lot size | 30 (Jan 2026+) |
-| Product | MARGIN (NRML) — `spread_monitor.py` watches SL/TP every 1 min; `exit_positions.py` squares off both legs at 3:15 PM if neither fired |
-| Mode | **PAPER (April 2026)** — full signal flow runs, trade logged to `data/paper_trades.csv`, no real Dhan order placed |
+| Max lots | 10 (IC uses margin on both sides) |
+| Lot size | 65 (Nifty50, Jan 2026+) |
+| Order type | MARKET — BUY long wings first, SELL short legs second (Dhan margin rule) |
+| Product | NRML — `spread_monitor.py` watches 1 min; `exit_positions.py` squares off at 3:15 PM |
+
+### Why Iron Condor works on Nifty50
+
+Weekly Thursday expiry means every IC is naturally DTE ≤ 7. Theta (time decay) destroys option premium from both sides simultaneously. The IC wins when Nifty stays within the wings — which happens ~85% of the time. The max-loss scenario (one wing blown through) is capped by the long legs.
+
+### Order placement sequence (mandatory)
+
+Dhan requires long leg on books before short leg gets margin benefit:
+1. BUY ATM+150 CE (long call wing)
+2. SELL ATM CE (short call leg)
+3. BUY ATM-150 PE (long put wing)
+4. SELL ATM PE (short put leg)
+
+Never reverse this — full unhedged margin triggered on short legs if long not placed first.
 
 ---
 
 ## How direction is decided
 
-**Step 1 — Rule score (4 signals):**
+Signal engine and ML model still vote on CALL vs PUT (which side of the market is favored). The IC trades BOTH sides regardless — the signal just determines which days the system enters (CALL signal → market expected to hold or rise moderately, PUT signal → hold or fall moderately; both suit IC). No VIX or ML confidence filter applied — maximum trade frequency gives maximum P&L.
 
-| Signal | Bullish +1 | Bearish −1 |
-|---|---|---|
-| EMA20 | BN above 20-day average | BN below 20-day average |
-| 5-day trend | BN up >+1% over 5 days | BN down >−1% over 5 days |
-| VIX direction | VIX falling | VIX rising |
-| BN vs Nifty | BN outperforming Nifty >+0.5% | Underperforming >−0.5% |
+**63 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (BN/Nifty relative strength, 52-week high distance, ORB range), calendar (DOW, DTE).
 
-Score ≥ +1 → tentative CALL · Score ≤ −1 → tentative PUT
-
-**Step 2 — ML override:**
-
-An ensemble of walk-forward models (RF / XGBoost / LightGBM / CatBoost) votes on direction. The champion is the single best model; the full ensemble is used for live prediction agreement. It always outputs CALL or PUT — never skips a trade day.
-
-63 features across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro drivers (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile rank, HV ratio), options sentiment (PCR, IV skew — call/put skew spread and momentum, OI surface at ATM±3, max pain, straddle expansion), flow (FII net cash, BankBees ETF, top-5 bank constituents breadth), momentum (BN/Nifty relative strength + 5-day slope, 52-week high distance, ORB range), and calendar (DOW, DTE).
-
-Current holdout composite score: **0.6175** (target was 0.60+, baseline was 0.515). The composite formula is `0.50 × accuracy + 0.25 × recall_CALL + 0.25 × recall_PUT` evaluated on the last 252 trading days.
-
-**Step 3 — Autoresearch (nightly, Mon–Fri midnight):**
-
-Claude AI iterates over the feature engineering and signal logic. Each proposed change is evaluated on a 252-day out-of-sample holdout. Improvements are tested in a paper model first; after 3 nights of consistent outperformance they auto-promote to the live model. Regressions are reverted. The 4-model ensemble retrains nightly using the current best code. The model gets smarter without any human input.
-
-**Step 4 — Live feedback loop:**
-
-After each live trade, `trade_journal.py` records the actual outcome. At 11 AM each day, `midday_conviction.py` detects if the morning thesis has reversed and writes a checkpoint. Every night the evolver injects both signals back into training — live outcomes at 10× weight, midday reversals at 5× weight — and boosts historical rows that match miss-pattern conditions, so the model incrementally corrects its own mistakes.
+**Nightly model competition:** RF, XGBoost, LightGBM, CatBoost compete via Optuna HPO (30 trials each = 120 total). Winner saved as champion.pkl. Full 4-model ensemble saved for live voting.
 
 ---
 
 ## Architecture
 
 ```
-auto_trader.py              Morning runner — orchestrates everything, places the order
+auto_trader.py              9:30 AM runner — builds IC legs, places 4 orders, Telegram
+spread_monitor.py           1-min intraday SL/TP watch — closes all 4 IC legs on trigger
+exit_positions.py           3:15 PM EOD squareoff — closes any open Nifty NRML positions
+trade_journal.py            3:30 PM — logs IC trade outcome to live_ic_trades.csv + Telegram
 signal_engine.py            Rule-based indicators → data/signals.csv
-ml_engine.py                Walk-forward ML → data/signals_ml.csv; loads champion.pkl for fast predict
-ml_engine_paper.py          Paper copy of ml_engine — autoresearcher tests here before promoting to live
-model_evolver.py            Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → models/champion.pkl + ensemble/
-backtest_engine.py          Historical P&L simulation with full cost model
-backtest_live_context.py    Research backtest — tests intraday live-context overrides
-data_fetcher.py             Downloads OHLCV + global data → data/ (incremental, parallel)
-                            Also fetches options IV skew, OI surface, ORB candles
-morning_brief.py            9:15 AM news sentiment — Claude API → data/news_sentiment.json
-health_ping.py              Pre-market (8:50 AM) heartbeat: token + capital + freshness checks
-midday_conviction.py        Midday (11 AM) thesis reassessment + reversal detection + checkpoint CSV
-exit_positions.py           EOD 3:15 PM — closes any open NRML positions before market close
-trade_journal.py            EOD 3:30 PM — captures actual fills vs oracle, builds live_trades.csv
-lot_expiry_scanner.py       Monthly check: BankNifty lot size / expiry day changes
-replay_today.py             Post-mortem tool — runs after evolver to replay today with new ensemble
-analyze_confidence.py       Confidence bucket + VIX regime diagnostics; writes dynamic VIX threshold
-renew_token.py              Dynamic token renewal — 23h50m interval, 7 days a week
+ml_engine.py                Walk-forward ML → data/signals_ml.csv; champion.pkl fast predict
+ml_engine_paper.py          Paper copy — autoresearcher tests here before promoting to live
+model_evolver.py            11 PM — Optuna HPO + ensemble retrain → models/
+data_fetcher.py             Downloads OHLCV + global + options data → data/
+morning_brief.py            9:15 AM — news sentiment via Claude API → data/news_sentiment.json
+health_ping.py              8:50 AM — pre-market heartbeat: token + capital + freshness
+midday_conviction.py        11 AM — IC leg LTP check + macro + Telegram summary
+lot_expiry_scanner.py       Monthly — Nifty50 lot size / expiry change detection
+replay_today.py             Post-mortem — replay today's prediction with current ensemble
+analyze_confidence.py       Confidence bucket + VIX regime diagnostics
+renew_token.py              Token renewal — 23h50m interval, 7 days a week
 notify.py                   Telegram send helper
-autoloop_bn.py              Nightly autoresearch loop — Claude API experiments → paper model → promote after 3 wins
-autoexperiment_bn.py        Fast 252-day holdout evaluator used by autoloop (composite score)
-autoexperiment_backtest.py  Backtest evaluator for auto_trader.py constant changes
-validate_all.py             Pre-deployment validation pass
-backfill_live_trades.py     Periodic utility — import Dhan trade history into live_trades.csv
-spread_monitor.py           Intraday 1-min cron — SL/TP watch for credit spreads, closes both legs if hit
-backtest_spreads.py         Multi-leg credit spread backtest — Bear Call / Bull Put / regime router
-fetch_intraday_options.py   Fetch 1-min option cache for real-options backtests (data/intraday_options_cache/)
-research_program_bn.md      Research brief — defines what autoresearch may and may not change
-CLAUDE.md                   Architecture map + standing rules (bug fix protocol, ML feature rule,
-                            known gotchas table) — auto-loaded by Claude Code every session
-setup_automation.sh         One-shot VM setup: install deps, set up all cron jobs, dry-run test
-.claude/hooks/              SessionStart hook auto-pulls the repo on every new Claude Code session
-                            (keeps CLAUDE.md rules and gotchas fresh without manual action)
+autoloop_bn.py              Midnight autoresearch — Claude API experiments → paper model → promote
+autoexperiment_bn.py        252-day holdout evaluator (composite score)
+autoexperiment_backtest.py  Backtest evaluator for strategy constant changes
+validate_all.py             Pre-deployment end-to-end health check
+backfill_live_trades.py     Utility — import Dhan trade history into live_ic_trades.csv
+backtest_spreads.py         Multi-leg spread backtest — NF IC + 7 other NF variants
+fetch_intraday_options.py   Fetch 1-min NF option cache → data/nifty_options_cache/
+scan_ic_rr.py               IC SL/TP parameter scanner (RR optimisation)
+optimize_params.py          VIX + confidence grid search
+research_program_bn.md      Autoresearch brief — defines what AI may and may not change
+CLAUDE.md                   Architecture map + standing rules — auto-loaded every session
+setup_automation.sh         One-shot VM setup: deps + all cron jobs
 ```
 
 ---
 
 ## Setup
 
-### What you need
+### Requirements
 
-- GCP VM (or any Linux server) with Python 3.10+
-- Dhan trading account with API access enabled
-- Telegram bot (create one at t.me/BotFather)
-- Anthropic API key (for the Saturday autoresearch loop — get one at console.anthropic.com)
+- GCP VM (or any Linux server), Python 3.10+
+- Dhan trading account with API access
+- Telegram bot (create at t.me/BotFather)
+- Anthropic API key (for midnight autoresearch — console.anthropic.com)
 
 ### 1. Clone and install
 
@@ -209,48 +182,42 @@ pip3 install pandas numpy yfinance requests python-dotenv scikit-learn \
              --break-system-packages
 ```
 
-### 2. Set up credentials
+### 2. Credentials
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-Fill in:
 ```
-DHAN_ACCESS_TOKEN=your_token       # from dhan.co → API settings
+DHAN_ACCESS_TOKEN=your_token
 DHAN_CLIENT_ID=your_client_id
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-ANTHROPIC_API_KEY=your_key         # from console.anthropic.com → API keys
+ANTHROPIC_API_KEY=your_key
 ```
 
-### 3. First-time data fetch and ML training
+### 3. First-time data + model
 
 ```bash
-python3 data_fetcher.py                  # downloads all market data → data/
-python3 data_fetcher.py --backfill       # full history for yfinance tickers (bank stocks, ETF, macro)
-python3 data_fetcher.py --fetch-options  # ATM option premiums + IV skew + OI surface (~5 min)
-python3 data_fetcher.py --fetch-intraday # BN 9:15–9:30 opening-range candles for ORB features (~2 min)
-python3 signal_engine.py                 # generates data/signals.csv
-python3 ml_engine.py                     # walk-forward training (~2 min) → data/signals_ml.csv
-python3 model_evolver.py                 # first HPO run — takes 8–12 min, saves models/champion.pkl
+python3 data_fetcher.py
+python3 data_fetcher.py --backfill
+python3 data_fetcher.py --fetch-options
+python3 data_fetcher.py --fetch-intraday
+python3 signal_engine.py
+python3 ml_engine.py
+python3 model_evolver.py
 ```
 
-### 4. Install cron and test
-
+Fetch real 1-min Nifty option cache (required for backtests):
 ```bash
-bash setup_automation.sh      # sets up all cron jobs, tests API, runs dry-run
+python3 fetch_intraday_options.py --instrument NF --spreads --start 2021-08-01
 ```
 
-This installs every scheduled job automatically: token renewer (every 5 min), health ping (9:05 AM), auto trader (9:30 AM), midday conviction (11 AM), EOD squareoff (3:15 PM), trade journal (3:30 PM), model evolver (11 PM), autoresearch loop (Saturday 11:30 PM), lot scanner (1st of month), log rotation (Sunday 2 AM).
-
-### 5. Verify
+### 4. Install cron + verify
 
 ```bash
-python3 auto_trader.py --dry-run       # full morning flow without placing an order
-python3 autoloop_bn.py --dry-run       # autoresearch baseline check + Telegram test
-crontab -l                             # confirm all cron jobs are listed
+bash setup_automation.sh
 ```
 
 ---
@@ -258,110 +225,73 @@ crontab -l                             # confirm all cron jobs are listed
 ## Useful commands
 
 ```bash
-# Data and signals
-python3 data_fetcher.py                      # fetch latest market data (incremental)
-python3 data_fetcher.py --backfill           # fill historical gaps for any new yfinance ticker
-python3 data_fetcher.py --fetch-options      # refresh IV skew, OI surface, ATM option premiums
-python3 data_fetcher.py --fetch-intraday     # refresh opening-range candles
-python3 signal_engine.py                     # recompute rule signals
-python3 ml_engine.py --predict-today         # fast single ML prediction (<10 sec)
-python3 ml_engine.py --analyze               # feature importance report (all 63 features)
-python3 autoexperiment_bn.py                 # get current composite score
+# Data
+python3 data_fetcher.py
+python3 data_fetcher.py --fetch-options
+python3 signal_engine.py
+python3 ml_engine.py --predict-today
+python3 ml_engine.py --analyze
 
-# Backtesting
-python3 backtest_engine.py                   # rule-based backtest
-python3 backtest_engine.py --real-premium    # use real historical premiums
-python3 backtest_engine.py --real-premium-ml # ML backtest with real premiums
-python3 backtest_live_context.py             # explore intraday-context overrides
+# Backtest (real 1-min option data)
+python3 backtest_spreads.py --instrument NF --strategy nf_iron_condor --ml
+python3 backtest_spreads.py --instrument NF --strategy all --ml
+python3 scan_ic_rr.py               # scan SL/TP combinations
 
-# Live test
-python3 auto_trader.py --dry-run             # see exactly what would trade today
+# Dry runs (safe — no orders placed, no Telegram sent)
+python3 auto_trader.py --dry-run
+python3 spread_monitor.py --dry-run
+python3 midday_conviction.py --dry-run
+python3 exit_positions.py --dry-run
+python3 trade_journal.py --dry-run
 
-# Model evolver
-python3 model_evolver.py                     # run nightly HPO manually
-python3 model_evolver.py --no-data           # HPO only, skip data fetch
-python3 model_evolver.py --trials 30         # override trial count (default 30)
+# Model
+python3 model_evolver.py
+python3 model_evolver.py --no-data
+python3 replay_today.py
 
 # Autoresearch
-python3 autoloop_bn.py --dry-run             # measure baseline score + Telegram test
-python3 autoloop_bn.py --experiments 3       # quick 3-experiment live test
-python3 autoloop_bn.py --no-evolver          # run experiments without retraining at end
+python3 autoloop_bn.py --dry-run
+python3 autoexperiment_bn.py
 
-# Post-mortem replay
-python3 replay_today.py                      # replay today with current ensemble, vs actual
-
-# Pre-market checks
-python3 health_ping.py                       # manual pre-market heartbeat
-python3 midday_conviction.py --dry-run       # midday thesis check without Telegram
-
-# EOD scripts (run manually if needed)
-python3 exit_positions.py --dry-run          # check open positions without closing
-python3 trade_journal.py --dry-run           # journal check without API calls
-
-# Token management
-python3 renew_token.py                       # check / force token renewal
-
-# Lot/expiry scanner
-python3 lot_expiry_scanner.py --show         # print current lot size and expiry override
-python3 lot_expiry_scanner.py                # run scan + alert if anything changed
+# Health
+python3 health_ping.py
+python3 validate_all.py
+python3 lot_expiry_scanner.py --show
 ```
 
 ---
 
 ## Key design choices
 
-**ML as direction oracle, not filter** — Rules provide a starting direction. The ML model overrides it when market conditions disagree. It always produces a direction — CALL or PUT — and never skips a trade.
+**Iron Condor over naked options** — Real 1-min backtest (2021–2026, 1114 trades) confirmed IC wins ~85% of the time on NF weekly expiry. Naked long-option buying on the same data was a net loser due to theta decay and IV crush. IC collects premium from both sides simultaneously.
 
-**Autoresearch (Karpathy pattern)** — Every Saturday night Claude AI proposes small changes to feature engineering (`ml_engine.py`) and signal logic (`signal_engine.py`). Each change is evaluated on a 252-day out-of-sample holdout using a fixed RF. Improvements are committed; regressions are reverted. The 4 models retrain on the improved code. The system improves itself week over week without human involvement.
+**Weekly Thursday expiry** — Nifty50 kept weekly Thursday expiry (SEBI mandate). Every IC is naturally DTE ≤ 7, maximising theta decay benefit. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
 
-**Live feedback loop** — After each trade, the actual outcome (SL hit vs TP hit) gets injected back into the model's training data with high weight. Patterns that caused past misses get upweighted in historical training so the model gradually reduces repeat errors.
+**Real 1-min option data** — All backtests use actual Dhan 1-min option bars from `data/nifty_options_cache/`. OHLCV-formula estimates are never used for strategy decisions — formula can't see theta decay, IV crush, or slippage.
 
-**Monthly expiry (Phase 4, Sep 2025+)** — BankNifty switched from weekly Thursday expiry to monthly last-Tuesday expiry. All 5 weekdays are now valid trading days.
+**No VIX/confidence filter** — Grid search confirmed: filtering by VIX or ML confidence reduces trade frequency without improving P&L. Maximum frequency = maximum P&L for this strategy.
 
-**Dynamic token renewal** — `renew_token.py` checks every 5 minutes and renews at exactly T+23h50m. The token never reaches its 24h expiry regardless of day or time.
+**SL=50%, TP=90%** — Confirmed optimal via `scan_ic_rr.py` on 5-year real data. TP=90% fires ~16 times/year (expiry-day theta collapse). Holding to EOD on other days captures natural decay. Both parameters produce identical max drawdown.
 
-**1-lot minimum** — The 5% risk rule sizes positions (more capital → more lots), not a gate. If you can physically afford 1 lot, the system trades it.
+**Nightly model competition** — RF, XGBoost, LightGBM, CatBoost compete every night. Live trade outcomes injected at 10× weight. Midday reversal checkpoints injected at 5×. Model corrects its own mistakes over time.
 
-**Nightly model competition** — RF, XGBoost, LightGBM, and CatBoost compete every night via Optuna HPO (30 trials per model = 120 trials total). The winner is saved as champion.pkl and the full 4-model ensemble is saved to models/ensemble/ for live agreement voting.
-
-**Macro feature layer** — The model explicitly captures FII-driving forces: crude oil return, DXY return, US 10-year yield change, and USD/INR return. When rupee weakens, dollar strengthens, or crude spikes, FII outflows accelerate and banking stocks lead the selloff — these signals are now baked in alongside the technical and options-sentiment features.
-
----
-
-## Self-maintaining documentation (Claude Code integration)
-
-`CLAUDE.md` holds the architecture map plus five standing rule sections that Claude Code reads automatically at the start of every session — no manual invocation needed:
-
-- **Dhan API Rule** — read `docs/DHAN_API_V2_REFERENCE.md` before any API change
-- **Bug Fix Rule** — WebSearch the error message first; explain in plain English before writing code
-- **ML Feature Rule** — `.shift(1)` on all price inputs; reserved variable names; `FEATURE_COLS` dedup check; autoexperiment gate before commit
-- **Plain English Rule** — no jargon in any user-facing output
-- **Security Rule** — visual `git status` scan before every commit (no data files, no credentials)
-
-A **Known Gotchas table** in CLAUDE.md records every bug that has ever taken more than one debug round to solve. When a new one is found, it gets added and committed — next session auto-pulls it and never debugs it again.
-
-A SessionStart hook in `.claude/hooks/session-start.sh` silently runs `git pull` at the start of every new Claude Code session, so these rules and the gotchas table stay fresh without any manual action. `ml_engine.py` and `data_fetcher.py` also carry 5-line gotcha headers at the top — visible when reading the code on GitHub.
+**Buy-first order sequence** — Dhan margin rules require long leg on books before short leg. Violation triggers full unhedged margin on short legs. Enforced in `auto_trader.py`.
 
 ---
 
 ## What is NOT in this repo
 
-Gitignored for safety — these live only on the VM, never in version control:
+Gitignored — lives only on the VM:
 
-- `.env` — Dhan token, client ID, Telegram bot token, chat ID, Anthropic API key
-- `data/` — all fetched OHLCV, signal CSVs, live trade journal, today_trade.json
-- `data/live_trades.csv`, `data/paper_performance.csv`, `data/midday_checkpoints.csv` — P&L and trade outcome history
-- `data/options_atm_daily.csv`, `data/options_iv_skew.csv`, `data/options_oi_surface.csv` — ATM premiums, IV skew, OI surface
-- `data/banknifty_15m_orb.csv` — opening-range candles for ORB features
-- `data/news_sentiment.json` — daily news sentiment
-- `data/vix_threshold.json` — dynamic VIX filter state
-- `models/` — trained champion.pkl, champion_meta.json, ensemble/*.pkl
-- `logs/` — cron log output for every scheduled job
-- `__pycache__/`, `*.pyc`, `catboost_info/` — Python bytecode and training artefacts
-- `token_meta.json` — token renewal state
+- `.env` — credentials
+- `data/` — all CSVs, signals, trade history, today_trade.json
+- `data/live_ic_trades.csv` — IC trade journal
+- `data/nifty_options_cache/` — real 1-min NF option bars
+- `models/` — trained champion.pkl, ensemble/*.pkl
+- `logs/` — cron output
 
-**No backtest numbers or trade-level results are ever committed to this repo. Only source code, configuration templates, and documentation.**
+**No backtest P&L numbers, trade-level results, or credentials are ever committed.**
 
 ---
 
-> **Risk warning**: Options trading carries a high level of risk. This system is provided as-is with no warranty of fitness for live trading. Use at your own risk.
+> **Risk warning:** Options trading carries a high level of risk. This system is provided as-is with no warranty. Use at your own risk.

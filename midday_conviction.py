@@ -535,10 +535,162 @@ def main():
         return
 
     direction   = trade.get("signal", "CALL")
+    is_ic       = trade.get("strategy") == "nf_iron_condor"
     is_spread   = trade.get("strategy") in ("bear_call_credit", "bull_put_credit")
     opt_type    = "CE" if direction == "CALL" else "PE"
     icon        = "📈" if direction == "CALL" else "📉"
     now_str     = datetime.now(IST).strftime("%I:%M %p IST")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # NIFTY IRON CONDOR PATH
+    # ══════════════════════════════════════════════════════════════════════════
+    if is_ic:
+        ce_short_sid    = str(trade.get("ce_short_sid",    ""))
+        ce_long_sid     = str(trade.get("ce_long_sid",     ""))
+        pe_short_sid    = str(trade.get("pe_short_sid",    ""))
+        pe_long_sid     = str(trade.get("pe_long_sid",     ""))
+        ce_short_strike = float(trade.get("ce_short_strike", 0))
+        ce_long_strike  = float(trade.get("ce_long_strike",  0))
+        pe_short_strike = float(trade.get("pe_short_strike", 0))
+        pe_long_strike  = float(trade.get("pe_long_strike",  0))
+        net_credit      = float(trade.get("net_credit",      0))
+        ce_net_credit   = float(trade.get("ce_net_credit",   0))
+        pe_net_credit   = float(trade.get("pe_net_credit",   0))
+        lots            = int(trade.get("lots",    1))
+        lot_size        = int(trade.get("lot_size", 65))
+        dte             = int(trade.get("dte",      0))
+        paper           = trade.get("order_mode") == "PAPER"
+        mode_tag        = "[PAPER] " if paper else ""
+
+        _log(f"IC: CE {int(ce_short_strike)}/{int(ce_long_strike)}  PE {int(pe_short_strike)}/{int(pe_long_strike)}  net_credit ₹{net_credit:.0f}")
+
+        pos_open = _check_position_open(ce_short_sid or pe_short_sid)
+        if not pos_open:
+            _log("No open Nifty IC position — all 4 legs closed.")
+            _write_midday_checkpoint({"signal": direction, "conviction_score": 0,
+                                      "verdict": "closed", "reversal_detected": False})
+            if not trade.get("exit_done"):
+                closed_msg = (
+                    f"ℹ️  <b>Midday check  ·  {now_str}</b>\n\n"
+                    f"Your Nifty50 IC is already closed.\n"
+                    f"<i>Journal runs at 3:30 PM with final P&amp;L.</i>"
+                )
+                if DRY_RUN:
+                    import re; print(re.sub(r"<[^>]+>", "", closed_msg))
+                else:
+                    notify.send(closed_msg)
+            return
+
+        ce_sl = _get_ltp_from_marketfeed(ce_short_sid) if ce_short_sid else None
+        ce_ll = _get_ltp_from_marketfeed(ce_long_sid)  if ce_long_sid  else None
+        pe_sl = _get_ltp_from_marketfeed(pe_short_sid) if pe_short_sid else None
+        pe_ll = _get_ltp_from_marketfeed(pe_long_sid)  if pe_long_sid  else None
+        macro = get_macro()
+
+        sl_trigger = net_credit * 1.5    # SL: 50% loss of credit
+        tp_trigger = net_credit * 0.10   # TP: retain 90% of credit (CREDIT_TP_FRAC=0.90)
+
+        if ce_sl and ce_ll and pe_sl and pe_ll and net_credit > 0:
+            ce_cost      = ce_sl - ce_ll
+            pe_cost      = pe_sl - pe_ll
+            current_cost = ce_cost + pe_cost
+            pnl_per_share = net_credit - current_cost
+            pnl_inr      = round(pnl_per_share * lots * lot_size, 0)
+            pnl_pct      = pnl_per_share / net_credit * 100
+            pnl_sign     = "+" if pnl_inr >= 0 else ""
+            pnl_icon     = "💰" if pnl_inr >= 0 else "📉"
+
+            ce_line  = (f"📈 CE: SELL {int(ce_short_strike)}→₹{ce_sl:.0f} / "
+                        f"BUY {int(ce_long_strike)}→₹{ce_ll:.0f}  (cost ₹{ce_cost:.0f})")
+            pe_line  = (f"📉 PE: SELL {int(pe_short_strike)}→₹{pe_sl:.0f} / "
+                        f"BUY {int(pe_long_strike)}→₹{pe_ll:.0f}  (cost ₹{pe_cost:.0f})")
+            pnl_line = f"{pnl_icon} P&amp;L  {pnl_sign}₹{pnl_inr:,.0f}  ({pnl_sign}{pnl_pct:.0f}% of credit)"
+            sl_line  = (f"🛡️ SL at ₹{sl_trigger:.0f}"
+                        + (f"  ({((sl_trigger-current_cost)/net_credit*100):.0f}% headroom)"
+                           if current_cost < sl_trigger else "  ⚠️ near SL!"))
+            tp_line  = (f"🎯 TP at ₹{tp_trigger:.0f}"
+                        + (f"  ({((current_cost-tp_trigger)/net_credit*100):.0f}% to go)"
+                           if current_cost > tp_trigger else "  ✅ at TP zone!"))
+
+            if current_cost <= tp_trigger:
+                verdict_line = "✅ <b>Near full decay — TP zone reached.</b>"
+                verdict_sub  = "spread_monitor.py will exit automatically."
+                conv_score   = 2
+            elif pnl_pct >= 30:
+                verdict_line = "✅ <b>Going well — collecting premium as planned.</b>"
+                verdict_sub  = "Nothing to worry about."
+                conv_score   = 1
+            elif pnl_pct >= -10:
+                verdict_line = "🟡 <b>Roughly breakeven — within expected range.</b>"
+                verdict_sub  = "Normal. Keep watching."
+                conv_score   = 0
+            elif current_cost >= sl_trigger * 0.85:
+                verdict_line = "🔴 <b>Approaching SL — spread widening against us.</b>"
+                verdict_sub  = "spread_monitor.py exits all 4 legs automatically if SL hits."
+                conv_score   = -2
+            else:
+                verdict_line = "🟠 <b>Slightly against us — not at SL yet.</b>"
+                verdict_sub  = "Stop-loss is your safety net."
+                conv_score   = -1
+        else:
+            current_cost = 0
+            pnl_inr      = 0
+            conv_score   = 0
+            ce_line  = f"CE LTPs unavailable  (entry credit ₹{ce_net_credit:.0f})"
+            pe_line  = f"PE LTPs unavailable  (entry credit ₹{pe_net_credit:.0f})"
+            pnl_line = f"P&L unknown  (total credit ₹{net_credit:.0f})"
+            sl_line  = f"🛡️ SL at ₹{sl_trigger:.0f}"
+            tp_line  = f"🎯 TP at ₹{tp_trigger:.0f}"
+            verdict_line = "⬜ <b>Cannot check — option prices unavailable.</b>"
+            verdict_sub  = "Check Dhan app manually."
+
+        macro_parts = []
+        if "sp500f_chg_pct" in macro:
+            v = macro["sp500f_chg_pct"]
+            macro_parts.append(f"S&P {'up' if v >= 0 else 'down'} {abs(v):.1f}%")
+        if "dxy_chg_pct" in macro:
+            v = macro["dxy_chg_pct"]
+            macro_parts.append(f"dollar {'stronger' if v >= 0 else 'weaker'} {abs(v):.2f}%")
+        if "vix_now" in macro:
+            macro_parts.append(f"fear index {macro['vix_now']:.1f}")
+        if "crude_chg_pct" in macro:
+            v = macro["crude_chg_pct"]
+            macro_parts.append(f"crude {'up' if v >= 0 else 'down'} {abs(v):.1f}%")
+        macro_str = "  ·  ".join(macro_parts) if macro_parts else "unavailable"
+
+        _write_midday_checkpoint({
+            "signal":            direction,
+            "conviction_score":  conv_score,
+            "verdict":           "hold" if conv_score >= 0 else "reversal",
+            "reversal_detected": conv_score < 0,
+            "sp500f_chg_pct":    round(macro.get("sp500f_chg_pct", 0), 3),
+            "dxy_chg_pct":       round(macro.get("dxy_chg_pct", 0), 3),
+            "vix_now":           round(macro.get("vix_now", 0), 2),
+            "vix_chg":           round(macro.get("vix_chg", 0), 2),
+            "crude_chg_pct":     (round(macro["crude_chg_pct"], 3) if "crude_chg_pct" in macro else ""),
+            "reason_codes":      [],
+        })
+
+        msg = (
+            f"🎯  <b>{mode_tag}Midday check  ·  {now_str}</b>\n\n"
+            f"<b>Nifty50 Iron Condor  ·  {lots} lot  ·  {dte}d to expiry</b>\n\n"
+            f"{ce_line}\n{pe_line}\n\n"
+            f"{pnl_line}\n"
+            f"{sl_line}\n{tp_line}\n\n"
+            f"🌍 <b>Global:</b>  {macro_str}\n\n"
+            f"{verdict_line}\n"
+            f"<i>{verdict_sub}</i>"
+        )
+        _log(f"IC conviction {conv_score:+d}  |  current_cost=₹{current_cost:.0f}")
+        if DRY_RUN:
+            import re
+            print("\n── Telegram preview (IC) ─────────────────────────")
+            print(re.sub(r"<[^>]+>", "", msg))
+            print("──────────────────────────────────────────────────")
+            return
+        notify.send(msg)
+        _log("IC midday message sent to Telegram.")
+        return
 
     # ══════════════════════════════════════════════════════════════════════════
     # CREDIT SPREAD PATH
@@ -719,14 +871,14 @@ def main():
     # ── [1] Check if position is still open ───────────────────────────────────
     pos_open = _check_position_open(security_id)
     if not pos_open:
-        _log("No open BankNifty position found — trade already closed.")
+        _log("No open position found — trade already closed.")
         _write_midday_checkpoint({
             "signal": direction, "conviction_score": 0,
             "verdict": "closed", "reversal_detected": False,
         })
         closed_msg = (
             f"ℹ️  <b>Midday check  ·  {now_str}</b>\n\n"
-            f"Your BankNifty {direction} trade (strike {strike:,} {opt_type}) "
+            f"Your {direction} trade (strike {strike:,} {opt_type}) "
             f"is already closed — the stop-loss or target triggered earlier.\n\n"
             f"Nothing left to monitor. "
             f"<i>The 3:30 PM summary will show the final result.</i>"
@@ -797,10 +949,10 @@ def main():
     # BN spot line
     if bn_spot and entry_spot:
         spot_chg = (bn_spot - entry_spot) / entry_spot * 100
-        spot_line = (f"📍 BankNifty at ₹{bn_spot:,.0f}  "
+        spot_line = (f"📍 Nifty at ₹{bn_spot:,.0f}  "
                      f"({'up' if spot_chg >= 0 else 'down'} {abs(spot_chg):.2f}% from entry)")
     else:
-        spot_line = "📍 BankNifty: unavailable"
+        spot_line = "📍 Nifty: unavailable"
 
     # Macro summary in plain words
     macro_parts = []
@@ -833,7 +985,7 @@ def main():
 
     msg = (
         f"{icon}  <b>Midday check  ·  {now_str}</b>\n\n"
-        f"<b>BankNifty {direction}  ·  Strike {strike:,} {opt_type}"
+        f"<b>{direction}  ·  Strike {strike:,} {opt_type}"
         f"  ·  {lots} lot(s)  ·  {dte}d to expiry</b>\n\n"
         f"{prem_line}\n"
         f"{sl_line}\n"
@@ -849,8 +1001,8 @@ def main():
     # Reversal alert (only when things are going wrong)
     if reversal["reversal_detected"] and reversal["reason_codes"]:
         _REASON_TEXT = {
-            "BN_SELLING":      "BankNifty falling — going against your CALL trade",
-            "BN_RISING":       "BankNifty rising — going against your PUT trade",
+            "BN_SELLING":      "Nifty falling — going against your CALL trade",
+            "BN_RISING":       "Nifty rising — going against your PUT trade",
             "SP500_WEAK":      "Global markets weak — dragging India lower",
             "SP500_STRONG":    "Global markets strong — hurts PUT trades",
             "VIX_SURGE":       "Fear index spiking — uncertainty hurting options",
