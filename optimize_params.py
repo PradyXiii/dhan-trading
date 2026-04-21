@@ -220,16 +220,20 @@ def main():
 
     # Best combo summary
     best = results.sort_values("pnl_yr_L", ascending=False).iloc[0]
-    best_wr = results[results["trades"] >= 80].sort_values("wr", ascending=False).iloc[0]
     print(f"\n{'='*80}")
     print("BEST COMBO — by P&L:")
     print(f"  VIX [{best['vix_min']} – {best['vix_max']}]  conf ≥ {best['min_conf']}"
           f"  →  WR={best['wr']:.1%}  {best['trades']} trades  "
           f"₹{best['pnl_yr_L']:.2f}L/yr  DD=-₹{best['max_dd_L']:.2f}L")
+    wr_candidates = results[results["trades"] >= 80]
     print("BEST COMBO — by WR (≥80 trades):")
-    print(f"  VIX [{best_wr['vix_min']} – {best_wr['vix_max']}]  conf ≥ {best_wr['min_conf']}"
-          f"  →  WR={best_wr['wr']:.1%}  {best_wr['trades']} trades  "
-          f"₹{best_wr['pnl_yr_L']:.2f}L/yr  DD=-₹{best_wr['max_dd_L']:.2f}L")
+    if wr_candidates.empty:
+        print("  (fewer than 80 trades in all combos — try wider filter or longer date range)")
+    else:
+        best_wr = wr_candidates.sort_values("wr", ascending=False).iloc[0]
+        print(f"  VIX [{best_wr['vix_min']} – {best_wr['vix_max']}]  conf ≥ {best_wr['min_conf']}"
+              f"  →  WR={best_wr['wr']:.1%}  {best_wr['trades']} trades  "
+              f"₹{best_wr['pnl_yr_L']:.2f}L/yr  DD=-₹{best_wr['max_dd_L']:.2f}L")
 
     # ── Entry time scan ────────────────────────────────────────────────────────
     if args.entry_scan:
