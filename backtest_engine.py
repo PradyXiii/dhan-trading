@@ -279,7 +279,7 @@ def load_all_signals(ml=False):
     return pd.read_csv(fname, parse_dates=["date"])
 
 
-def load_bn_ohlcv():
+def load_nf_ohlcv():
     df = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
     return df.set_index("date")
 
@@ -324,7 +324,7 @@ def _norm_cdf(x):
     return p if x >= 0 else 1.0 - p
 
 
-def _otm_params(dist_100pts, bn_open, dte_days):
+def _otm_params(dist_100pts, nf_open, dte_days):
     """
     Return (premium_factor, delta) for a strike dist_100pts × 100 pts from ATM.
 
@@ -344,7 +344,7 @@ def _otm_params(dist_100pts, bn_open, dte_days):
 
     dist_pts    = dist_100pts * 100
     t_years     = max(0.001, dte_days / 252.0)
-    sigma_t_pts = _DEFAULT_IV * bn_open * _math.sqrt(t_years)   # 1σ in BN pts
+    sigma_t_pts = _DEFAULT_IV * nf_open * _math.sqrt(t_years)   # 1σ in BN pts
 
     if sigma_t_pts == 0:
         return 1.0, 0.50
@@ -356,7 +356,7 @@ def _otm_params(dist_100pts, bn_open, dte_days):
 
     if dist_pts < 0:
         # ITM: extrinsic + intrinsic. Intrinsic scaled to ATM premium.
-        atm_premium  = bn_open * PREMIUM_K * _math.sqrt(max(0.25, dte_days))
+        atm_premium  = nf_open * PREMIUM_K * _math.sqrt(max(0.25, dte_days))
         intrinsic    = abs(dist_pts)
         pf = extrinsic_factor + (intrinsic / atm_premium if atm_premium > 0 else 0)
         pf = min(3.0, max(0.05, pf))
@@ -369,7 +369,7 @@ def _otm_params(dist_100pts, bn_open, dte_days):
     return pf, delta
 
 
-def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
+def _select_strike(nf_open, capital, dte_days, lot_size, real_atm_premium=None):
     """
     Simulate the live ATM/OTM/ITM strike selection for a given capital level.
 
@@ -391,11 +391,11 @@ def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
     """
     # Real ATM premium as anchor (exact IV-priced); fall back to formula approximation
     atm_premium = (real_atm_premium if real_atm_premium and real_atm_premium > 0
-                   else bn_open * PREMIUM_K * (dte_days ** 0.5))
+                   else nf_open * PREMIUM_K * (dte_days ** 0.5))
     atm_result  = None
 
     for dist in range(0, OTM_WALK_MAX + 1):
-        pf, delta = _otm_params(dist, bn_open, dte_days)
+        pf, delta = _otm_params(dist, nf_open, dte_days)
         premium   = atm_premium * pf
         loss_1lot = lot_size * premium * SL_PCT
         marg_1lot = lot_size * premium
@@ -418,7 +418,7 @@ def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
 
     # Phase 2 — ITM probe: deepest first (200pt, then 100pt)
     for itm in range(ITM_WALK_MAX, 0, -1):
-        pf, delta = _otm_params(-itm, bn_open, dte_days)
+        pf, delta = _otm_params(-itm, nf_open, dte_days)
         premium   = atm_premium * pf
         loss_1lot = lot_size * premium * SL_PCT
         marg_1lot = lot_size * premium
@@ -435,7 +435,7 @@ def _select_strike(bn_open, capital, dte_days, lot_size, real_atm_premium=None):
     return atm_result   # ATM is the best achievable
 
 
-def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
+def simulate_trade(row, nf_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                    flat_rr=None, day_rr_override=None,
                    bn_tp_pts=None, bn_sl_pts=None, dte_override=None,
                    lot_size=None, real_atm_premium=None,
@@ -466,14 +466,14 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                       ["c_brokerage","c_stt","c_exchange","c_clearing",
                        "c_gst","c_stamp_duty","c_sebi"]}
 
-    if date not in bn_ohlcv.index:
+    if date not in nf_ohlcv.index:
         return 0.0, "SKIPPED", 0, 0.0, 0.0, zero_breakdown, 0
 
-    bar      = bn_ohlcv.loc[date]
-    bn_open  = bar["open"]
-    bn_high  = bar["high"]
-    bn_low   = bar["low"]
-    bn_close = bar["close"]
+    bar      = nf_ohlcv.loc[date]
+    nf_open  = bar["open"]
+    nf_high  = bar["high"]
+    nf_low   = bar["low"]
+    nf_close = bar["close"]
 
     dte  = dte_override if dte_override is not None else DAY_DTE.get(weekday, 1)
     if flat_rr is not None:
@@ -492,7 +492,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
     #   capital flush → probe ITM for better delta (higher payoff on trend days)
     if bn_tp_pts is not None and bn_sl_pts is not None:
         # BN-point mode: strike selection still determines premium/lots
-        sel = _select_strike(bn_open, capital, dte, ls, real_atm_premium)
+        sel = _select_strike(nf_open, capital, dte, ls, real_atm_premium)
         if sel is None:
             return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
         _dist, premium, lots, delta = sel
@@ -500,7 +500,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
         tp_pts = bn_tp_pts
         max_loss_1lot = ls * bn_sl_pts * delta   # delta scales option loss per BN pt
     else:
-        sel = _select_strike(bn_open, capital, dte, ls, real_atm_premium)
+        sel = _select_strike(nf_open, capital, dte, ls, real_atm_premium)
         if sel is None:
             return 0.0, "SKIPPED_LOW_CAPITAL", 0, 0.0, 0.0, zero_breakdown
         _dist, premium, lots, delta = sel
@@ -531,18 +531,18 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
 
     # ── CALL exit logic ───────────────────────────────────────────────────────
     if signal == "CALL":
-        orig_sl  = bn_open - sl_pts
-        tp_level = bn_open + tp_pts
-        fav      = max(0.0, bn_high - bn_open)
+        orig_sl  = nf_open - sl_pts
+        tp_level = nf_open + tp_pts
+        fav      = max(0.0, nf_high - nf_open)
         steps    = trail_steps(fav)
-        # Trail SL ratchets up in BN pts — no cap at bn_open (trail can go profitable)
+        # Trail SL ratchets up in BN pts — no cap at nf_open (trail can go profitable)
         sl_level = (orig_sl + steps * trail_jump_bn) if trail_jump_bn > 0 else orig_sl
 
-        sl_hit = bn_low  <= sl_level
-        tp_hit = bn_high >= tp_level
+        sl_hit = nf_low  <= sl_level
+        tp_hit = nf_high >= tp_level
 
         if sl_hit and tp_hit:
-            result = "WIN" if bn_close > bn_open else "LOSS"
+            result = "WIN" if nf_close > nf_open else "LOSS"
         elif tp_hit:
             result = "WIN"
         elif sl_hit:
@@ -552,24 +552,24 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                 return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd, _dist
             result = "LOSS"
         else:
-            gross = (bn_close - bn_open) * delta * lots * ls
+            gross = (nf_close - nf_open) * delta * lots * ls
             charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
             return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd, _dist
 
     # ── PUT exit logic ────────────────────────────────────────────────────────
     else:
-        orig_sl  = bn_open + sl_pts
-        tp_level = bn_open - tp_pts
-        fav      = max(0.0, bn_open - bn_low)
+        orig_sl  = nf_open + sl_pts
+        tp_level = nf_open - tp_pts
+        fav      = max(0.0, nf_open - nf_low)
         steps    = trail_steps(fav)
-        # Trail SL ratchets down in BN pts — no floor at bn_open (trail can go profitable)
+        # Trail SL ratchets down in BN pts — no floor at nf_open (trail can go profitable)
         sl_level = (orig_sl - steps * trail_jump_bn) if trail_jump_bn > 0 else orig_sl
 
-        sl_hit = bn_high >= sl_level
-        tp_hit = bn_low  <= tp_level
+        sl_hit = nf_high >= sl_level
+        tp_hit = nf_low  <= tp_level
 
         if sl_hit and tp_hit:
-            result = "WIN" if bn_close < bn_open else "LOSS"
+            result = "WIN" if nf_close < nf_open else "LOSS"
         elif tp_hit:
             result = "WIN"
         elif sl_hit:
@@ -579,7 +579,7 @@ def simulate_trade(row, bn_ohlcv, capital, trail_jump_opt=0, sl_pct=None,
                 return round(gross - charges, 2), label, lots, round(premium, 2), charges, bd, _dist
             result = "LOSS"
         else:
-            gross = (bn_open - bn_close) * delta * lots * ls
+            gross = (nf_open - nf_close) * delta * lots * ls
             charges, bd = calculate_charges(premium, lots, lot_size=ls, breakdown=True)
             return round(gross - charges, 2), "PARTIAL", lots, round(premium, 2), charges, bd, _dist
 
@@ -614,7 +614,7 @@ def _load_intraday_path(date, signal):
         return None
 
 
-def simulate_trade_real_option(row, bn_ohlcv, capital, trail_jump_opt=5,
+def simulate_trade_real_option(row, nf_ohlcv, capital, trail_jump_opt=5,
                                 sl_pct=None, flat_rr=None, day_rr_override=None,
                                 dte_override=None, lot_size=None,
                                 entry_time="09:30", exit_time="15:15"):
@@ -641,7 +641,7 @@ def simulate_trade_real_option(row, bn_ohlcv, capital, trail_jump_opt=5,
     bars = _load_intraday_path(date, signal)
     if bars is None or bars.empty:
         # No cache → fall back to OHLCV approximation so partial coverage works
-        return simulate_trade(row, bn_ohlcv, capital,
+        return simulate_trade(row, nf_ohlcv, capital,
                               trail_jump_opt=trail_jump_opt, sl_pct=sl_pct,
                               flat_rr=flat_rr, day_rr_override=day_rr_override,
                               dte_override=dte_override, lot_size=lot_size)
@@ -742,7 +742,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
                  use_real_premiums=True, otm_sl_pct=None, otm_flat_rr=None,
                  use_real_options=False, entry_time="09:30", exit_time="15:15"):
     signals      = load_signals(ml=ml)
-    bn_ohlcv     = load_bn_ohlcv()
+    nf_ohlcv     = load_nf_ohlcv()
     opt_premiums = load_real_premiums() if use_real_premiums else {}
 
     if use_real_options:
@@ -808,7 +808,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
             _probe = _load_intraday_path(date, signal)
             prem_src = "real_1min" if _probe is not None else "approx_fallback"
             pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade_real_option(
-                row, bn_ohlcv, capital,
+                row, nf_ohlcv, capital,
                 trail_jump_opt=trail_jump_opt,
                 sl_pct=sl_pct,
                 flat_rr=flat_rr,
@@ -819,7 +819,7 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
                 exit_time=exit_time)
         else:
             pnl, result, lots, premium, charges, charges_bd, strike_dist = simulate_trade(
-                row, bn_ohlcv, capital,
+                row, nf_ohlcv, capital,
                 trail_jump_opt=trail_jump_opt,
                 sl_pct=sl_pct,
                 flat_rr=flat_rr,
@@ -833,15 +833,15 @@ def run_backtest(trail_jump_opt=0, sl_pct=None, flat_rr=None, day_rr_override=No
                 otm_flat_rr=otm_flat_rr)
         capital += pnl
 
-        bn_open = (bn_ohlcv.loc[date, "open"]
-                   if date in bn_ohlcv.index else None)
+        nf_open = (nf_ohlcv.loc[date, "open"]
+                   if date in nf_ohlcv.index else None)
 
         trade_log.append({
             "date":           date.date(),
             "weekday":        row["weekday"],
             "signal":         row["signal"],
             "score":          row["score"],
-            "bn_open":        round(bn_open, 2) if bn_open else None,
+            "nf_open":        round(nf_open, 2) if nf_open else None,
             "premium":        premium,
             "premium_source": prem_src,      # "real" = rollingoption, "approx" = formula
             "lots":           lots,

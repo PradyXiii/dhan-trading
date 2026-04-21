@@ -383,7 +383,7 @@ def main():
     today_label = date.today().strftime("%d %b %Y")
     notify.log(f"EOD exit check — {today_label} 3:15 PM IST")
 
-    # Holiday guard — banknifty.csv has no row for today → NSE is closed
+    # Holiday guard — nifty50.csv has no row for today → NSE is closed
     if not DRY_RUN and not _is_trading_day():
         notify.log(f"Market holiday ({today_label}) — skipping squareoff.")
         return

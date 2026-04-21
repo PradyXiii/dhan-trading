@@ -367,7 +367,7 @@ def main():
         if not row_sig.empty:
             r = row_sig.iloc[0]
             for field in ["rule_score", "rule_signal", "ml_signal", "ml_conf", "signal",
-                          "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div"]:
+                          "s_ema20", "s_trend5", "s_vix", "s_nf_gap"]:
                 if field in r.index:
                     print(f"  {field:<16}: {r[field]}")
 

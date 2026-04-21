@@ -67,7 +67,7 @@ INSTRUMENT_CONFIG = {
         "security_id":      25,
         "cache_dir":        os.path.join(DATA_DIR, "intraday_options_cache"),
         "weekly_boundary":  datetime(2024, 11, 20).date(),  # BNF WEEK→MONTH
-        "label":            "BankNifty",
+        "label":            "BankNifty_legacy",
     },
     "NF": {
         "security_id":      13,
@@ -278,7 +278,7 @@ def main():
     ap.add_argument("--spreads",    action="store_true",
                     help="Also fetch OTM/straddle legs for spread strategies")
     ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
-                    help="BNF=BankNifty (default), NF=Nifty50 weekly")
+                    help="BNF=BankNifty legacy, NF=Nifty50 weekly")
     ap.add_argument("--dry-run",    action="store_true",
                     help="List what would be fetched — no API calls")
     args = ap.parse_args()

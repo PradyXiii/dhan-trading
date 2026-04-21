@@ -8,7 +8,7 @@
 #   python3 fetch_intraday_options.py --spreads --start 2021-08-01
 # ─────────────────────────────────────────────────────────────────────────────
 """
-Multi-leg options spread backtester for BankNifty.
+Multi-leg options spread backtester for Nifty50.
 
 Why this exists:
   Naked option buying on monthly expiry loses structurally (theta + IV crush).
@@ -50,7 +50,7 @@ import pandas as pd
 from backtest_engine import (
     DATA_DIR, INTRADAY_CACHE_DIR, LOT_SIZE, STARTING_CAPITAL, MONTHLY_TOPUP,
     PREMIUM_K, MAX_LOTS, RISK_PCT,
-    _otm_params, load_signals, load_bn_ohlcv, get_lot_size, get_dte,
+    _otm_params, load_signals, load_nf_ohlcv, get_lot_size, get_dte,
     calculate_charges, fmt_inr,
     NIFTY_CACHE_DIR, get_nifty_lot_size, load_nifty_ohlcv,
 )
@@ -341,7 +341,7 @@ def _leg_cache_path(date, signal, opt_type, cache_suffix_call, cache_suffix_put,
     return os.path.join(cache_dir, f"{date_str}_{opt_type}_{suffix}.csv")
 
 _LEG_BAR_CACHE: dict = {}   # path → DataFrame (or None); persists for process lifetime
-_DATA_CACHE:    dict = {}   # keyed by ("signals", ml) / "bn_ohlcv" / "vix_df"
+_DATA_CACHE:    dict = {}   # keyed by ("signals", ml) / "nf_ohlcv" / "vix_df"
 
 
 def _load_leg_bars(path):
@@ -361,7 +361,7 @@ def _load_leg_bars(path):
     return result
 
 
-def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
+def _estimate_leg_from_atm(atm_bars, offset_100pts, nf_open, dte_days):
     """
     Fallback: estimate OTM leg bars from real ATM bars using Black-Scholes
     delta scaling. Each ATM bar's open/high/low/close is multiplied by the
@@ -380,7 +380,7 @@ def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
     # (positive=OTM for CE). For PE OTM (below spot, negative offset in our
     # convention), we flip sign so _otm_params returns the correct extrinsic.
     effective_offset = abs(offset_100pts) if offset_100pts != 0 else 0
-    pf, _ = _otm_params(effective_offset, bn_open, dte_days)
+    pf, _ = _otm_params(effective_offset, nf_open, dte_days)
 
     est = atm_bars.copy()
     for col in ("open", "high", "low", "close"):
@@ -391,7 +391,7 @@ def _estimate_leg_from_atm(atm_bars, offset_100pts, bn_open, dte_days):
 
 # ── Spread simulator ──────────────────────────────────────────────────────────
 
-def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
+def simulate_spread_trade(row, nf_ohlcv, capital, strategy,
                           entry_time="09:30", exit_time="15:15",
                           lot_size=None, allow_estimate=False, vix_val=None,
                           cache_dir=None, lot_size_fn=None):
@@ -400,7 +400,7 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
     delta-scaled estimates when OTM cache missing).
 
     cache_dir: override default INTRADAY_CACHE_DIR (pass NF_CACHE_DIR for Nifty).
-    lot_size_fn: callable(date) → int; defaults to get_lot_size (BankNifty).
+    lot_size_fn: callable(date) → int; defaults to get_lot_size (Nifty50).
     Returns dict with trade results. On skip: result="SKIPPED".
     """
     if cache_dir is None:
@@ -411,17 +411,17 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
     signal   = str(row.get("signal", "")).upper()
     ls       = lot_size if lot_size is not None else lot_size_fn(date)
     dte      = get_dte(date)
-    bn_open  = bn_ohlcv.loc[date, "open"] if date in bn_ohlcv.index else None
+    nf_open  = nf_ohlcv.loc[date, "open"] if date in nf_ohlcv.index else None
 
     zero_result = {
         "date": date.date(), "signal": signal, "strategy": strategy["name"],
         "result": "SKIPPED", "entry_debit": 0.0, "exit_value": 0.0,
-        "pnl": 0.0, "lots": 0, "bn_open": bn_open,
+        "pnl": 0.0, "lots": 0, "nf_open": nf_open,
         "legs_real": 0, "legs_estimated": 0,
         "long_entry": 0.0, "short_entry": 0.0,
     }
 
-    if signal not in strategy["signal_match"] or bn_open is None:
+    if signal not in strategy["signal_match"] or nf_open is None:
         return zero_result
 
     # VIX regime filter (if configured on strategy)
@@ -471,7 +471,7 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
             # BS formula understates skew; debit comes out 10-20× too low.
             # Only used when --allow-estimate explicitly passed.
             anchor = atm_ce_bars if opt_type == "CE" else atm_pe_bars
-            bars   = _estimate_leg_from_atm(anchor, offset, bn_open, dte)
+            bars   = _estimate_leg_from_atm(anchor, offset, nf_open, dte)
             if bars is not None:
                 n_est += 1
         else:
@@ -630,7 +630,7 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
         "pnl":            round(pnl, 2),
         "lots":           lots,
         "lot_size":       ls,
-        "bn_open":        round(bn_open, 2),
+        "nf_open":        round(nf_open, 2),
         "long_entry":     round(entry_prices[0], 2),
         "short_entry":    round(entry_prices[1], 2) if len(entry_prices) > 1 else 0.0,
         "legs_real":      n_real,
@@ -663,8 +663,8 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
         all_strategies  = STRATEGIES
         inst_cache_dir  = INTRADAY_CACHE_DIR
         inst_lot_fn     = get_lot_size
-        ohlcv_key       = "bn_ohlcv"
-        ohlcv_loader    = load_bn_ohlcv
+        ohlcv_key       = "nf_ohlcv"
+        ohlcv_loader    = load_nf_ohlcv
         route_fn        = _route_strategy
 
     if ("signals", ml) not in _DATA_CACHE:
@@ -844,7 +844,7 @@ def print_spread_summary(trade_df, strategy_name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
-                    help="BNF=BankNifty (default), NF=Nifty50 weekly options")
+                    help="BNF=BankNifty legacy, NF=Nifty50 weekly options (default)")
     ap.add_argument("--strategy", default="all",
                     help="Strategy key, or: all / credit / debit / naked. "
                          "BNF keys: " + ", ".join(STRATEGIES.keys()) + ". "

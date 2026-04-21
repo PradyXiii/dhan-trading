@@ -358,7 +358,7 @@ def _check_lot_size():
         # Nifty50 lot size timeline
         expected = 65 if today >= date(2026, 1, 6) else 75
     else:
-        # Legacy BankNifty timeline
+        # Legacy naked-option timeline (pre-IC rebuild)
         if today < date(2024, 11, 20):
             expected = 15
         elif today < date(2025, 6, 26):
@@ -1046,23 +1046,23 @@ def _get_nf_ltp() -> float:
         resp = requests.post(
             "https://api.dhan.co/v2/marketfeed/ltp",
             headers=HEADERS,
-            json={"IDX_I": [25]},   # 25 = BankNifty (integer per Dhan v2 docs)
+            json={"IDX_I": [13]},   # 13 = Nifty50 (integer per Dhan v2 docs)
             timeout=10,
         )
         if resp.status_code == 200:
             d = resp.json()
-            # Response key may be integer 25 or string "25" — handle both
+            # Response key may be integer 13 or string "13" — handle both
             idx_data = (d.get("data") or {}).get("IDX_I") or d.get("IDX_I") or {}
             ltp = (
-                (idx_data.get(25) or idx_data.get("25") or {}).get("last_price") or
-                (idx_data.get(25) or idx_data.get("25") or {}).get("lastTradedPrice") or
+                (idx_data.get(13) or idx_data.get("13") or {}).get("last_price") or
+                (idx_data.get(13) or idx_data.get("13") or {}).get("lastTradedPrice") or
                 d.get("last_price") or 0
             )
-            if ltp and float(ltp) > 10000:   # sanity: BN is always > 10k
+            if ltp and float(ltp) > 10000:   # sanity: NF spot always > 10k
                 return float(ltp)
-            notify.log(f"BN LTP endpoint returned unexpected payload: {str(d)[:100]}")
+            notify.log(f"NF LTP endpoint returned unexpected payload: {str(d)[:100]}")
     except Exception as e:
-        notify.log(f"BN LTP fetch failed: {e}")
+        notify.log(f"NF LTP fetch failed: {e}")
     return None
 
 

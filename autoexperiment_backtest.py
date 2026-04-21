@@ -38,7 +38,7 @@ from contextlib import redirect_stdout
 warnings.filterwarnings("ignore")
 os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 
-# Approximate typical BankNifty ATM option premium (used for trailing jump calc)
+# Approximate typical Nifty50 ATM option premium (used for trailing jump calc)
 _TYPICAL_PREMIUM = 900.0
 
 
