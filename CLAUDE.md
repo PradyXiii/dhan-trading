@@ -242,17 +242,20 @@ No human input needed during market hours.
 
 | File | Purpose |
 |---|---|
-| `auto_trader.py` | Morning runner — orchestrates all steps, places Dhan order |
+| `auto_trader.py` | Morning runner (9:30 AM) — orchestrates all steps, picks credit spread legs, places both orders via Dhan |
+| `spread_monitor.py` | Intraday cron (every 1 min, 9:30 AM–3:29 PM) — watches spread cost, exits both legs on SL/TP |
 | `signal_engine.py` | Rule-based signal scorer (4 active indicators) → `data/signals.csv` |
 | `ml_engine.py` | Walk-forward training → `data/signals_ml.csv`; fast predict via champion.pkl + ensemble |
 | `model_evolver.py` | Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → `models/champion.pkl` + ensemble |
-| `backtest_engine.py` | Historical P&L simulation with cost model + lot-size timeline |
+| `backtest_engine.py` | Naked-option historical P&L sim with cost model + lot-size timeline (legacy validation) |
+| `backtest_spreads.py` | Multi-leg credit-spread backtest — Bear Call / Bull Put / Long Straddle / regime router |
+| `fetch_intraday_options.py` | Fetches 1-min option premiums into `data/intraday_options_cache/` for real-options backtests |
 | `backtest_live_context.py` | Research tool — tests intraday live-context override rules |
 | `data_fetcher.py` | Downloads OHLCV + global market data → `data/*.csv` |
 | `health_ping.py` | Pre-market heartbeat (8:50 AM) — token/capital/freshness checks |
-| `midday_conviction.py` | Midday thesis reassessment (11 AM) → Telegram summary |
-| `exit_positions.py` | EOD 3:15 PM — closes open NRML positions |
-| `trade_journal.py` | EOD 3:30 PM — logs actual fills vs oracle to `live_trades.csv` |
+| `midday_conviction.py` | Midday thesis reassessment (11 AM) — branches on spread vs naked schema → Telegram summary |
+| `exit_positions.py` | EOD 3:15 PM — squares off open BN F&O positions (long AND short legs for spreads) |
+| `trade_journal.py` | EOD 3:30 PM — logs actual fills; spreads → `live_spread_trades.csv`, naked → `live_trades.csv` |
 | `lot_expiry_scanner.py` | Monthly cron — detects BankNifty lot size / expiry day changes |
 | `replay_today.py` | Post-mortem tool — ensemble replay of today after evolver |
 | `renew_token.py` | Every-5-min token renewer (23h50m interval) |
@@ -272,13 +275,30 @@ No human input needed during market hours.
 ## Key Constants (auto_trader.py)
 
 ```python
-LOT_SIZE     = 30        # BankNifty lot size (Jan 2026+ — was 35 Jun–Dec 2025, was 15 pre-Nov 2024)
-SL_PCT       = 0.15      # 15% stop-loss on premium
-RISK_PCT     = 0.05      # 5% of capital at risk per trade
-MAX_LOTS     = 20        # hard cap on position size
-PREMIUM_K    = 0.004     # approx premium factor: BN_open × PREMIUM_K × sqrt(DTE)
-ITM_WALK_MAX = 2         # max 200pt ITM probe when capital is flush
-RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
+# Mode flags
+PAPER_MODE         = True        # Apr 2026 rebuild — no real Dhan orders, log to paper_trades.csv
+CREDIT_SPREAD_MODE = True        # primary strategy; False = legacy naked-option fallback path
+
+# Sizing
+LOT_SIZE         = 30            # BankNifty lot size (Jan 2026+ — was 35 Jun–Dec 2025, was 15 pre-Nov 2024)
+MAX_LOTS         = 1             # capped at 1 during paper rebuild (was 20 — restore after net-positive paper P&L)
+RISK_PCT         = 0.05          # 5% of capital at risk per trade
+
+# Credit-spread params (active path)
+SPREAD_WIDTH     = 300           # pts between short (ATM) and long (OTM hedge) legs
+CREDIT_SL_FRAC   = 0.5           # SL when spread cost grows to net_credit × 1.5
+CREDIT_TP_FRAC   = 0.65          # TP when spread cost falls to net_credit × 0.35
+
+# Filters
+ML_CONF_THRESHOLD = 0.55         # skip trade when ML ensemble confidence below this
+VIX_MIN_TRADE     = 13.0         # dynamic — analyze_confidence.py --write-threshold updates nightly
+VIX_MAX_TRADE     = 20.0         # ceiling — panic regime above this
+
+# Naked-option legacy params (only used when CREDIT_SPREAD_MODE=False)
+SL_PCT       = 0.15              # 15% stop-loss on premium
+PREMIUM_K    = 0.004             # approx premium factor: BN_open × PREMIUM_K × sqrt(DTE)
+ITM_WALK_MAX = 2                 # max 200pt ITM probe when capital is flush
+RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 ```
 
 ---
@@ -286,22 +306,46 @@ RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 ## 9:30 AM Flow (auto_trader.py main)
 
 ```
-0. _acquire_lock()  — fcntl prevents double cron execution
-1. check_credentials()  — Dhan token valid? API reachable?
-2. refresh_data_and_signal()  — subprocess: data_fetcher → signal_engine → ml_engine --predict-today
-3. get_todays_signal()  — reads signals_ml.csv (falls back to signals.csv)
+0. _acquire_lock()                      — fcntl prevents double cron execution
+1. check_credentials()                  — Dhan token valid? API reachable?
+2. _check_lot_size()                    — alert if LOT_SIZE constant doesn't match expected for today
+3. _check_exit_marker()                 — yesterday's exit_positions.py ran? (skipped in PAPER mode)
+4. refresh_data_and_signal()            — subprocess: data_fetcher → signal_engine → ml_engine --predict-today
+5. _is_trading_day()                    — NSE holiday check (NSE_HOLIDAYS_2026 set)
+6. get_todays_signal()                  — reads signals_ml.csv (falls back to signals.csv)
    ├── NONE → Telegram "No Trade Today" → exit
    └── CALL/PUT → continue
-4. get_capital()  — Dhan fundlimit API
-5. get_expiry()  — Dhan expirylist API (falls back to last-Tuesday calc)
-6. get_affordable_option()  — live option chain, walks ATM→OTM→ITM, finds best strike
-7. Telegram: trade details message
-8. place_super_order()  — Super Order (entry+SL+TP in one call)
-   ├── DH-906 market closed → AMO fallback (afterMarketOrder+amoTime=OPEN)
-   ├── Super Order fails → manual BUY + SL-M
-   │   ├── SL fails → 🚨 CRITICAL Telegram (FALLBACK_NO_SL mode)
-   │   └── BUY fails → ❌ FAILED mode
-   └── Success → Telegram: order confirmed
+7. VIX regime filter                    — skip if VIX < VIX_MIN_TRADE or > VIX_MAX_TRADE
+8. ML confidence filter                 — skip if ml_conf < ML_CONF_THRESHOLD
+9. get_capital()                        — Dhan fundlimit API
+10. get_expiry()                        — Dhan expirylist API (falls back to last-Tuesday calc)
+
+── CREDIT_SPREAD_MODE = True (active path) ──────────────────────────────────
+11a. get_spread_legs()                  — fetch ATM short + ATM±300 long from option chain
+                                          compute net_credit = short_ltp − long_ltp
+                                          size lots: min(MAX_LOTS, risk_lots, margin_lots)
+12a. compute_chain_signals()            — max-pain + GEX + straddle (informational)
+13a. Telegram: spread details message   — strategy, both legs, net credit, SL/TP triggers
+14a. _check_no_existing_position()      — abort if any open BN FNO position (netQty != 0)
+15a. place_credit_spread()              — BUY hedge leg first (margin rule), wait 2s, SELL credit leg
+     ├── PAPER mode → log to paper_trades.csv, no Dhan call
+     ├── BUY fails → ❌ FAILED, no position
+     ├── SELL fails after BUY → 🚨 PARTIAL_SPREAD critical alert (naked long exposure!)
+     └── Success → Telegram: both order IDs + SL/TP triggers
+16a. _write_today_spread_trade()        — data/today_trade.json with spread schema
+                                          (read by spread_monitor.py + exit_positions.py + trade_journal.py)
+
+── CREDIT_SPREAD_MODE = False (legacy fallback) ─────────────────────────────
+11b. get_affordable_option()            — option chain walk ATM → OTM → ITM
+12b. Telegram: trade details message
+13b. _check_no_existing_position()
+14b. place_super_order()                — Super Order (entry+SL+TP in one call)
+     ├── DH-906 market closed → AMO fallback (afterMarketOrder+amoTime=OPEN)
+     ├── Super Order fails → manual BUY + SL-M
+     │   ├── SL fails → 🚨 CRITICAL Telegram (FALLBACK_NO_SL mode)
+     │   └── BUY fails → ❌ FAILED mode
+     └── Success → Telegram: order confirmed
+15b. _write_today_trade()               — data/today_trade.json with naked schema
 ```
 
 ---
@@ -310,7 +354,7 @@ RR           = 2.5       # reward:risk (SL=15% → TP=37.5%) — grid-optimised
 
 ```
 1. Fetch all data sources (Dhan + yfinance + NSE FII + PCR)
-2. compute_features() from ml_engine — 31 features across technicals, macro, flow, options
+2. compute_features() from ml_engine — 63 features across technicals, macro, flow, options, IV skew, OI surface, ORB, breadth
 3. Feature selection via RF importance (keep > 1%)
 4. Optuna HPO: 30 trials × RF + XGB + LGB + CAT = 120 trials (~8-12 min)
 5. Champion = best on 252-day temporal holdout (accuracy + recall blend)
@@ -492,21 +536,32 @@ python3 analyze_confidence.py --write-threshold  # recompute + save dynamic VIX 
 
 ---
 
-## ML Feature Set (ml_engine.py FEATURE_COLS — 31 features)
+## ML Feature Set (ml_engine.py FEATURE_COLS — 63 features)
 
-| Group | Features | What they capture |
+Live count grows over time (autoresearch may add features). Verify any time:
+```python
+python3 -c "from ml_engine import FEATURE_COLS; print(len(FEATURE_COLS))"
+```
+
+Major groups (representative, not exhaustive — read FEATURE_COLS in ml_engine.py for complete list):
+
+| Group | Sample features | What they capture |
 |---|---|---|
 | Rule signals | `s_ema20`, `s_trend5`, `s_vix`, `s_bn_nf_div` | Discrete ±1 rule outputs |
 | Continuous signals | `ema20_pct`, `trend5`, `vix_dir`, `bn_nf_div` | Raw magnitudes behind the rules |
-| Technical | `rsi14`, `hv20`, `bn_gap` | Momentum, volatility, opening gap |
+| Technical | `rsi14`, `hv20`, `bn_gap`, `adx14` | Momentum, volatility, opening gap, trend strength |
 | Global markets | `sp500_chg`, `nikkei_chg`, `spf_gap` | Overnight global risk sentiment |
-| Macro / FII drivers | `crude_ret`, `dxy_ret`, `us10y_chg`, `usdinr_ret` | Inflation, dollar strength, yield, rupee |
-| Volatility regime | `vix_level`, `vix_pct_chg`, `vix_hv_ratio` | Fear level and realized vol ratio |
-| Momentum & drawdown | `bn_ret1`, `bn_ret20`, `bn_dist_high20` | Short/medium trend + distance from recent high |
+| Macro / FII drivers | `crude_ret`, `dxy_ret`, `us10y_chg`, `usdinr_ret` | Inflation, dollar, yield, rupee |
+| Volatility regime | `vix_level`, `vix_pct_chg`, `vix_hv_ratio`, `vix_pctile` | Fear level, realized vol ratio, percentile rank |
+| Momentum & drawdown | `bn_ret1`, `bn_ret20`, `bn_dist_high20`, `bn_dist_high52w` | Short/medium trend, drawdowns, 52-week high distance |
 | Calendar | `dow`, `dte` | Day-of-week, days to expiry |
 | Options sentiment | `pcr`, `pcr_ma5`, `pcr_chg` | Put/call ratio and its trend |
+| IV skew | `call_iv_atm`, `put_iv_atm`, `call_skew`, `put_skew`, `skew_spread`, `skew_momentum` | ATM + OTM±3 IVs, call/put skew dynamics |
+| OI surface | `pe_oi_atm`, `ce_oi_atm`, `pe_oi_p3`, `ce_oi_m3`, `oi_pcr`, `oi_max_pain_dist` | OI at ATM±3 strikes, max-pain distance |
+| Opening range | `orb_range_pct`, `orb_break_up`, `orb_break_dn` | 9:15-9:30 candle range + breakout direction |
+| Breadth / flow | `fii_net_cash_z`, `bankbees_ret`, `top5_breadth`, `bn_vs_nifty_5d` | FII activity, bank ETF, top-5 constituent breadth |
 | Opening signal | `vix_open_chg` | VIX gap at 9:15 AM (risk-on/off at entry) |
-| Institutional flow | `fii_net_cash_z` | Z-scored FII cash market activity (prev day) |
+| Interaction | various `_x_` cross-features | Conditional combinations (autoresearch-added) |
 
 The autoresearch loop (`autoloop_bn.py`) proposes additions/removals to this list and validates each on the 252-day holdout before committing.
 

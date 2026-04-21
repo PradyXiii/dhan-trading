@@ -1,6 +1,8 @@
 # BankNifty Options Auto-Trader
 
-Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, sizes the position, places a Dhan Super Order with stop-loss and target baked in, and sends a Telegram alert. Every weeknight at midnight it runs an AI-driven experiment loop that tries to improve its own model — keeping what works, reverting what doesn't. Nothing to do during market hours.
+Fully automated BankNifty options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, sizes a credit spread (Bear Call or Bull Put — sells ATM, buys ATM±300 hedge), places both legs via Dhan, and sends a Telegram alert. `spread_monitor.py` watches every 1 minute during market hours and exits both legs automatically on SL or TP hit. Every weeknight at midnight an AI-driven experiment loop tries to improve the model — keeping what works, reverting what doesn't. Nothing to do during market hours.
+
+> **Currently in PAPER MODE (April 2026).** Strategy pivoted from naked-options buying (-₹1,006/trade in real-options backtest) to credit spreads. Live orders disabled until 30+ days of net-positive paper P&L. See CLAUDE.md "PAPER MODE" section.
 
 ---
 
@@ -33,9 +35,19 @@ Every 5 minutes (all 7 days)
         1. Pull latest market data
         2. Run rule-based signal engine  →  CALL / PUT / NONE
         3. Run ML direction model        →  overrides rules when confident
-        4. Size the position (lots)      →  5% of capital at risk, min 1 lot
-        5. Place Dhan Super Order        →  entry + SL + target in one call
-        6. Send Telegram alert
+        4. Pick credit spread legs       →  CALL → Bear Call (SELL ATM CE + BUY ATM+300 CE)
+                                            PUT  → Bull Put  (SELL ATM PE + BUY ATM-300 PE)
+        5. Size the position (lots)      →  5% of capital at risk, min 1 lot, max 1 (paper rebuild)
+        6. Place both legs via Dhan      →  BUY hedge first (margin rule), then SELL credit leg
+        7. Send Telegram alert
+
+Every 1 min, 9:30 AM–3:29 PM IST
+  └── spread_monitor.py
+        — Fetches live LTPs for both spread legs via Dhan marketfeed/ltp
+        — SL fires if spread cost ≥ net_credit × 1.5 (50% loss of credit)
+        — TP fires if spread cost ≤ net_credit × 0.35 (65% of credit kept)
+        — On hit: BUY back short leg, SELL long leg, mark exit_done in today_trade.json
+        — fcntl lock prevents overlap; paper mode skips real orders
 
 11:00 AM IST, Mon–Fri
   └── midday_conviction.py
@@ -93,15 +105,17 @@ Every Sunday, 2:00 AM IST
 |---|---|
 | Instrument | BankNifty options (monthly last-Tuesday expiry, Phase 4 Sep 2025+) |
 | Trading days | All 5 weekdays — Wednesday is a normal day (not expiry day) |
+| Strategy | Credit spread (Bear Call on CALL signal, Bull Put on PUT signal) |
 | Direction | CALL or PUT — decided by ML oracle, informed by rule-based score |
-| Strike | ATM first; walks OTM if unaffordable, ITM if capital is flush |
-| Stop-loss | 15% of premium |
-| Target | 37.5% of premium (RR = 2.5×) |
+| Legs | Short ATM + Long ATM±300 (300pt spread width, locked from backtest) |
+| Stop-loss | Spread cost grows to net_credit × 1.5 (50% of credit lost) |
+| Take-profit | Spread cost falls to net_credit × 0.35 (65% of credit kept) |
 | Risk per trade | 5% of available capital |
-| Minimum trade | 1 lot (always trades if you can physically afford it) |
-| Max lots | 20 |
+| Minimum trade | 1 lot (always trades if margin permits) |
+| Max lots | 1 during PAPER rebuild (was 20 — restore after 30 days net-positive paper P&L) |
 | Lot size | 30 (Jan 2026+) |
-| Product | MARGIN (NRML) — EOD squareoff by exit_positions.py at 3:15 PM |
+| Product | MARGIN (NRML) — `spread_monitor.py` watches SL/TP every 1 min; `exit_positions.py` squares off both legs at 3:15 PM if neither fired |
+| Mode | **PAPER (April 2026)** — full signal flow runs, trade logged to `data/paper_trades.csv`, no real Dhan order placed |
 
 ---
 

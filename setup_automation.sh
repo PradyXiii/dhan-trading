@@ -109,7 +109,7 @@ EXIT_CMD="45 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/e
 EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, closes open NRML positions before market close"
 
 # Intraday spread monitor — every 1 min during market hours, Mon–Fri
-# Checks credit-spread SL/TP triggers; closes both legs if hit. No-op for naked options.
+# Checks credit-spread SL/TP triggers; closes both legs (BUY back short + SELL long) if hit.
 # Matches backtest granularity (1-min bars); fcntl lock prevents overlap.
 # Runs 9:30 AM–3:10 PM IST = UTC hours 4,5,6,7,8,9 (covers 3:29 PM IST)
 SPREAD_MON_CMD="* 4-9 * * 1-5 cd $SCRIPT_DIR && python3 spread_monitor.py >> $LOG_DIR/spread_monitor.log 2>&1"

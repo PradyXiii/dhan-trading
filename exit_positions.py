@@ -143,7 +143,10 @@ def _send_exit_telegram(today_trade: dict, sells: list):
     """
     Build and send exit Telegram notification.
     Called when position is already closed (intraday SL/TP fired) OR after EOD squareoff.
-    Handles both credit spread and naked option schemas.
+    Branches on today_trade.get("strategy"):
+      - "bear_call_credit" / "bull_put_credit" → spread schema (short/long strikes, net_credit)
+      - else → legacy naked-option schema (single strike, oracle_premium, sl_price/tp_price)
+    Naked path is fallback — not reachable while auto_trader.py keeps CREDIT_SPREAD_MODE=True.
     """
     strategy = today_trade.get("strategy", "")
     today_label = date.today().strftime("%d %b %Y")

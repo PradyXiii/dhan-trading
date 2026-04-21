@@ -24,8 +24,13 @@ The ML engine is a DIRECTION ORACLE, not a filter. It does not reduce the number
 of trades — it takes the same eligible trading days and predicts the better direction
 (CALL or PUT) using pattern recognition across all indicators.
 
+The CALL/PUT direction feeds the credit-spread router in auto_trader.py:
+  CALL signal → Bear Call Spread (SELL ATM CE + BUY ATM+300 CE) — fade upside
+  PUT  signal → Bull Put  Spread (SELL ATM PE + BUY ATM-300 PE) — fade downside
+The ML predicts directional bias; spread structure provides theta + IV crush edge.
+
 For every Mon/Tue/Thu/Fri:
-  1. Compute 21 features from OHLCV + global market data.
+  1. Compute 63 features (FEATURE_COLS) from OHLCV + global + macro + options data.
   2. Walk-forward RandomForest (train on past, predict present) outputs:
        P(CALL) = probability the day favours a bullish options trade
        P(PUT)  = probability the day favours a bearish options trade
@@ -37,7 +42,9 @@ Result: same trade count as rule-based; ML improves directional accuracy.
 
 Labels for training
 -------------------
-Binary direction label derived from SL/TP simulation:
+Binary direction label derived from naked-option SL/TP simulation (legacy from
+pre-spread era — kept because directional accuracy still matters for spread
+selection; the labels measure "which side moved more on the day"):
   CALL  if CALL trade wins and PUT does not  (definitive bullish day)
   PUT   if PUT  trade wins and CALL does not (definitive bearish day)
   tie   if both win or both lose             (argmax tiebreak from close vs open)
@@ -746,7 +753,7 @@ def compute_features(df):
     return d.dropna(subset=req)
 
 
-# 31 features fed into the RF
+# 63 features fed into the RF
 FEATURE_COLS = [
     # Rule-based score components (discrete ±1 signals) + yesterday's conviction
     "s_ema20", "s_trend5", "s_vix", "s_bn_nf_div", "rule_score_lag1",

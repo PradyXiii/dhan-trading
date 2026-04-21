@@ -230,13 +230,18 @@ DRY_RUN   = "--dry-run" in sys.argv
 # IV crush). Paper-trading new spread strategy before risking ₹51K capital.
 PAPER_MODE = True
 
-# ── Credit Spread Mode — replaces naked options with Bear Call / Bull Put ─────
+# ── Credit Spread Mode — primary strategy as of April 2026 ──────────────────
 # CALL signal → Bear Call Spread: SELL ATM CE + BUY (ATM+300) CE  (fade the call)
 # PUT  signal → Bull Put Spread:  SELL ATM PE + BUY (ATM-300) PE  (fade the put)
 # Locked config (5y backtest +₹36.2L): sl_frac=0.5, tp_frac=0.65, width=300
 # All variants (VIX filter, DTE filter, entry delay, early exit, lot cap) were
 # tested and each hurt vs baseline — default config wins.
-# Set False to fall back to naked single-leg option buying.
+#
+# Setting CREDIT_SPREAD_MODE = False reverts to the legacy naked-option BUY path
+# (kept intact below for emergency fallback / A-B comparison only). The naked
+# path was the original strategy — abandoned April 2026 after real-options
+# backtest showed -₹1,006/trade per lot due to theta + IV crush. DO NOT flip
+# without re-reading the PAPER MODE section in CLAUDE.md.
 CREDIT_SPREAD_MODE = True
 SPREAD_WIDTH       = 300    # pts between short (ATM) and long (OTM hedge) legs
 CREDIT_SL_FRAC     = 0.5    # stop when spread value grows 50% above credit received
