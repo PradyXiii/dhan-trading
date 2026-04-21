@@ -27,11 +27,12 @@ BASE_EXIT   = "15:15"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _run(strat, entry=BASE_ENTRY, exit_=BASE_EXIT, year=None):
+def _run(strat, entry=BASE_ENTRY, exit_=BASE_EXIT, year=None, max_dte=None):
     """Run backtest; return only active (SL/TP/EOD) trades."""
     _DATA_CACHE.clear()
     df = run_spread_backtest(strat, ml=True, adaptive=False,
-                             entry_time=entry, exit_time=exit_)
+                             entry_time=entry, exit_time=exit_,
+                             max_dte=max_dte)
     df = df[df["result"].isin(["SL", "TP", "EOD"])].copy()
     if year is not None:
         df = df[pd.to_datetime(df["date"]).dt.year == year]
@@ -167,18 +168,22 @@ def main():
                     help="Save enriched trade CSVs to /tmp/bc_opt.csv, /tmp/bp_opt.csv")
     ap.add_argument("--year", type=int, default=None,
                     help="Restrict analysis to a single year (e.g. --year 2024)")
+    ap.add_argument("--max-dte", type=int, default=None,
+                    help="Only trade days where DTE ≤ N (e.g. --max-dte 7 = "
+                         "last week before expiry, mimics weekly conditions)")
     args = ap.parse_args()
 
     yr_note = f" (year={args.year})" if args.year else ""
+    dte_note = f" (DTE≤{args.max_dte})" if args.max_dte else ""
     print(f"\n{'='*70}")
-    print(f"BankNifty Spread Parameter Optimizer{yr_note}")
+    print(f"BankNifty Spread Parameter Optimizer{yr_note}{dte_note}")
     print(f"{'='*70}")
 
     # ── Load base backtests ────────────────────────────────────────────────────
     print("\nRunning base backtests (no extra filters)...")
     trade_dfs = {}
     for strat in STRATEGIES:
-        df = _run(strat, year=args.year)
+        df = _run(strat, year=args.year, max_dte=args.max_dte)
         st = _stats(df)
         if st:
             label = "Bear Call" if "bear" in strat else "Bull Put"

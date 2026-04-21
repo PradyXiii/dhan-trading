@@ -484,7 +484,7 @@ def simulate_spread_trade(row, bn_ohlcv, capital, strategy,
 
 def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                         entry_time="09:30", exit_time="15:15",
-                        allow_estimate=False):
+                        allow_estimate=False, max_dte=None):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
@@ -534,8 +534,13 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             if strategy is None:
                 continue
 
+        # Apply DTE cap if requested (copy strategy to avoid mutating global)
+        strat_use = strategy
+        if max_dte is not None:
+            strat_use = {**strategy, "dte_max": max_dte}
+
         trade = simulate_spread_trade(
-            row, bn_ohlcv, capital, strategy,
+            row, bn_ohlcv, capital, strat_use,
             entry_time=entry_time, exit_time=exit_time,
             allow_estimate=allow_estimate, vix_val=vix_val,
         )
@@ -663,6 +668,9 @@ def main():
                     help="Estimate OTM legs from ATM via Black-Scholes when "
                          "cache missing. UNRELIABLE — debit understated 10-20× "
                          "due to vol skew. Default: skip days without real OTM.")
+    ap.add_argument("--max-dte", type=int, default=None,
+                    help="Skip days where DTE > N. Use 7 to replicate weekly-expiry "
+                         "conditions with monthly contracts (last week before expiry).")
     args = ap.parse_args()
 
     print(f"\nSpread backtest  |  signals={'ML' if args.ml else 'rule'}  "
@@ -672,11 +680,15 @@ def main():
         print("⚠️  --allow-estimate ON: OTM legs filled by BS formula when missing.")
         print("    These results UNDERSTATE debit ~10-20× due to vol skew. Trust real-only runs.\n")
 
+    if args.max_dte:
+        print(f"DTE filter: only trading days with DTE ≤ {args.max_dte}")
+
     if args.adaptive:
         print(f"Adaptive regime router: signal+VIX → strategy")
         df = run_spread_backtest(None, ml=args.ml, adaptive=True,
                                  entry_time=args.entry, exit_time=args.exit,
-                                 allow_estimate=args.allow_estimate)
+                                 allow_estimate=args.allow_estimate,
+                                 max_dte=args.max_dte)
         print_spread_summary(df, "Adaptive (regime router)")
         if args.save:
             df.to_csv(args.save, index=False)
@@ -696,7 +708,8 @@ def main():
     for key in strategies:
         df = run_spread_backtest(key, ml=args.ml,
                                  entry_time=args.entry, exit_time=args.exit,
-                                 allow_estimate=args.allow_estimate)
+                                 allow_estimate=args.allow_estimate,
+                                 max_dte=args.max_dte)
         print_spread_summary(df, STRATEGIES[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)
