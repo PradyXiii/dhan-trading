@@ -107,18 +107,27 @@ def _check_exit_marker():
         if resp.status_code == 200:
             data = resp.json()
             positions = data if isinstance(data, list) else data.get("data", [])
-            bn_open = [
-                p for p in positions
-                if int(p.get("netQty", 0)) != 0
-                and p.get("exchangeSegment", "") == "NSE_FNO"
-                and "BANKNIFTY" in str(
-                    p.get("tradingSymbol", p.get("securityId", ""))
-                ).upper()
-            ]
-            if bn_open:
+            if IRON_CONDOR_MODE:
+                open_chk = [
+                    p for p in positions
+                    if int(p.get("netQty", 0)) != 0
+                    and p.get("exchangeSegment", "") == "NSE_FNO"
+                    and "NIFTY" in str(p.get("tradingSymbol", "")).upper()
+                    and "BANKNIFTY" not in str(p.get("tradingSymbol", "")).upper()
+                ]
+            else:
+                open_chk = [
+                    p for p in positions
+                    if int(p.get("netQty", 0)) != 0
+                    and p.get("exchangeSegment", "") == "NSE_FNO"
+                    and "BANKNIFTY" in str(
+                        p.get("tradingSymbol", p.get("securityId", ""))
+                    ).upper()
+                ]
+            if open_chk:
                 syms = ", ".join(
                     p.get("tradingSymbol", str(p.get("securityId", "?")))
-                    for p in bn_open
+                    for p in open_chk
                 )
                 notify.send(
                     f"🚨 <b>CRITICAL: Open Position from Yesterday!</b>\n\n"
@@ -130,7 +139,7 @@ def _check_exit_marker():
                 sys.exit(1)
             else:
                 notify.log(
-                    f"Exit marker missing for {yesterday} but no open BN position "
+                    f"Exit marker missing for {yesterday} but no open NF/BN position "
                     f"found — likely no trade yesterday. Proceeding."
                 )
         else:
@@ -236,7 +245,7 @@ DRY_RUN   = "--dry-run" in sys.argv
 # Reason for activation (Apr 2026): real-options backtest + 4-trade live
 # sample showed naked-options buying is structurally losing (theta decay +
 # IV crush). Paper-trading new spread strategy before risking ₹51K capital.
-PAPER_MODE = True
+PAPER_MODE = False
 
 # ── Iron Condor Mode — Nifty50 (confirmed strategy, April 2026) ──────────────
 # NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
