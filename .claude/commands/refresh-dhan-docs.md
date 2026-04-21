@@ -49,4 +49,4 @@ For each file, flag:
 
 ### 4. Fix any inaccuracies found
 
-Edit the affected files. Commit all changes. Push to branch `claude/banknifty-options-backtest-JoxCW`.
+Edit the affected files. Commit all changes. Push to branch `main`.
