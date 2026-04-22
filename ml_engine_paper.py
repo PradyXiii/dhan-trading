@@ -770,6 +770,21 @@ def compute_features(df):
     # ── Ret5 zscore × trend (overextension matters more against the trend) ────
     d["ret5z_trend_interact"] = d["nf_ret5_zscore"] * d["s_ema20"]
 
+    # ── USDINR z-score (currency stress indicator) ───────────────────────────────
+    _usdinr = pd.to_numeric(d['usdinr_close'], errors='coerce').shift(1)
+    _usdinr_mean = _usdinr.rolling(60, min_periods=20).mean()
+    _usdinr_std  = _usdinr.rolling(60, min_periods=20).std().replace(0, np.nan)
+    d['usdinr_zscore'] = ((_usdinr - _usdinr_mean) / _usdinr_std).fillna(0.0)
+
+    # ── Crude oil 20-day momentum (inflation/macro signal) ────────────────────────
+    _crude = pd.to_numeric(d['crude_close'], errors='coerce').shift(1)
+    d['crude_mom20'] = (_crude / _crude.shift(20) - 1).fillna(0.0) * 100
+
+    # ── DXY × VIX interaction (global risk-off detector) ─────────────────────────
+    _dxy = pd.to_numeric(d['dxy_close'], errors='coerce').shift(1)
+    _dxy_ret5 = (_dxy / _dxy.shift(5) - 1).fillna(0.0) * 100
+    d['dxy_vix_interact'] = _dxy_ret5 * d['vix_pct_rank_252']
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -855,6 +870,10 @@ FEATURE_COLS = [
     # OI directional bias + IV acceleration + ADX-momentum
     "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
     "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    # Currency/macro stress features
+    "usdinr_zscore",        # USDINR 60d z-score — rupee stress → equity risk-off
+    "crude_mom20",          # crude 20-day momentum — inflation/macro signal
+    "dxy_vix_interact",     # DXY 5d return × VIX percentile — global risk-off detector
     # Mean-reversion & regime-weighted features
     "nf_ret5_zscore",       # z-scored 5-day return (60d window) — overextension signal
     "pcr_iv_combined",      # OI PCR × straddle expansion — positioning + IV alignment
