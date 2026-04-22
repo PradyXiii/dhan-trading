@@ -691,7 +691,8 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                         entry_time="09:30", exit_time="15:15",
                         allow_estimate=False, max_dte=None, instrument="BNF",
                         entry_dow=None, start_date=None, end_date=None,
-                        tp_frac_override=None):
+                        tp_frac_override=None, sl_frac_override=None,
+                        vix_max_override=None, vix_min_override=None):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
@@ -768,14 +769,22 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
         if entry_dow is not None and date.weekday() != entry_dow:
             continue
 
-        # Apply DTE cap / tp_frac override (copy strategy to avoid mutating global)
+        # Apply DTE cap / tp_frac / sl_frac / vix overrides (copy to avoid mutating global)
         strat_use = strategy
-        if max_dte is not None or tp_frac_override is not None:
+        if (max_dte is not None or tp_frac_override is not None or
+                sl_frac_override is not None or vix_max_override is not None or
+                vix_min_override is not None):
             strat_use = {**strategy}
             if max_dte is not None:
                 strat_use["dte_max"] = max_dte
             if tp_frac_override is not None:
                 strat_use["tp_frac"] = tp_frac_override
+            if sl_frac_override is not None:
+                strat_use["sl_frac"] = sl_frac_override
+            if vix_max_override is not None:
+                strat_use["vix_max"] = vix_max_override
+            if vix_min_override is not None:
+                strat_use["vix_min"] = vix_min_override
 
         trade = simulate_spread_trade(
             row, ohlcv, capital, strat_use,
@@ -833,6 +842,150 @@ def _route_nifty_strategy(signal, vix_val):
     return NIFTY_STRATEGIES["nf_iron_condor"]
 
 
+# ── Hybrid day-routing configs ────────────────────────────────────────────────
+# Each config maps weekday (0=Mon…4=Fri) → (strategy_key, per-day-overrides).
+# Capital threads across all trades in calendar order.
+# Global --vix-max/--vix-min/--sl-frac are layered on top at runtime.
+
+HYBRID_CONFIGS = {
+    "ic_straddle": {
+        "name": "IC EOD (Mon+Tue) + Short Straddle (Wed+Thu+Fri)",
+        "map":  {0: ("nf_iron_condor",    {"tp_frac": 999}),
+                 1: ("nf_iron_condor",    {"tp_frac": 999}),
+                 2: ("nf_short_straddle", {}),
+                 3: ("nf_short_straddle", {}),
+                 4: ("nf_short_straddle", {})},
+    },
+    "ic_strangle": {
+        "name": "IC EOD (Mon+Tue) + Short Strangle (Wed+Thu+Fri)",
+        "map":  {0: ("nf_iron_condor",    {"tp_frac": 999}),
+                 1: ("nf_iron_condor",    {"tp_frac": 999}),
+                 2: ("nf_short_strangle", {}),
+                 3: ("nf_short_strangle", {}),
+                 4: ("nf_short_strangle", {})},
+    },
+    "straddle_all": {
+        "name": "Short Straddle all days (no VIX filter)",
+        "map":  {d: ("nf_short_straddle", {}) for d in range(5)},
+    },
+    "straddle_vix_guard": {
+        "name": "Short Straddle all days (VIX 12–20 guard)",
+        "map":  {d: ("nf_short_straddle", {"vix_min": 12.0, "vix_max": 20.0})
+                 for d in range(5)},
+    },
+    "strangle_all": {
+        "name": "Short Strangle all days (no VIX filter)",
+        "map":  {d: ("nf_short_strangle", {}) for d in range(5)},
+    },
+    "strangle_vix_guard": {
+        "name": "Short Strangle all days (VIX 12–20 guard)",
+        "map":  {d: ("nf_short_strangle", {"vix_min": 12.0, "vix_max": 20.0})
+                 for d in range(5)},
+    },
+    "ic_eod_all": {
+        "name": "IC EOD-only all days",
+        "map":  {d: ("nf_iron_condor", {"tp_frac": 999}) for d in range(5)},
+    },
+}
+
+
+def run_hybrid_backtest(config_key, ml=False, instrument="NF",
+                        start_date=None, end_date=None, allow_estimate=False,
+                        sl_frac_override=None, vix_max_override=None,
+                        vix_min_override=None):
+    """
+    Run a day-routing hybrid: each weekday uses the strategy defined in HYBRID_CONFIGS.
+    Capital threads across all trades in calendar order.
+    Global sl_frac/vix_max/vix_min overrides are layered on top of per-day overrides.
+    """
+    cfg = HYBRID_CONFIGS[config_key]
+    day_map = cfg["map"]
+
+    if instrument == "NF":
+        all_strategies = NIFTY_STRATEGIES
+        inst_cache_dir = NF_CACHE_DIR
+        inst_lot_fn    = get_nifty_lot_size
+        ohlcv_loader   = load_nifty_ohlcv
+    else:
+        all_strategies = STRATEGIES
+        inst_cache_dir = INTRADAY_CACHE_DIR
+        inst_lot_fn    = get_lot_size
+        ohlcv_loader   = load_nf_ohlcv
+
+    if ("signals", ml) not in _DATA_CACHE:
+        _DATA_CACHE[("signals", ml)] = load_signals(ml=ml)
+    signals = _DATA_CACHE[("signals", ml)]
+
+    ohlcv_key = "nf_ohlcv"
+    if ohlcv_key not in _DATA_CACHE:
+        _DATA_CACHE[ohlcv_key] = ohlcv_loader()
+    ohlcv = _DATA_CACHE[ohlcv_key]
+
+    vix_path = f"{DATA_DIR}/india_vix.csv"
+    if "vix_df" not in _DATA_CACHE:
+        _DATA_CACHE["vix_df"] = (pd.read_csv(vix_path, parse_dates=["date"])
+                                 .set_index("date") if os.path.exists(vix_path) else None)
+    vix_df = _DATA_CACHE["vix_df"]
+
+    capital       = STARTING_CAPITAL
+    current_month = None
+    trades        = []
+
+    for _, row in signals.iterrows():
+        date = row["date"]
+        mkey = (date.year, date.month)
+        if current_month is None:
+            current_month = mkey
+        elif mkey != current_month:
+            capital      += MONTHLY_TOPUP
+            current_month = mkey
+
+        if start_date is not None and date < pd.Timestamp(start_date):
+            continue
+        if end_date is not None and date > pd.Timestamp(end_date):
+            continue
+
+        dow = date.weekday()
+        if dow not in day_map:
+            continue
+
+        strategy_key, day_overrides = day_map[dow]
+        if strategy_key not in all_strategies:
+            continue
+
+        # Merge: base strategy ← per-day overrides ← global overrides
+        strategy = {**all_strategies[strategy_key], **day_overrides}
+        if sl_frac_override is not None:
+            strategy["sl_frac"] = sl_frac_override
+        if vix_max_override is not None:
+            strategy["vix_max"] = vix_max_override
+        if vix_min_override is not None:
+            strategy["vix_min"] = vix_min_override
+
+        sig = str(row.get("signal", "")).upper()
+        if sig not in strategy["signal_match"]:
+            continue
+
+        vix_val = (float(vix_df.loc[date, "close"])
+                   if vix_df is not None and date in vix_df.index
+                   else 15.0)
+
+        trade = simulate_spread_trade(
+            row, ohlcv, capital, strategy,
+            entry_time="09:30", exit_time="15:15",
+            allow_estimate=allow_estimate, vix_val=vix_val,
+            cache_dir=inst_cache_dir, lot_size_fn=inst_lot_fn,
+        )
+        trade["ml_conf"]        = round(float(row.get("ml_conf", 0.5)), 4)
+        trade["vix_at_entry"]   = round(vix_val, 2)
+        trade["capital_before"] = round(capital, 2)
+        capital += trade["pnl"]
+        trade["capital_after"]  = round(capital, 2)
+        trades.append(trade)
+
+    return pd.DataFrame(trades)
+
+
 # ── Summary printer ───────────────────────────────────────────────────────────
 
 def print_spread_summary(trade_df, strategy_name):
@@ -858,13 +1011,15 @@ def print_spread_summary(trade_df, strategy_name):
     sl_count  = (active["result"] == "SL").sum()
     eod_count = (active["result"] == "EOD").sum()
 
-    total_pnl = active["pnl"].sum()
-    avg_win   = wins["pnl"].mean() if len(wins) else 0
-    avg_loss  = losses["pnl"].mean() if len(losses) else 0
-    wr        = len(wins) / n * 100 if n else 0
+    total_pnl    = active["pnl"].sum()
+    total_charges = active["charges"].sum() if "charges" in active.columns else 0
+    gross_pnl    = total_pnl + total_charges   # before costs
+    avg_win      = wins["pnl"].mean() if len(wins) else 0
+    avg_loss     = losses["pnl"].mean() if len(losses) else 0
+    wr           = len(wins) / n * 100 if n else 0
 
-    avg_debit = active["entry_debit"].mean()
-    avg_lots  = active["lots"].mean()
+    avg_debit  = active["entry_debit"].mean()
+    avg_lots   = active["lots"].mean()
     total_real = active["legs_real"].sum()
     total_est  = active["legs_estimated"].sum()
     real_pct   = total_real / (total_real + total_est) * 100 if (total_real + total_est) else 0
@@ -872,7 +1027,6 @@ def print_spread_summary(trade_df, strategy_name):
     cap = trade_df["capital_after"]
     dd  = ((cap - cap.cummax()) / cap.cummax() * 100).min()
 
-    # Normalize to 1-lot equivalent
     pnl_1lot = (active["pnl"] / active["lots"]).sum() if avg_lots > 0 else 0
 
     print(f"\n{'='*80}")
@@ -883,7 +1037,9 @@ def print_spread_summary(trade_df, strategy_name):
     print(f"  Win rate:         {wr:.1f}%  ({len(wins)}W / {len(losses)}L)")
     print(f"  Avg win:          ₹{avg_win:,.0f}")
     print(f"  Avg loss:         ₹{avg_loss:,.0f}")
-    print(f"  Total P&L:        {fmt_inr(total_pnl)}  (end cap: {fmt_inr(cap.iloc[-1])})")
+    print(f"  Gross P&L:        {fmt_inr(gross_pnl)}  (before costs)")
+    print(f"  Total charges:    {fmt_inr(-total_charges)}  (₹{total_charges/n:,.0f}/trade avg)")
+    print(f"  Net P&L:          {fmt_inr(total_pnl)}  (end cap: {fmt_inr(cap.iloc[-1])})")
     print(f"  1-lot P&L:        {fmt_inr(pnl_1lot)}  (sum of pnl/lots)")
     print(f"  Max drawdown:     {dd:.1f}%")
     is_credit_strat = avg_debit < 0
@@ -899,11 +1055,24 @@ def print_spread_summary(trade_df, strategy_name):
     if n_no_otm > 0:
         print(f"  Skipped (no OTM cache): {n_no_otm} days — fetch in progress?")
 
-    # Per day-of-week breakdown
     if "date" in active.columns:
-        dow_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
         active = active.copy()
-        active["_dow"] = pd.to_datetime(active["date"]).dt.weekday
+        active["_dow"]  = pd.to_datetime(active["date"]).dt.weekday
+        active["_year"] = pd.to_datetime(active["date"]).dt.year
+
+        # Yearly breakdown
+        print(f"\n  Yearly P&L breakdown:")
+        print(f"  {'Year':<6} {'Trades':>6} {'WR%':>6} {'Net P&L':>12} {'SL':>4} {'AvgCred':>8}")
+        for yr in sorted(active["_year"].unique()):
+            grp   = active[active["_year"] == yr]
+            g_wr  = (grp["pnl"] > 0).sum() / len(grp) * 100
+            g_pnl = grp["pnl"].sum()
+            g_sl  = (grp["result"] == "SL").sum()
+            g_cred = abs(grp["entry_debit"].mean()) if avg_debit < 0 else grp["entry_debit"].mean()
+            print(f"  {yr:<6} {len(grp):>6} {g_wr:>5.1f}% {fmt_inr(g_pnl):>12} {g_sl:>4} {g_cred:>8.1f}")
+
+        # Day-of-week breakdown
+        dow_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
         print(f"\n  Day-of-week breakdown:")
         print(f"  {'Day':<5} {'Trades':>6} {'WR%':>6} {'AvgPnL':>9} {'TP':>4} {'SL':>4} {'EOD':>4}")
         for d in range(5):
@@ -916,7 +1085,7 @@ def print_spread_summary(trade_df, strategy_name):
             g_tp   = (grp["result"] == "TP").sum()
             g_sl   = (grp["result"] == "SL").sum()
             g_eod  = (grp["result"] == "EOD").sum()
-            print(f"  {dow_map[d]:<5} {len(grp):>6} {g_wr:>5.1f}% {g_avg:>9,.0f} {g_tp:>4} {g_sl:>4} {g_eod:>4}")
+            print(f"  {dow_names[d]:<5} {len(grp):>6} {g_wr:>5.1f}% {g_avg:>9,.0f} {g_tp:>4} {g_sl:>4} {g_eod:>4}")
 
     print(f"{'='*80}")
 
@@ -955,6 +1124,17 @@ def main():
     ap.add_argument("--tp-frac", type=float, default=None,
                     help="Override strategy tp_frac. Set 999 to force EOD-only exit "
                          "(TP never fires). Set 0.5 to take profit at 50%% of credit.")
+    ap.add_argument("--sl-frac", type=float, default=None,
+                    help="Override strategy sl_frac. E.g. 0.25 = tighter stop at 25%% of credit.")
+    ap.add_argument("--vix-max", type=float, default=None,
+                    help="Skip days where VIX > N. Applies to all strategies. "
+                         "Use 20 for event-day guard on Short Straddle.")
+    ap.add_argument("--vix-min", type=float, default=None,
+                    help="Skip days where VIX < N. Default: no lower VIX filter.")
+    ap.add_argument("--hybrid", default=None,
+                    help="Day-routing hybrid config. Choices: " +
+                         ", ".join(HYBRID_CONFIGS.keys()) + ", all. "
+                         "Combines multiple strategies across different weekdays.")
     args = ap.parse_args()
 
     inst = args.instrument
@@ -988,6 +1168,37 @@ def main():
             print(f"tp_frac override: {args.tp_frac} → EOD-only mode (TP never fires)")
         else:
             print(f"tp_frac override: {args.tp_frac}")
+    if args.sl_frac is not None:
+        print(f"sl_frac override: {args.sl_frac}")
+    if args.vix_max is not None:
+        print(f"VIX max override: {args.vix_max} (skip days VIX > {args.vix_max})")
+    if args.vix_min is not None:
+        print(f"VIX min override: {args.vix_min} (skip days VIX < {args.vix_min})")
+
+    # ── Hybrid mode ───────────────────────────────────────────────────────────
+    if args.hybrid is not None:
+        if inst != "NF":
+            print("--hybrid only supports --instrument NF (Nifty50 weekly options).")
+            sys.exit(1)
+        hybrid_keys = (list(HYBRID_CONFIGS.keys())
+                       if args.hybrid == "all"
+                       else [args.hybrid])
+        for key in hybrid_keys:
+            if key not in HYBRID_CONFIGS:
+                print(f"Unknown --hybrid '{key}'. Valid: {', '.join(HYBRID_CONFIGS.keys())}, all")
+                sys.exit(1)
+            label = HYBRID_CONFIGS[key]["name"]
+            df = run_hybrid_backtest(key, ml=args.ml, instrument=inst,
+                                     start_date=start_dt, end_date=end_dt,
+                                     allow_estimate=args.allow_estimate,
+                                     sl_frac_override=args.sl_frac,
+                                     vix_max_override=args.vix_max,
+                                     vix_min_override=args.vix_min)
+            print_spread_summary(df, label)
+            if args.save and len(hybrid_keys) == 1:
+                df.to_csv(args.save, index=False)
+                print(f"  Trade log: {args.save}")
+        return
 
     if args.adaptive:
         print(f"Adaptive regime router: signal+VIX → strategy")
@@ -997,7 +1208,10 @@ def main():
                                  max_dte=args.max_dte, instrument=inst,
                                  entry_dow=args.entry_day,
                                  start_date=start_dt, end_date=end_dt,
-                                 tp_frac_override=args.tp_frac)
+                                 tp_frac_override=args.tp_frac,
+                                 sl_frac_override=args.sl_frac,
+                                 vix_max_override=args.vix_max,
+                                 vix_min_override=args.vix_min)
         label = f"Adaptive ({inst} regime router)"
         print_spread_summary(df, label)
         if args.save:
@@ -1033,7 +1247,10 @@ def main():
                                  max_dte=args.max_dte, instrument=inst,
                                  entry_dow=args.entry_day,
                                  start_date=start_dt, end_date=end_dt,
-                                 tp_frac_override=args.tp_frac)
+                                 tp_frac_override=args.tp_frac,
+                                 sl_frac_override=args.sl_frac,
+                                 vix_max_override=args.vix_max,
+                                 vix_min_override=args.vix_min)
         print_spread_summary(df, all_strategies[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)
