@@ -910,7 +910,7 @@ def get_capital() -> float:
 def get_expiry() -> date:
     """
     Find the nearest valid expiry using the /optionchain/expirylist endpoint.
-    NF (IRON_CONDOR_MODE): weekly Thursday. BNF: monthly last Tuesday.
+    NF (IRON_CONDOR_MODE): weekly Tuesday (from Sep 1 2025 per NSE circular). BNF: monthly last Tuesday.
     Falls back to a calculated expiry if the API is unavailable.
 
     Uses IST date explicitly — VM runs UTC, so date.today() can return yesterday
@@ -944,11 +944,11 @@ def get_expiry() -> date:
         notify.log(f"Expiry list API failed ({e}) — falling back to calc")
 
     if IRON_CONDOR_MODE:
-        # NF: weekly Thursday expiry. Find this week's or next Thursday.
+        # NF: weekly Tuesday expiry (from Sep 1 2025 per NSE circular).
         d = today
-        while d.weekday() != 3:   # 3 = Thursday
+        while d.weekday() != 1:   # 1 = Tuesday
             d += timedelta(days=1)
-        notify.log(f"Using next-Thursday expiry (NF fallback): {d}")
+        notify.log(f"Using next-Tuesday expiry (NF fallback): {d}")
         return d
     else:
         # BNF: last Tuesday of current month (monthly expiry since Nov 2024).
