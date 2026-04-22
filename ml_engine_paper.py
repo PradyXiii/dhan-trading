@@ -756,6 +756,20 @@ def compute_features(df):
     _adx_norm = (d["adx14"] - 20).clip(lower=0) / 30  # normalize: 0 at ADX=20, 1 at ADX=50
     d["adx_momentum_accel"] = _adx_norm * d["momentum_accel"]
 
+    # ── Z-scored 5-day return (mean-reversion signal) ──────────────────────────
+    _ret5_mean = d["nf_ret5"].rolling(60, min_periods=20).mean()
+    _ret5_std  = d["nf_ret5"].rolling(60, min_periods=20).std().replace(0, np.nan)
+    d["nf_ret5_zscore"] = ((d["nf_ret5"] - _ret5_mean) / _ret5_std).fillna(0.0)
+
+    # ── PCR-OI × straddle expansion (options positioning + IV signal) ──────────
+    d["pcr_iv_combined"] = d["oi_pcr_wide"] * d["straddle_expansion"]
+
+    # ── VIX regime × gap (gaps weighted by volatility percentile) ─────────────
+    d["vix_gap_regime"] = d["vix_pct_rank_252"] * d["nf_gap"]
+
+    # ── Ret5 zscore × trend (overextension matters more against the trend) ────
+    d["ret5z_trend_interact"] = d["nf_ret5_zscore"] * d["s_ema20"]
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -841,6 +855,11 @@ FEATURE_COLS = [
     # OI directional bias + IV acceleration + ADX-momentum
     "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
     "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    # Mean-reversion & regime-weighted features
+    "nf_ret5_zscore",       # z-scored 5-day return (60d window) — overextension signal
+    "pcr_iv_combined",      # OI PCR × straddle expansion — positioning + IV alignment
+    "vix_gap_regime",       # VIX percentile × gap — gaps weighted by vol regime
+    "ret5z_trend_interact", # ret5 z-score × trend — overextension against trend
     "adx_momentum_accel",   # ADX strength × momentum acceleration — trend continuation
 ]
 
