@@ -113,7 +113,7 @@ Put signal:   Same structure — IC is symmetric regardless of signal direction
 
 Computes `net_credit = short_CE_ltp + short_PE_ltp − long_CE_ltp − long_PE_ltp`.
 
-Sizes position: `lots = min(MAX_LOTS=10, risk_lots, margin_lots)` where risk_lots is based on 5% capital at risk.
+Sizes position: `lots = min(MAX_LOTS=10, floor(capital / IC_MARGIN_PER_LOT))` — 1 lot per ₹1L of capital (Dhan SPAN margin requirement).
 
 **Step 12: Chain signals (informational)**
 Computes max pain, GEX, straddle cost — sent to Telegram for context, doesn't affect trade decision.

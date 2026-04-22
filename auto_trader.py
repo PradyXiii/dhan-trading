@@ -264,6 +264,7 @@ CREDIT_SPREAD_MODE = True
 SPREAD_WIDTH       = 150    # NF: 50pt strike spacing × 3 = 150pts  (BNF was 300)
 CREDIT_SL_FRAC     = 0.5    # NF IC: SL: spread expands 50% above credit received
 CREDIT_TP_FRAC     = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
+IC_MARGIN_PER_LOT  = 100_000  # Dhan SPAN+Exposure margin for 1 NF IC lot (all 4 legs, ~₹1L)
 
 HEADERS = {
     "access-token": TOKEN,
@@ -1684,18 +1685,13 @@ def get_ic_legs(expiry: date, capital: float) -> dict | None:
                     break
 
                 max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
-                sl_risk_per_lot  = net_credit * CREDIT_SL_FRAC * LOT_SIZE
-                risk_per_lot     = min(max_loss_per_lot, sl_risk_per_lot)
 
-                lots_by_risk   = floor(capital * RISK_PCT   / risk_per_lot)    if risk_per_lot    > 0 else 0
-                lots_by_margin = floor(capital * 0.85       / max_loss_per_lot) if max_loss_per_lot > 0 else 0
-                lots = min(MAX_LOTS, lots_by_risk, lots_by_margin)
-                if lots < 1 and lots_by_margin >= 1:
-                    lots = 1
-
+                # Lot sizing: how many complete IC lots fit within available capital?
+                # IC_MARGIN_PER_LOT = Dhan SPAN+Exposure for all 4 legs, 1 lot (~₹1L)
+                lots = min(MAX_LOTS, int(capital // IC_MARGIN_PER_LOT))
                 if lots < 1:
                     notify.log(f"IC: insufficient capital for 1 lot "
-                               f"(max_loss/lot ₹{max_loss_per_lot:.0f}, capital ₹{capital:,.0f})")
+                               f"(need ₹{IC_MARGIN_PER_LOT:,.0f}, have ₹{capital:,.0f})")
                     return None
 
                 notify.log(

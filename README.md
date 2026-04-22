@@ -29,7 +29,7 @@ Every 5 minutes (all 7 days)
         3. ML direction model              →  overrides rules when confident
         4. Build Iron Condor legs          →  SELL ATM CE + BUY ATM+150 CE
                                                SELL ATM PE + BUY ATM-150 PE
-        5. Size position (lots)            →  5% of capital at risk, max 10 lots
+        5. Size position (lots)            →  floor(capital / ₹1L) lots, max 10 lots
         6. Place 4 legs via Dhan           →  BUY long wings first (margin rule),
                                                then SELL short legs
         7. Send Telegram alert
@@ -95,7 +95,7 @@ Every Sunday, 2:00 AM IST
 | Net credit | ~₹134/lot average at entry |
 | Stop-loss | Total spread cost grows to net_credit × 1.5 (50% loss of credit) |
 | Take-profit | Total spread cost falls to net_credit × 0.35 (retain 65% of credit) |
-| Risk per trade | 5% of available capital |
+| Lots | floor(capital / ₹1L Dhan margin) per IC, max 10 |
 | Max lots | 10 (IC uses margin on both sides) |
 | Lot size | 65 (Nifty50, Jan 2026+) |
 | Order type | MARKET — BUY long wings first, SELL short legs second (Dhan margin rule) |
