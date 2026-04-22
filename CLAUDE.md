@@ -259,8 +259,10 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | Backtest DOW breakdown shows Thursday as best day | Backtest data 2021–Aug 2025 used Thursday expiry; only 7 months (Sep 2025–Apr 2026) use Tuesday expiry. Thursday "expiry day" pattern dominates the stats. | DOW stats are biased toward old Thursday-expiry world. Current (live) DOW profile: Tue = DTE 0 (best), Mon = DTE 1, Wed = DTE 6 (worst same-day). Friday = DTE 4. Don't use pre-Sep-2025 backtest DOW breakdown to judge current regime. |
 | IC lot sizing gave 5 lots instead of 1 | Used `RISK_PCT=5% × capital / risk_per_lot` formula — `risk_per_lot` was theoretical P&L not actual SPAN margin | Fixed: call Dhan `/v2/margincalculator/multi` with all 4 legs × 1 lot → get actual margin → `lots = floor(capital / actual_margin)`. Param key = `scripList` not `scripts` (DH-905 error). |
 | TP frac mismatch: live 0.90 vs backtest 0.65 | `CREDIT_TP_FRAC = 0.90` in live code while backtest used 0.65 | Always verify TP/SL fracs match between `backtest_spreads.py` strategy dict and `auto_trader.py` / `spread_monitor.py` constants. Current correct value: 0.65 (retain 65% of credit). |
-| Wed/Thu/Fri IC all net-negative; only Bear Call profitable on Thu/Fri | IC: Wed -₹233, Thu -₹258, Fri -₹39 per lot after costs. Naked options all lose (6-33% WR). Bear Call: Thu +₹65/lot, Fri +₹81/lot (CALL days only). Bull Put loses all 3 days. | `IC_SKIP_DAYS = {2}` (Wed only). `BEAR_CALL_DAYS = {3,4}`. Thu/Fri CALL signal → Bear Call. Thu/Fri PUT signal → no trade. |
+| Wed/Thu/Fri IC all net-negative; only Bear Call/Bull Put profitable on Thu/Fri | IC: Wed -₹233, Thu -₹258, Fri -₹39 per lot after costs. Bear Call: Thu +₹65/lot, Fri +₹81/lot (CALL days). Bull Put: small positive P&L on Thu/Fri PUT days. | `IC_SKIP_DAYS = {2}` (Wed only). `BEAR_CALL_DAYS = {3,4}`. Thu/Fri CALL → Bear Call. Thu/Fri PUT → Bull Put. |
 | IC TP was costing ₹21L over 5 years | Standard IC (TP=0.65): ₹1.17Cr. EOD-only IC (no TP): ₹1.38Cr. Same WR, lower drawdown. TP captured 65% of credit but left last 35% of theta. | `spread_monitor.py` IC path no longer checks TP — SL only. IC always exits at EOD 3:15 PM via `exit_positions.py`. |
+| Straddle auto-upgrade not firing | `capital >= STRADDLE_MARGIN_PER_LOT` check uses constant ₹2.3L; actual Dhan margin may differ slightly | Verify with `python3 check_margins.py` — if live margin is higher than constant, update `STRADDLE_MARGIN_PER_LOT` in `auto_trader.py`. |
+| Straddle `today_trade.json` schema differs from IC | Straddle uses `ce_sid`/`pe_sid`/`ce_entry`/`pe_entry` (no `short_sid`/`long_sid`). IC uses `ce_short_sid`/`ce_long_sid`/`pe_short_sid`/`pe_long_sid`. 2-leg uses `short_sid`/`long_sid`. | Match the strategy key: `nf_short_straddle` → straddle schema; `nf_iron_condor` → IC schema; `bear_call_credit`/`bull_put_credit` → 2-leg schema. |
 
 ---
 
@@ -327,11 +329,13 @@ CREDIT_TP_FRAC   = 0.65          # TP when spread cost falls to net_credit × 0.
 ML_CONF_THRESHOLD = 0.55         # skip trade when ML ensemble confidence below this
 VIX_MIN_TRADE     = 13.0         # dynamic — analyze_confidence.py --write-threshold updates nightly
 VIX_MAX_TRADE     = 20.0         # ceiling — panic regime above this
-IC_SKIP_DAYS      = {2}          # Wed only — no profitable strategy on DTE 6
-BEAR_CALL_DAYS    = {3, 4}       # Thu (DTE=5) + Fri (DTE=4): Bear Call on CALL signal days only
-                                  # Post-Sep-2025: Bear Call +₹65/lot Thu, +₹81/lot Fri
-                                  # PUT signal on Thu/Fri → no trade (Bull Put loses both days)
+IC_SKIP_DAYS         = {2}       # Wed only — all strategies net-negative on DTE 6
+BEAR_CALL_DAYS       = {3, 4}    # Thu (DTE=5) + Fri (DTE=4)
+                                  # CALL signal → Bear Call (+₹65/lot Thu, +₹81/lot Fri)
+                                  # PUT signal → Bull Put (small positive P&L on Thu/Fri)
                                   # IC days: Mon (DTE=1, 97%WR) + Tue (DTE=0, 100%WR)
+STRADDLE_MARGIN_PER_LOT = 230_000 # auto-upgrade: if capital ≥ this → straddle all days (except Wed)
+MAX_LOTS_STRADDLE    = 5         # straddle uses ~2.5× IC margin (~₹2.3L vs ₹93K)
 
 # Naked-option legacy params (only used when CREDIT_SPREAD_MODE=False)
 SL_PCT       = 0.15              # 15% stop-loss on premium

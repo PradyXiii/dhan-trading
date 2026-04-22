@@ -274,9 +274,12 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 #   Fri DTE=4: Bear Call (CALL days) +₹81/lot net, Bull Put (PUT days) -₹134/lot → Bear Call only ✅
 #   Thu DTE=5: Bear Call (CALL days) +₹65/lot net, Bull Put (PUT days) -₹31/lot  → Bear Call only ✅
 #   Wed DTE=6: Bear Call -₹16/lot, Bull Put -₹51/lot, naked worthless → NO TRADE ❌
-# IC only Mon+Tue. Thu+Fri CALL days → Bear Call. Thu+Fri PUT days → no trade. Wed → no trade.
-IC_SKIP_DAYS       = {2}  # 2=Wed only. Thu/Fri handled by BEAR_CALL_DAYS below.
-BEAR_CALL_DAYS     = {3, 4}  # 3=Thu, 4=Fri. CALL signal → Bear Call. PUT signal → no trade.
+# IC: Mon+Tue. Thu+Fri CALL → Bear Call. Thu+Fri PUT → Bull Put. Wed → no trade (all lose).
+IC_SKIP_DAYS       = {2}        # 2=Wed only — all strategies net-negative after costs.
+BEAR_CALL_DAYS     = {3, 4}     # 3=Thu, 4=Fri. CALL signal → Bear Call. PUT signal → Bull Put.
+
+STRADDLE_MARGIN_PER_LOT = 230_000   # fallback SPAN+Exposure for 1 NF short straddle lot (~₹2.26L)
+MAX_LOTS_STRADDLE       = 5         # straddle uses ~2.5× IC margin — lower cap
 
 HEADERS = {
     "access-token": TOKEN,
@@ -2005,6 +2008,274 @@ def place_iron_condor(ic: dict, expiry: date) -> dict:
     }
 
 
+# ── Short Straddle helpers ─────────────────────────────────────────────────────
+
+def _fetch_straddle_margin_per_lot(ce_sid, ce_ltp, pe_sid, pe_ltp) -> float:
+    """Dhan /margincalculator/multi for 1 NF short straddle lot (SELL ATM CE + SELL ATM PE)."""
+    try:
+        payload = {
+            "dhanClientId":    CLIENT_ID,
+            "includePosition": True,
+            "includeOrders":   True,
+            "scripList": [
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(ce_sid), "price": float(ce_ltp), "triggerPrice": 0},
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(pe_sid), "price": float(pe_ltp), "triggerPrice": 0},
+            ],
+        }
+        resp = requests.post("https://api.dhan.co/v2/margincalculator/multi",
+                             headers=HEADERS, json=payload, timeout=10)
+        if resp.status_code == 200:
+            d = resp.json()
+            margin = float(d.get("total_margin") or d.get("totalMargin") or 0)
+            if margin > 50_000:
+                notify.log(f"Straddle margin/lot from Dhan: ₹{margin:,.0f}")
+                return margin
+        notify.log(f"Straddle margin API issue — using fallback ₹{STRADDLE_MARGIN_PER_LOT:,.0f}")
+    except Exception as e:
+        notify.log(f"Straddle margin API error: {e} — using fallback")
+    return float(STRADDLE_MARGIN_PER_LOT)
+
+
+def get_straddle_legs(expiry: date, capital: float) -> dict | None:
+    """
+    Fetch both straddle legs from the live option chain.
+    Short Straddle: SELL ATM CE + SELL ATM PE (no wing protection)
+    Returns dict with leg data + lot sizing, or None on failure.
+    """
+    expiry_candidates = [expiry, expiry + timedelta(days=7)]
+
+    for exp in expiry_candidates:
+        for attempt in range(3):
+            try:
+                data, atm_strike, spot, inner = _fetch_option_chain(exp)
+                if data is None:
+                    if attempt < 2:
+                        notify.log(f"Straddle: retry {attempt+1}/3 for {exp}...")
+                        time.sleep(3)
+                    continue
+
+                oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+                if not oc:
+                    notify.log(f"Straddle: empty OC for {exp}")
+                    break
+
+                ce_sid, ce_ltp = _get_oc_leg(oc, atm_strike, "ce")
+                pe_sid, pe_ltp = _get_oc_leg(oc, atm_strike, "pe")
+
+                if not ce_sid or not pe_sid:
+                    notify.log(
+                        f"Straddle: ATM legs missing (CE={ce_sid} PE={pe_sid}) exp={exp}")
+                    break
+
+                net_credit = ce_ltp + pe_ltp
+                if net_credit <= 0:
+                    notify.log(f"Straddle: net credit ≤ 0 ({net_credit:.1f})")
+                    break
+
+                margin_1lot = _fetch_straddle_margin_per_lot(ce_sid, ce_ltp, pe_sid, pe_ltp)
+                lots = min(MAX_LOTS_STRADDLE, int(capital // margin_1lot))
+                if lots < 1:
+                    notify.log(
+                        f"Straddle: insufficient capital "
+                        f"(need ₹{margin_1lot:,.0f}, have ₹{capital:,.0f})")
+                    return None
+
+                notify.log(
+                    f"Straddle: ATM={atm_strike} CE ₹{ce_ltp:.0f} + PE ₹{pe_ltp:.0f} "
+                    f"= net credit ₹{net_credit:.0f} → {lots} lot(s)")
+                return {
+                    "ce_sid":         ce_sid,
+                    "pe_sid":         pe_sid,
+                    "ce_ltp":         ce_ltp,
+                    "pe_ltp":         pe_ltp,
+                    "net_credit":     net_credit,
+                    "atm_strike":     atm_strike,
+                    "lots":           lots,
+                    "margin_per_lot": round(margin_1lot, 0),
+                    "spot":           spot,
+                    "expiry":         exp,
+                }
+            except Exception as e:
+                notify.log(f"Straddle legs exception (exp={exp}, attempt={attempt+1}): {e}")
+                if attempt < 2:
+                    time.sleep(3)
+        notify.log(f"Straddle: all attempts failed for {exp} — trying next expiry")
+
+    return None
+
+
+def _log_paper_straddle_trade(st: dict, qty: int):
+    import csv as _csv
+    path = f"{DATA_DIR}/paper_trades.csv"
+    cols = [
+        "date", "signal", "strategy",
+        "ce_sid", "pe_sid", "atm_strike",
+        "lots", "qty", "lot_size", "spot",
+        "ce_ltp", "pe_ltp", "net_credit", "max_profit_inr",
+    ]
+    row = {
+        "date":           date.today().isoformat(),
+        "signal":         "STRADDLE",
+        "strategy":       "nf_short_straddle",
+        "ce_sid":         str(st["ce_sid"]),
+        "pe_sid":         str(st["pe_sid"]),
+        "atm_strike":     int(st["atm_strike"]),
+        "lots":           int(st["lots"]),
+        "qty":            int(qty),
+        "lot_size":       int(LOT_SIZE),
+        "spot":           round(float(st["spot"]), 2),
+        "ce_ltp":         round(float(st["ce_ltp"]), 2),
+        "pe_ltp":         round(float(st["pe_ltp"]), 2),
+        "net_credit":     round(float(st["net_credit"]), 2),
+        "max_profit_inr": round(st["net_credit"] * qty, 2),
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        new_file = not os.path.exists(path)
+        with open(path, "a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+            if new_file:
+                w.writeheader()
+            w.writerow(row)
+        notify.log(f"PAPER straddle trade logged → {path}")
+    except Exception as e:
+        notify.log(f"Could not write paper_trades.csv (straddle): {e}")
+
+
+def _write_today_straddle_trade(st: dict, signal: str, dte: float, score: int,
+                                expiry: date, ml_conf: float, order_result: dict):
+    """Write short straddle trade intent to data/today_trade.json."""
+    payload = {
+        "date":           date.today().isoformat(),
+        "strategy":       "nf_short_straddle",
+        "signal":         signal,
+        "atm_strike":     float(st["atm_strike"]),
+        "ce_sid":         str(st["ce_sid"]),
+        "pe_sid":         str(st["pe_sid"]),
+        "ce_entry":       float(st["ce_ltp"]),
+        "pe_entry":       float(st["pe_ltp"]),
+        "net_credit":     float(st["net_credit"]),
+        "sl_frac":        CREDIT_SL_FRAC,
+        "lots":           int(st["lots"]),
+        "lot_size":       int(LOT_SIZE),
+        "dte":            float(dte),
+        "expiry":         expiry.isoformat() if expiry else None,
+        "spot_at_signal": float(st["spot"]),
+        "signal_score":   int(score),
+        "ml_conf":        round(float(ml_conf), 4),
+        "order_mode":     order_result.get("mode"),
+        "ce_sell_oid":    order_result.get("ce_sell_oid"),
+        "pe_sell_oid":    order_result.get("pe_sell_oid"),
+        "exit_done":      False,
+    }
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(f"{DATA_DIR}/today_trade.json", "w") as f:
+            json.dump(payload, f, indent=2)
+        notify.log("Straddle trade intent written → data/today_trade.json")
+    except Exception as e:
+        notify.log(f"Could not write today_trade.json (straddle): {e}")
+
+
+def place_straddle(st: dict, expiry: date) -> dict:
+    """
+    Place Short Straddle: SELL ATM CE + SELL ATM PE.
+    No wing legs — plain SELL both ATM options. Higher margin than IC.
+    """
+    qty     = st["lots"] * LOT_SIZE
+    exp_str = expiry.strftime('%Y%m%d')
+
+    if DRY_RUN:
+        return {"mode": "DRY_RUN", "net_credit": st["net_credit"]}
+
+    if PAPER_MODE:
+        _log_paper_straddle_trade(st, qty)
+        return {
+            "mode":       "PAPER",
+            "orderId":    f"paper_straddle_{date.today():%Y%m%d}",
+            "net_credit": st["net_credit"],
+        }
+
+    base = {
+        "dhanClientId":      CLIENT_ID,
+        "exchangeSegment":   "NSE_FNO",
+        "productType":       "MARGIN",
+        "orderType":         "MARKET",
+        "validity":          "DAY",
+        "quantity":          qty,
+        "price":             0,
+        "triggerPrice":      0,
+        "disclosedQuantity": 0,
+    }
+
+    # SELL ATM CE
+    try:
+        r1 = requests.post(
+            "https://api.dhan.co/v2/orders", headers=HEADERS,
+            json={**base, "correlationId": f"straddle_ce_{exp_str}",
+                  "transactionType": "SELL", "securityId": st["ce_sid"]},
+            timeout=15,
+        )
+        res1 = r1.json()
+        ce_sell_oid = res1.get("orderId") or res1.get("order_id")
+        if not ce_sell_oid:
+            notify.send(
+                f"❌ <b>Straddle CE SELL failed — no orderId</b>\n\n"
+                f"ATM CE {int(st['atm_strike'])} qty={qty}\n"
+                f"Response: {str(res1)[:200]}\nNo position opened."
+            )
+            return {"mode": "FAILED"}
+        notify.log(
+            f"Straddle SELL CE {int(st['atm_strike'])} qty={qty} orderId={ce_sell_oid}")
+    except Exception as e:
+        notify.send(f"❌ <b>Straddle CE SELL exception</b>\n\n{e}\nNo position opened.")
+        return {"mode": "FAILED"}
+
+    time.sleep(2)
+
+    # SELL ATM PE
+    try:
+        r2 = requests.post(
+            "https://api.dhan.co/v2/orders", headers=HEADERS,
+            json={**base, "correlationId": f"straddle_pe_{exp_str}",
+                  "transactionType": "SELL", "securityId": st["pe_sid"]},
+            timeout=15,
+        )
+        res2 = r2.json()
+        pe_sell_oid = res2.get("orderId") or res2.get("order_id")
+        if not pe_sell_oid:
+            notify.send(
+                f"🚨 <b>CRITICAL — Straddle PE SELL no orderId after CE SELL</b>\n\n"
+                f"CE SELL orderId: {ce_sell_oid}\n"
+                f"ATM PE {int(st['atm_strike'])} qty={qty}\n"
+                f"Response: {str(res2)[:200]}\n\n"
+                f"<b>NAKED SHORT CE {int(st['atm_strike'])} x{qty}!</b>\n"
+                f"IMMEDIATELY SELL PE {int(st['atm_strike'])} qty={qty} on Dhan app."
+            )
+            return {"mode": "PARTIAL_STRADDLE", "ce_sell_oid": ce_sell_oid}
+        notify.log(
+            f"Straddle SELL PE {int(st['atm_strike'])} qty={qty} orderId={pe_sell_oid}")
+    except Exception as e:
+        notify.send(
+            f"🚨 <b>CRITICAL — Straddle PE SELL exception</b>\n\n"
+            f"CE SELL orderId: {ce_sell_oid}\nException: {e}\n\n"
+            f"<b>NAKED SHORT CE {int(st['atm_strike'])} x{qty}!</b>\n"
+            f"IMMEDIATELY SELL PE {int(st['atm_strike'])} qty={qty} on Dhan app."
+        )
+        return {"mode": "PARTIAL_STRADDLE", "ce_sell_oid": ce_sell_oid}
+
+    return {
+        "mode":         "STRADDLE",
+        "ce_sell_oid":  ce_sell_oid,
+        "pe_sell_oid":  pe_sell_oid,
+        "net_credit":   st["net_credit"],
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2043,8 +2314,10 @@ def main():
 
     # 2. Wednesday hard skip (no profitable strategy — all options lose on DTE 6)
     from datetime import datetime as _dt
-    _today_ist    = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
+    _today_ist     = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
     _today_weekday = _today_ist.weekday()
+    today_wd       = date.today().strftime("%A")
+    today_label    = date.today().strftime("%d %b %Y")
     if IRON_CONDOR_MODE and _today_weekday in IC_SKIP_DAYS:
         notify.send(
             f"⏸  <b>No Trade — Wednesday (DTE 6)</b>\n"
@@ -2072,8 +2345,6 @@ def main():
         ml_trained = bool(sig.get("ml_trained", False))
     except (ValueError, TypeError) as e:
         die(f"Signal CSV row has unexpected format: {e}\nRow: {sig}")
-    today_wd     = date.today().strftime("%A")
-    today_label  = date.today().strftime("%d %b %Y")
 
     # No-trade path — one clean message
     if signal not in ("CALL", "PUT"):
@@ -2093,26 +2364,20 @@ def main():
 
     score_max = 4
 
-    # ── Thu/Fri routing: Bear Call on CALL days, no trade on PUT days ─────────
-    # Post-Sep-2025 backtest: Bear Call +₹65-81/lot net on Thu/Fri CALL days.
-    # Bull Put loses on both days; naked options lose on all days.
+    # ── Thu/Fri routing: Bear Call on CALL days, Bull Put on PUT days ──────────
+    # Post-Sep-2025 backtest: Bear Call +₹65-81/lot net on Thu/Fri.
+    # Bull Put: small positive P&L (~₹12-31/lot net) on Thu/Fri PUT days.
     _use_bear_call_today = False
+    _use_bull_put_today  = False
     if IRON_CONDOR_MODE and _today_weekday in BEAR_CALL_DAYS:
         _dow_name = {3: "Thursday (DTE 5)", 4: "Friday (DTE 4)"}.get(_today_weekday, "")
         if signal == "PUT":
-            notify.send(
-                f"⏸  <b>No Trade — {_dow_name}, PUT signal</b>\n"
-                f"─────────────────────\n"
-                f"{today_wd}  ·  {today_label}\n\n"
-                f"Bull Put Credit Spread loses on {_dow_name.split()[0]} in current regime.\n"
-                f"Only Bear Call profitable on {_dow_name.split()[0]} — no CALL signal today.\n"
-                f"Capital preserved."
-            )
-            notify.log(f"DOW filter: {_dow_name} PUT day — no trade")
-            return
-        # CALL signal on Thu/Fri → Bear Call Credit Spread
-        _use_bear_call_today = True
-        notify.log(f"DOW routing: {_dow_name} CALL signal → Bear Call Credit Spread")
+            _use_bull_put_today = True
+            notify.log(f"DOW routing: {_dow_name} PUT signal → Bull Put Credit Spread")
+        else:
+            # CALL signal on Thu/Fri → Bear Call Credit Spread
+            _use_bear_call_today = True
+            notify.log(f"DOW routing: {_dow_name} CALL signal → Bear Call Credit Spread")
 
     # ── News sentiment (morning_brief.py output, written at 9:15 AM) ────────
     news_vote    = 0    # +1 aligns with signal, -1 opposes
@@ -2204,6 +2469,19 @@ def main():
         notify.log("DRY RUN: capital ₹0 → using ₹1,00,000 for simulation")
         capital = 100_000.0
 
+    # Straddle auto-upgrade: if capital ≥ 1 straddle lot margin, switch all days to Short Straddle.
+    # Straddle has no wing protection → higher margin (~₹2.3L vs IC ₹93K) but more credit.
+    # Skips IC/Bear Call/Bull Put routing when active. Wed still skipped (DTE 6 = high gamma).
+    _use_straddle_today = (
+        IRON_CONDOR_MODE
+        and capital >= STRADDLE_MARGIN_PER_LOT
+    )
+    if _use_straddle_today:
+        notify.log(
+            f"Straddle auto-upgrade active: "
+            f"capital ₹{capital:,.0f} ≥ ₹{STRADDLE_MARGIN_PER_LOT:,.0f}/lot"
+        )
+
     # 4. Expiry
     expiry = get_expiry()
     dte    = max(0.25, (expiry - date.today()).days + 1)
@@ -2222,6 +2500,100 @@ def main():
         score_desc = "  ● weak ●"
     sig_line  = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
     news_row  = f"News       {news_note}\n" if news_note else ""
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SHORT STRADDLE PATH  (_use_straddle_today = True — capital auto-upgrade)
+    # SELL ATM CE + SELL ATM PE — unhedged, all Mon/Tue/Thu/Fri signal days
+    # Triggers when capital ≥ STRADDLE_MARGIN_PER_LOT (≈₹2.3L). Overrides IC/Bear Call/Bull Put.
+    # ══════════════════════════════════════════════════════════════════════════
+    if IRON_CONDOR_MODE and _use_straddle_today:
+        st = get_straddle_legs(expiry, capital)
+        if st is None:
+            die(
+                f"Could not fetch straddle legs for expiry {expiry}.\n"
+                f"ATM CE and PE must have live prices."
+            )
+
+        exp_used = st.get("expiry", expiry)
+        nf_expiry_str = exp_used.strftime('%d%b%Y').upper()
+        sl_trig = st["net_credit"] * (1 + CREDIT_SL_FRAC)
+
+        notify.send(
+            f"⚔️  <b>Nifty Short Straddle</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Score      {score:+d} / {score_max}{score_desc}\n"
+            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+            f"{news_row}"
+            f"Capital    {cap_label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
+            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
+            f"Net credit  ₹{st['net_credit']:.0f} / share   "
+            f"({st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  {st['lots']*LOT_SIZE} shares)\n"
+            f"Spot        ₹{st['spot']:,.0f}   DTE {dte:.1f}   Expiry {exp_used.strftime('%d %b')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   buyback cost > ₹{sl_trig:.0f}  ({CREDIT_SL_FRAC*100:.0f}% above credit)\n"
+            f"Exit EOD 3:15 PM  (no TP — holds for maximum theta decay)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Max profit ₹{st['lots'] * st['net_credit'] * LOT_SIZE:,.0f}  (credit kept if expires flat)\n"
+            f"<i>Unhedged — no wings. Margin ≈₹{st['margin_per_lot']:,.0f}/lot.</i>"
+        )
+
+        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+            notify.send(
+                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+                f"An open Nifty position already exists.\n"
+                f"Skipping straddle to avoid double exposure."
+            )
+            return
+
+        order_result = place_straddle(st, exp_used)
+        if not DRY_RUN:
+            _write_today_straddle_trade(
+                st, signal, dte, score, exp_used, ml_conf, order_result)
+
+        mode = order_result.get("mode")
+        if mode == "DRY_RUN":
+            notify.send(
+                f"✅  <b>Dry Run — Nifty Short Straddle</b>\n\n"
+                f"Would have placed:\n"
+                f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
+                f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
+                f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  Net credit ₹{st['net_credit']:.0f}\n\n"
+                f"<i>DRY RUN — no real order placed.</i>"
+            )
+            return
+        if mode == "PAPER":
+            notify.send(
+                f"📝  <b>[PAPER] Nifty Short Straddle — No Real Order</b>\n\n"
+                f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
+                f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
+                f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  Net credit ₹{st['net_credit']:.0f}\n"
+                f"<i>PAPER MODE. Real money safe. Tracking in data/paper_trades.csv.</i>"
+            )
+            return
+        if mode == "FAILED":
+            notify.log("Straddle placement failed — no position. See earlier error.")
+            return
+        if mode and "PARTIAL" in mode:
+            notify.log(f"Partial straddle ({mode}) — emergency alert sent. Check Dhan app immediately.")
+            return
+
+        notify.send(
+            f"✅  <b>Nifty Short Straddle Placed!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"CE SELL  <code>{order_result.get('ce_sell_oid')}</code>\n"
+            f"PE SELL  <code>{order_result.get('pe_sell_oid')}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
+            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
+            f"Net credit ₹{st['net_credit']:.0f}  ·  "
+            f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  {st['lots']*LOT_SIZE} shares\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   buyback > ₹{sl_trig:.0f}  (auto-exit: spread_monitor.py)\n"
+            f"<i>spread_monitor.py watches every 1 min — both legs exit on SL.</i>"
+        )
+        return
 
     # ══════════════════════════════════════════════════════════════════════════
     # BEAR CALL PATH  (Thu/Fri CALL days — _use_bear_call_today = True)
@@ -2266,6 +2638,71 @@ def main():
                 f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
                 f"An open Nifty position already exists.\n"
                 f"Skipping Bear Call to avoid double exposure."
+            )
+            return
+
+        order_result = place_credit_spread(
+            short_sid, long_sid, signal, lots, net_credit,
+            short_strike, long_strike, short_ltp, long_ltp, spot,
+        )
+        if not DRY_RUN:
+            _write_today_spread_trade(
+                signal=signal,
+                short_sid=short_sid, long_sid=long_sid,
+                short_strike=short_strike, long_strike=long_strike,
+                short_ltp=short_ltp, long_ltp=long_ltp,
+                net_credit=net_credit, lots=lots, dte=dte, spot=spot,
+                score=score, expiry=expiry, ml_conf=ml_conf,
+                order_mode=order_result.get("mode", "CREDIT_SPREAD"),
+                buy_oid=order_result.get("buy_oid"),
+                sell_oid=order_result.get("sell_oid"),
+            )
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BULL PUT PATH  (Thu/Fri PUT days — _use_bull_put_today = True)
+    # NF Bull Put: BUY ATM-150 PE + SELL ATM PE (2 legs, directional credit)
+    # ══════════════════════════════════════════════════════════════════════════
+    if IRON_CONDOR_MODE and _use_bull_put_today:
+        (short_sid, long_sid, short_strike, long_strike,
+         short_ltp, long_ltp, net_credit, lots, spot) = get_spread_legs(
+             signal, expiry, capital)   # signal == "PUT"
+
+        if short_sid is None:
+            die(f"Could not fetch Bull Put legs for expiry {expiry}.")
+
+        _dow_label = {3: "Thursday", 4: "Friday"}.get(_today_weekday, "")
+        nf_expiry_str = expiry.strftime('%d%b%Y').upper()
+        max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+        sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
+
+        notify.send(
+            f"🐂  <b>Nifty Bull Put — {_dow_label}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Score      {score:+d} / {score_max}{score_desc}\n"
+            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+            f"{news_row}"
+            f"Capital    {cap_label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>NIFTY {nf_expiry_str} {int(short_strike)} PE</code>  @ ₹{short_ltp:.0f}\n"
+            f"BUY   <code>NIFTY {nf_expiry_str} {int(long_strike)} PE</code>  @ ₹{long_ltp:.0f}\n"
+            f"Net credit  ₹{net_credit:.0f} / share   "
+            f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
+            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   spread cost > ₹{sl_trig:.0f}  (cost grew {CREDIT_SL_FRAC*100:.0f}% above credit)\n"
+            f"TP   spread cost < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  (65% of credit locked in)\n"
+            f"Exit EOD 3:15 PM if neither hit\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
+            f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
+        )
+
+        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+            notify.send(
+                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+                f"An open Nifty position already exists.\n"
+                f"Skipping Bull Put to avoid double exposure."
             )
             return
 

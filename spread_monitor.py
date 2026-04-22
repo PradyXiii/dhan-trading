@@ -57,8 +57,10 @@ CREDIT_TP_FRAC = 0.65    # TP for 2-leg spreads (bear_call / bull_put)
 MKT_OPEN  = dt_time(9,  30)
 MKT_CLOSE = dt_time(15, 10)   # hand off to exit_positions.py at 3:15
 
-SPREAD_STRATEGIES = {"bear_call_credit", "bull_put_credit"}
-IC_STRATEGY       = "nf_iron_condor"
+SPREAD_STRATEGIES   = {"bear_call_credit", "bull_put_credit"}
+IC_STRATEGY         = "nf_iron_condor"
+STRADDLE_STRATEGY   = "nf_short_straddle"
+STRADDLE_SL_FRAC    = 0.5    # SL: buyback cost >= net_credit * 1.5
 
 _LOCK_FILE = "/tmp/spread_monitor.lock"
 _lock_fh   = None
@@ -234,6 +236,51 @@ def _close_ic(intent: dict) -> dict:
     return result
 
 
+# ── 2-leg straddle close (NF short straddle) ─────────────────────────────────
+
+def _close_straddle(intent: dict) -> dict:
+    """BUY back both short legs: BUY ATM CE + BUY ATM PE."""
+    qty     = int(intent["lots"]) * int(intent.get("lot_size", 65))
+    day_tag = date.today().strftime("%Y%m%d")
+
+    base = {
+        "dhanClientId":      CLIENT_ID,
+        "exchangeSegment":   "NSE_FNO",
+        "productType":       "MARGIN",
+        "orderType":         "MARKET",
+        "validity":          "DAY",
+        "quantity":          qty,
+        "price":             0,
+        "triggerPrice":      0,
+        "disclosedQuantity": 0,
+    }
+
+    if DRY_RUN:
+        return {"ce_buy_back": "DRY_RUN", "pe_buy_back": "DRY_RUN"}
+
+    result = {}
+    for trans, sid, tag in [
+        ("BUY", intent["ce_sid"], "ce_buy_back"),
+        ("BUY", intent["pe_sid"], "pe_buy_back"),
+    ]:
+        try:
+            r = requests.post(
+                "https://api.dhan.co/v2/orders", headers=HEADERS,
+                json={**base, "correlationId": f"straddle_exit_{tag}_{day_tag}",
+                      "transactionType": trans, "securityId": str(sid)},
+                timeout=15,
+            )
+            result[tag] = r.json()
+            oid = result[tag].get("orderId") or result[tag].get("order_id")
+            notify.log(f"Straddle exit BUY {tag} orderId={oid}")
+        except Exception as e:
+            result[f"{tag}_err"] = str(e)
+            notify.log(f"Straddle exit BUY {tag} FAILED: {e}")
+        time.sleep(1)
+
+    return result
+
+
 # ── paper_trades.csv exit update ─────────────────────────────────────────────
 
 def _update_paper_csv_exit(intent: dict):
@@ -287,7 +334,7 @@ def main():
         return
 
     strategy = intent.get("strategy", "")
-    if strategy not in SPREAD_STRATEGIES and strategy != IC_STRATEGY:
+    if strategy not in SPREAD_STRATEGIES and strategy not in (IC_STRATEGY, STRADDLE_STRATEGY):
         return   # naked option — not our concern
 
     if intent.get("exit_done"):
@@ -378,6 +425,75 @@ def main():
             f"<b>P&amp;L  ₹{total_pnl:+,.0f}</b>\n"
             f"Reason        {verdict}\n"
             f"<i>{'No real order — paper tracked.' if paper else 'All 4 IC legs closed on Dhan.'}</i>"
+        )
+        return
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SHORT STRADDLE PATH  (nf_short_straddle)
+    # ═══════════════════════════════════════════════════════════════════════════
+    if strategy == STRADDLE_STRATEGY:
+        ce_sid = str(intent.get("ce_sid", ""))
+        pe_sid = str(intent.get("pe_sid", ""))
+
+        if not ce_sid or not pe_sid:
+            notify.log("Straddle monitor: missing ce_sid/pe_sid in today_trade.json")
+            return
+
+        ltps     = _get_ltps([ce_sid, pe_sid])
+        ce_ltp   = ltps.get(ce_sid, 0.0)
+        pe_ltp   = ltps.get(pe_sid, 0.0)
+
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            notify.log(
+                f"Straddle monitor: LTP zero — CE {ce_ltp:.0f}  PE {pe_ltp:.0f}")
+            return
+
+        net_credit   = float(intent.get("net_credit", 0))
+        current_cost = ce_ltp + pe_ltp  # buyback cost to close both shorts
+        sl_trigger   = net_credit * (1 + STRADDLE_SL_FRAC)
+
+        # Straddle: no TP — hold to EOD 3:15 PM for maximum theta decay.
+        hit_sl = current_cost >= sl_trigger
+
+        if not hit_sl:
+            return
+
+        reason = "SL"
+
+        if not paper:
+            close_result = _close_straddle(intent)
+            notify.log(f"Straddle exit ({reason}) — {close_result}")
+        else:
+            notify.log(f"Straddle exit ({reason}) — PAPER, no real order")
+
+        qty           = int(intent.get("lots", 0)) * int(intent.get("lot_size", 65))
+        pnl_per_share = net_credit - current_cost
+        total_pnl     = round(pnl_per_share * qty, 2)
+
+        intent.update({
+            "exit_done":      True,
+            "exit_reason":    reason,
+            "exit_spread":    round(current_cost, 2),
+            "exit_ce_ltp":    round(ce_ltp, 2),
+            "exit_pe_ltp":    round(pe_ltp, 2),
+            "exit_time":      datetime.now(_IST).strftime("%H:%M"),
+            "pnl_inr":        total_pnl,
+        })
+        _save_intent(intent)
+        if paper:
+            _update_paper_csv_exit(intent)
+
+        mode_tag = "[PAPER] " if paper else ""
+        notify.send(
+            f"🔴 <b>Straddle SL Hit {mode_tag}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Entry credit  ₹{net_credit:.0f} / share\n"
+            f"Buyback cost  ₹{current_cost:.0f}  "
+            f"(CE ₹{ce_ltp:.0f} + PE ₹{pe_ltp:.0f})\n"
+            f"Shares        {qty}  ({intent.get('lots', 0)} lot)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>P&amp;L  ₹{total_pnl:+,.0f}</b>\n"
+            f"<i>{'No real order — paper tracked.' if paper else 'Both straddle legs closed on Dhan.'}</i>"
         )
         return
 
