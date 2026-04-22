@@ -644,7 +644,7 @@ def simulate_spread_trade(row, nf_ohlcv, capital, strategy,
 def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                         entry_time="09:30", exit_time="15:15",
                         allow_estimate=False, max_dte=None, instrument="BNF",
-                        entry_dow=None):
+                        entry_dow=None, start_date=None, end_date=None):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
@@ -710,6 +710,12 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             strategy = route_fn(sig, vix_val)
             if strategy is None:
                 continue
+
+        # Date range filter
+        if start_date is not None and date < start_date:
+            continue
+        if end_date is not None and date > end_date:
+            continue
 
         # Day-of-week filter (0=Mon … 4=Fri)
         if entry_dow is not None and date.weekday() != entry_dow:
@@ -891,6 +897,10 @@ def main():
                          "conditions with monthly contracts (last week before expiry).")
     ap.add_argument("--entry-day", type=int, default=None,
                     help="Only trade on this weekday: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri")
+    ap.add_argument("--start-date", default=None,
+                    help="Only include trades on or after YYYY-MM-DD")
+    ap.add_argument("--end-date", default=None,
+                    help="Only include trades on or before YYYY-MM-DD")
     args = ap.parse_args()
 
     inst = args.instrument
@@ -906,11 +916,19 @@ def main():
         print("⚠️  --allow-estimate ON: OTM legs filled by BS formula when missing.")
         print("    These results UNDERSTATE debit ~10-20× due to vol skew. Trust real-only runs.\n")
 
+    from datetime import date as _date
+    start_dt = _date.fromisoformat(args.start_date) if args.start_date else None
+    end_dt   = _date.fromisoformat(args.end_date)   if args.end_date   else None
+
     if args.max_dte:
         print(f"DTE filter: only trading days with DTE ≤ {args.max_dte}")
     dow_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
     if args.entry_day is not None:
         print(f"Entry-day filter: {dow_names.get(args.entry_day, args.entry_day)} only")
+    if start_dt:
+        print(f"Start date: {start_dt}")
+    if end_dt:
+        print(f"End date:   {end_dt}")
 
     if args.adaptive:
         print(f"Adaptive regime router: signal+VIX → strategy")
@@ -918,7 +936,8 @@ def main():
                                  entry_time=args.entry, exit_time=args.exit,
                                  allow_estimate=args.allow_estimate,
                                  max_dte=args.max_dte, instrument=inst,
-                                 entry_dow=args.entry_day)
+                                 entry_dow=args.entry_day,
+                                 start_date=start_dt, end_date=end_dt)
         label = f"Adaptive ({inst} regime router)"
         print_spread_summary(df, label)
         if args.save:
@@ -952,7 +971,8 @@ def main():
                                  entry_time=args.entry, exit_time=args.exit,
                                  allow_estimate=args.allow_estimate,
                                  max_dte=args.max_dte, instrument=inst,
-                                 entry_dow=args.entry_day)
+                                 entry_dow=args.entry_day,
+                                 start_date=start_dt, end_date=end_dt)
         print_spread_summary(df, all_strategies[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)

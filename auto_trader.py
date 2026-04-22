@@ -266,6 +266,13 @@ CREDIT_SL_FRAC     = 0.5    # NF IC: SL: spread expands 50% above credit receive
 CREDIT_TP_FRAC     = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
 IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margincalculator/multi for actual margin
 
+# ── Day-of-week filter ────────────────────────────────────────────────────────
+# NF expiry = Tuesday (from Sep 1 2025, NSE circular).
+# Wednesday = DTE 6 = worst entry day: equivalent to old-Thursday-regime Friday.
+# Old Friday had 67.1% WR, ~₹105/lot net after costs ≈ breakeven.
+# Skip Wednesday until we have 6+ months of post-Sep-2025 Wednesday data.
+IC_SKIP_WEDNESDAY  = True   # Set False to re-enable; re-evaluate after Oct 2025 data
+
 HEADERS = {
     "access-token": TOKEN,
     "client-id":    CLIENT_ID,
@@ -2029,7 +2036,23 @@ def main():
         notify.log(f"Market holiday detected ({today_label}) — no BN data in CSV. Exiting.")
         return
 
-    # 2. Read signal
+    # 2. Day-of-week filter (IC only)
+    if IRON_CONDOR_MODE and IC_SKIP_WEDNESDAY:
+        from datetime import datetime as _dt
+        _today_ist = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
+        if _today_ist.weekday() == 2:   # 2 = Wednesday
+            notify.send(
+                f"⏸  <b>No Trade — Wednesday (DTE 6)</b>\n"
+                f"─────────────────────\n"
+                f"{today_wd}  ·  {today_label}\n\n"
+                f"NF Tuesday expiry → Wednesday = DTE 6 (worst entry day).\n"
+                f"Theta decay too slow relative to round-trip cost.\n"
+                f"Resuming Thursday–Tuesday."
+            )
+            notify.log("IC day-of-week filter: Wednesday DTE=6 skipped")
+            return
+
+    # 3. Read signal
     sig, sig_note = get_todays_signal()
     if sig is None:
         return
