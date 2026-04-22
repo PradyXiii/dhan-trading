@@ -316,6 +316,38 @@ NIFTY_STRATEGIES = {
         "tp_frac":       0.65,
         "max_lots":      10,
     },
+    "nf_short_straddle": {
+        # SELL ATM CE + SELL ATM PE — no wings, higher credit than IC but unhedged.
+        # SL fires if combined buyback cost grows 50% above combined credit received.
+        "name":          "NF Short Straddle",
+        "direction":     "NEUTRAL",
+        "signal_match":  ["CALL", "PUT"],
+        "spread_width":  None,
+        "legs": [
+            ("CE",  0, "SELL",  None,       "straddle"),
+            ("PE",  0, "SELL",  "straddle", None),
+        ],
+        "entry_debit":   False,
+        "sl_frac":       0.50,
+        "tp_frac":       999,   # EOD-only — hold for maximum theta decay
+        "max_lots":      5,     # half IC max — unhedged, higher margin
+    },
+    "nf_short_strangle": {
+        # SELL ATM+150 CE + SELL ATM-150 PE — OTM straddle, lower credit, wider range.
+        # Same OTM files as IC's long legs, but SELLING instead of buying.
+        "name":          "NF Short Strangle (OTM±150)",
+        "direction":     "NEUTRAL",
+        "signal_match":  ["CALL", "PUT"],
+        "spread_width":  None,
+        "legs": [
+            ("CE", +3, "SELL",  "p3",           "p3_straddle"),
+            ("PE", -3, "SELL",  "m3_straddle",  "m3"),
+        ],
+        "entry_debit":   False,
+        "sl_frac":       0.50,
+        "tp_frac":       999,   # EOD-only
+        "max_lots":      5,
+    },
 }
 
 
