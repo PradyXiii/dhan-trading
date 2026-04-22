@@ -648,7 +648,7 @@ def _build_context_snippet(use_paper: bool = False) -> str:
         else ""
     )
 
-    feat_section    = _extract_section(ml, "FEATURE_COLS", lines_after=40)
+    feat_section    = _extract_section(ml, "FEATURE_COLS = [", lines_after=75)
     compute_section = _extract_section(ml, "def compute_features", lines_after=70)
     append_zone     = _extract_append_zone(ml, lines_before=20)
     score_section   = _extract_section(sig, "def score_row", lines_after=60)
