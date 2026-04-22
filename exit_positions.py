@@ -9,12 +9,13 @@ MARGIN (NRML) positions do NOT auto-square off — this script does it.
 If SL or TP already fired, netQty will be 0 → nothing to do.
 If neither fired by 3:15 PM → squareoff at market price.
 
-Cron (3:15 PM IST = 9:45 AM UTC):
-  45 9 * * 1-5 cd ~/dhan-trading && python3 exit_positions.py >> logs/exit.log 2>&1
+Cron (3:10 PM IST = 9:40 AM UTC — retries until 3:20 PM hard deadline):
+  40 9 * * 1-5 cd ~/dhan-trading && python3 exit_positions.py >> logs/exit.log 2>&1
 """
 import json
 import os
 import sys
+import time
 import requests
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
@@ -380,37 +381,26 @@ def square_off(pos) -> dict:
         return {"error": str(e)}
 
 
-def main():
-    today_label = date.today().strftime("%d %b %Y")
-    notify.log(f"EOD exit check — {today_label} 3:15 PM IST")
+_EXIT_WINDOW_START_MINS = 3 * 60 + 10   # 3:10 PM IST in minutes since midnight
+_EXIT_WINDOW_END_MINS   = 3 * 60 + 20   # 3:20 PM IST hard deadline
+_RETRY_INTERVAL_SECS    = 60            # retry every 60 s within the window
 
-    # Holiday guard — nifty50.csv has no row for today → NSE is closed
-    if not DRY_RUN and not _is_trading_day():
-        notify.log(f"Market holiday ({today_label}) — skipping squareoff.")
-        return
 
-    positions = get_open_positions()
-    instr_label = "Nifty IC" if _load_today_trade().get("strategy") == "nf_iron_condor" else "Nifty50"
-    if not positions:
-        notify.log(f"No open {instr_label} positions — nothing to square off. SL/TP already hit.")
-        # Send exit Telegram if we placed a trade today (SL or TP fired intraday)
-        today_trade = _load_today_trade()
-        if today_trade:
-            sells = [] if DRY_RUN else _get_today_nf_sells()
-            _send_exit_telegram(today_trade, sells)
-        _write_exit_marker()
-        return
+def _ist_mins_now() -> int:
+    """Current IST time in minutes since midnight."""
+    now_ist = datetime.now(_IST)
+    return now_ist.hour * 60 + now_ist.minute
 
-    mode        = "  [DRY RUN]" if DRY_RUN else ""
-    today_trade = _load_today_trade()
-    results     = []
 
+def _squareoff_all(positions) -> list:
+    """Attempt to square off every position in the list. Returns result records."""
+    results = []
     for pos in positions:
-        symbol   = str(pos.get("tradingSymbol", pos.get("securityId", "?")))
-        net_qty  = int(pos.get("netQty", 0))
-        avg      = float(pos.get("costPrice",   pos.get("buyAvg",         0)))
-        ltp      = float(pos.get("lastTradedPrice", pos.get("ltp",        0)))
-        pnl      = float(pos.get("unrealizedProfit", pos.get("unrealizedPnl", 0)))
+        symbol  = str(pos.get("tradingSymbol", pos.get("securityId", "?")))
+        net_qty = int(pos.get("netQty", 0))
+        avg     = float(pos.get("costPrice",          pos.get("buyAvg",        0)))
+        ltp     = float(pos.get("lastTradedPrice",    pos.get("ltp",           0)))
+        pnl     = float(pos.get("unrealizedProfit",   pos.get("unrealizedPnl", 0)))
 
         result   = square_off(pos)
         order_id = (result.get("orderId") or result.get("order_id")
@@ -426,25 +416,28 @@ def main():
             "order_id": order_id,
             "error":    error,
         })
-
         if error:
             notify.log(f"Square-off FAILED {symbol}: {error}")
         else:
             notify.log(f"Square-off sent {symbol} x{net_qty} → order {order_id}")
+    return results
 
-    total_pnl = sum(r["pnl"] for r in results)
-    sign      = "+" if total_pnl >= 0 else ""
+
+def _build_eod_telegram(today_trade, results, exit_time_str):
+    mode       = "  [DRY RUN]" if DRY_RUN else ""
+    total_pnl  = sum(r["pnl"] for r in results)
+    sign       = "+" if total_pnl >= 0 else ""
 
     lines = [
         f"📤 <b>Trade Closed — EOD{mode}  ·  {date.today().strftime('%d %b %Y')}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Closed at 3:15 PM IST  ·  🔒 EOD close",
+        f"Closed at {exit_time_str} IST  ·  🔒 EOD close",
         "",
     ]
     if today_trade:
         td_strategy = today_trade.get("strategy", "")
         if td_strategy == "nf_iron_condor":
-            lines.append(f"Strategy    Nifty Iron Condor")
+            lines.append("Strategy    Nifty Iron Condor")
             lines.append(
                 f"Wings       ATM ± {int(today_trade.get('spread_width', 150))}pt  "
                 f"(ATM={int(today_trade.get('atm_strike', 0))})"
@@ -488,7 +481,86 @@ def main():
         f"Total P&amp;L: <b>{sign}₹{total_pnl:,.0f}</b>",
         "<i>Position closed to prevent overnight carry on NRML.</i>",
     ]
-    notify.send("\n".join(lines))
+    return "\n".join(lines)
+
+
+def main():
+    today_label = date.today().strftime("%d %b %Y")
+    notify.log(f"EOD exit check — {today_label}")
+
+    # Holiday guard
+    if not DRY_RUN and not _is_trading_day():
+        notify.log(f"Market holiday ({today_label}) — skipping squareoff.")
+        return
+
+    positions = get_open_positions()
+    instr_label = "Nifty IC" if _load_today_trade().get("strategy") == "nf_iron_condor" else "Nifty50"
+
+    if not positions:
+        notify.log(f"No open {instr_label} positions — SL/TP already hit.")
+        today_trade = _load_today_trade()
+        if today_trade:
+            sells = [] if DRY_RUN else _get_today_nf_sells()
+            _send_exit_telegram(today_trade, sells)
+        _write_exit_marker()
+        return
+
+    today_trade = _load_today_trade()
+    final_results = []
+    attempt = 0
+
+    # ── Retry loop: pulse every 60 s from 3:10 to 3:20 PM IST ────────────────
+    # If called before 3:10 PM (e.g. dry-run or early manual call), still executes
+    # one pass immediately then loops if within window.
+    while True:
+        attempt += 1
+        notify.log(f"Exit attempt #{attempt}: {len(positions)} position(s) remaining.")
+        results = _squareoff_all(positions)
+        final_results.extend(results)
+
+        # Wait briefly for orders to register, then re-check open positions
+        if not DRY_RUN:
+            time.sleep(15)
+        remaining = get_open_positions()
+        still_open = len(remaining)
+
+        if still_open == 0:
+            notify.log(f"All positions closed on attempt #{attempt}.")
+            break
+
+        now_mins = _ist_mins_now()
+        if now_mins >= _EXIT_WINDOW_END_MINS:
+            # Hard deadline reached — alert and break
+            sym_list = ", ".join(
+                str(p.get("tradingSymbol", p.get("securityId", "?")))
+                for p in remaining
+            )
+            notify.send(
+                f"🚨 <b>EXIT DEADLINE BREACH — {today_label}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"3:20 PM IST passed. {still_open} position(s) still open:\n"
+                f"{sym_list}\n\n"
+                f"<b>Manual action required immediately.</b>\n"
+                f"Log in to Dhan and close these positions NOW."
+            )
+            notify.log(f"EXIT DEADLINE BREACH: {still_open} positions unclosed at 3:20 PM.")
+            _write_exit_marker()
+            return
+
+        wait_secs = _RETRY_INTERVAL_SECS
+        notify.log(
+            f"{still_open} position(s) still open after attempt #{attempt}. "
+            f"Retrying in {wait_secs}s (deadline 3:20 PM IST)."
+        )
+        if not DRY_RUN:
+            time.sleep(wait_secs)
+        positions = remaining
+
+    # All closed — build and send summary
+    now_ist = datetime.now(_IST)
+    exit_time_str = now_ist.strftime("%H:%M")
+    msg = _build_eod_telegram(today_trade, final_results, exit_time_str)
+    notify.send(msg)
     _write_exit_marker()
 
 

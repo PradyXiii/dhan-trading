@@ -644,7 +644,8 @@ def simulate_spread_trade(row, nf_ohlcv, capital, strategy,
 def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                         entry_time="09:30", exit_time="15:15",
                         allow_estimate=False, max_dte=None, instrument="BNF",
-                        entry_dow=None, start_date=None, end_date=None):
+                        entry_dow=None, start_date=None, end_date=None,
+                        tp_frac_override=None):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
@@ -721,10 +722,14 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
         if entry_dow is not None and date.weekday() != entry_dow:
             continue
 
-        # Apply DTE cap if requested (copy strategy to avoid mutating global)
+        # Apply DTE cap / tp_frac override (copy strategy to avoid mutating global)
         strat_use = strategy
-        if max_dte is not None:
-            strat_use = {**strategy, "dte_max": max_dte}
+        if max_dte is not None or tp_frac_override is not None:
+            strat_use = {**strategy}
+            if max_dte is not None:
+                strat_use["dte_max"] = max_dte
+            if tp_frac_override is not None:
+                strat_use["tp_frac"] = tp_frac_override
 
         trade = simulate_spread_trade(
             row, ohlcv, capital, strat_use,
@@ -901,6 +906,9 @@ def main():
                     help="Only include trades on or after YYYY-MM-DD")
     ap.add_argument("--end-date", default=None,
                     help="Only include trades on or before YYYY-MM-DD")
+    ap.add_argument("--tp-frac", type=float, default=None,
+                    help="Override strategy tp_frac. Set 999 to force EOD-only exit "
+                         "(TP never fires). Set 0.5 to take profit at 50%% of credit.")
     args = ap.parse_args()
 
     inst = args.instrument
@@ -929,6 +937,11 @@ def main():
         print(f"Start date: {start_dt}")
     if end_dt:
         print(f"End date:   {end_dt}")
+    if args.tp_frac is not None:
+        if args.tp_frac >= 99:
+            print(f"tp_frac override: {args.tp_frac} → EOD-only mode (TP never fires)")
+        else:
+            print(f"tp_frac override: {args.tp_frac}")
 
     if args.adaptive:
         print(f"Adaptive regime router: signal+VIX → strategy")
@@ -937,7 +950,8 @@ def main():
                                  allow_estimate=args.allow_estimate,
                                  max_dte=args.max_dte, instrument=inst,
                                  entry_dow=args.entry_day,
-                                 start_date=start_dt, end_date=end_dt)
+                                 start_date=start_dt, end_date=end_dt,
+                                 tp_frac_override=args.tp_frac)
         label = f"Adaptive ({inst} regime router)"
         print_spread_summary(df, label)
         if args.save:
@@ -972,7 +986,8 @@ def main():
                                  allow_estimate=args.allow_estimate,
                                  max_dte=args.max_dte, instrument=inst,
                                  entry_dow=args.entry_day,
-                                 start_date=start_dt, end_date=end_dt)
+                                 start_date=start_dt, end_date=end_dt,
+                                 tp_frac_override=args.tp_frac)
         print_spread_summary(df, all_strategies[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)
