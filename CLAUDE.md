@@ -311,7 +311,7 @@ MAX_LOTS         = 10            # NF IC max lots (margin tied on both sides)
 RISK_PCT         = 0.05          # 5% of capital at risk per trade
 
 # Credit-spread params (active path)
-SPREAD_WIDTH     = 300           # pts between short (ATM) and long (OTM hedge) legs
+SPREAD_WIDTH     = 150           # NF: 50pt strike spacing × 3 = ATM±150 (BNF was 300)
 CREDIT_SL_FRAC   = 0.5           # SL when spread cost grows to net_credit × 1.5
 CREDIT_TP_FRAC   = 0.65          # TP when spread cost falls to net_credit × 0.35
 
@@ -347,7 +347,7 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 10. get_expiry()                        — Dhan expirylist API (falls back to last-Tuesday calc)
 
 ── CREDIT_SPREAD_MODE = True (active path) ──────────────────────────────────
-11a. get_spread_legs()                  — fetch ATM short + ATM±300 long from option chain
+11a. get_spread_legs()                  — fetch ATM short + ATM±150 long from option chain
                                           compute net_credit = short_ltp − long_ltp
                                           size lots: min(MAX_LOTS, risk_lots, margin_lots)
 12a. compute_chain_signals()            — max-pain + GEX + straddle (informational)
