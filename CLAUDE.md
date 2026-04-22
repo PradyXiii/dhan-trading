@@ -420,7 +420,7 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 
 ```
 1. Fetch all data sources (Dhan + yfinance + NSE FII + PCR)
-2. compute_features() from ml_engine — 63 features across technicals, macro, flow, options, IV skew, OI surface, ORB, breadth
+2. compute_features() from ml_engine — 60 features across technicals, macro, flow, options, IV skew, OI surface, ORB, breadth
 3. Feature selection via RF importance (keep > 1%)
 4. Optuna HPO: 30 trials × RF + XGB + LGB + CAT = 120 trials (~8-12 min)
 5. Champion = best on 252-day temporal holdout (accuracy + recall blend)
@@ -595,7 +595,7 @@ python3 analyze_confidence.py --write-threshold  # recompute + save dynamic VIX 
 
 ---
 
-## ML Feature Set (ml_engine.py FEATURE_COLS — 63 features)
+## ML Feature Set (ml_engine.py FEATURE_COLS — 60 features)
 
 Live count grows over time (autoresearch may add features). Verify any time:
 ```python

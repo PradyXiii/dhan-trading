@@ -151,8 +151,8 @@ Long leg must be on books before short leg — Dhan margin rule.
 | Structure | SELL ATM CE + SELL ATM PE (unhedged — no wings) |
 | SL | CE_ltp + PE_ltp ≥ net_credit × 1.5 |
 | Lots | floor(capital / live Dhan margin), max 5 |
-| Margin/lot | ~₹2,16,492 (Dhan SPAN+Exposure) |
-| Trigger | capital ≥ STRADDLE_MARGIN_PER_LOT (₹2,17,000) |
+| Margin/lot | ~₹2,26,492 (Dhan SPAN+Exposure) |
+| Trigger | capital ≥ STRADDLE_MARGIN_PER_LOT (₹2,30,000) |
 
 ---
 
@@ -160,7 +160,7 @@ Long leg must be on books before short leg — Dhan margin rule.
 
 Signal engine and ML model vote CALL vs PUT. IC trades both sides regardless — signal governs Thu/Fri routing (CALL → Bear Call, PUT → Bull Put) and Mon/Tue IC entry. No VIX or ML confidence filter — maximum trade frequency = maximum P&L per backtest.
 
-**63 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
+**60 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
 
 **Nightly model competition:** RF, XGBoost, LightGBM, CatBoost compete via Optuna HPO (30 trials each = 120 total). Winner saved as champion.pkl. Full 4-model ensemble saved for live voting.
 
