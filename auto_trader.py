@@ -1631,7 +1631,7 @@ def _fetch_ic_margin_per_lot(ce_short_sid, ce_short_ltp,
             "dhanClientId":   CLIENT_ID,
             "includePosition": True,
             "includeOrders":   True,
-            "scripts": [
+            "scripList": [
                 {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
                  "quantity": LOT_SIZE, "productType": "MARGIN",
                  "securityId": str(ce_short_sid), "price": float(ce_short_ltp), "triggerPrice": 0},
