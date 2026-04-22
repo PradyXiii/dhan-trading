@@ -742,6 +742,20 @@ def compute_features(df):
     _vix_z = (_vix - _vix.rolling(60, min_periods=20).mean()) / _vix.rolling(60, min_periods=20).std().replace(0, np.nan)
     d["gap_vix_interact"] = d["nf_gap"] * _vix_z.fillna(0.0)
 
+    # ── OI directional bias (ATM imbalance × skew = stronger directional signal) ──
+    d["oi_dir_bias"] = d["oi_imbalance_atm"] * d["put_call_skew"]
+
+    # ── Straddle velocity (5-day rate of change of straddle premium — IV acceleration) ──
+    _straddle_shifted = pd.to_numeric(d["straddle"], errors="coerce").shift(1)
+    _straddle_ma5 = _straddle_shifted.rolling(5, min_periods=3).mean()
+    _straddle_ma5_prev = _straddle_ma5.shift(5)
+    d["straddle_velocity"] = ((_straddle_ma5 / _straddle_ma5_prev.replace(0, np.nan)) - 1).fillna(0.0) * 100
+
+    # ── ADX × momentum acceleration interaction ─────────────────────────────────
+    # High ADX + accelerating momentum = strong continuation signal
+    _adx_norm = (d["adx14"] - 20).clip(lower=0) / 30  # normalize: 0 at ADX=20, 1 at ADX=50
+    d["adx_momentum_accel"] = _adx_norm * d["momentum_accel"]
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -824,6 +838,10 @@ FEATURE_COLS = [
     "momentum_accel",      # ret5 - ret20 — momentum speeding up or slowing down
     "rsi_trend_interact",  # RSI regime bucket × s_ema20 — mean-reversion in extremes
     "gap_vix_interact",    # nf_gap × VIX z-score — gaps matter more in high-vol
+    # OI directional bias + IV acceleration + ADX-momentum
+    "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
+    "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    "adx_momentum_accel",   # ADX strength × momentum acceleration — trend continuation
 ]
 
 
