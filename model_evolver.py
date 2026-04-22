@@ -520,10 +520,12 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
             sample_weights,
             np.full(len(inject_rows), LIVE_INJECT_WEIGHT)
         ])
-        print(f"  [feedback] Injected {len(inject_rows)} live trades (weight={LIVE_INJECT_WEIGHT}×)")
+        print(f"  [feedback] Injected {len(inject_rows)} of {n_labeled} labeled trades (weight={LIVE_INJECT_WEIGHT}×)")
     else:
         X_aug = X_all.copy()
         y_aug = y_all.copy()
+        if n_labeled >= MIN_LIVE_TRADES:
+            print(f"  [feedback] {n_labeled} labeled trades found but 0 joined df_full (trade dates not yet in feature data — will activate tomorrow)")
 
     # ── Step 2: inject midday reversal rows ───────────────────────────────────
     midday_rows = _load_midday_reversals(df_full, selected_cols)

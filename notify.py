@@ -57,7 +57,7 @@ def send(message: str, silent: bool = False) -> bool:
     as evidence of a Telegram outage.
     """
     timestamp = datetime.now(_IST).strftime("%H:%M:%S IST")
-    print(f"[{timestamp}] {_strip_html(message)[:120]}")
+    print(f"[{timestamp}] {_strip_html(message)[:400]}")
 
     if silent:
         return True   # console-only; do not send to Telegram

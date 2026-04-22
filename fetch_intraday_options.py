@@ -277,8 +277,8 @@ def main():
                     help="YYYY-MM-DD (default: today)")
     ap.add_argument("--spreads",    action="store_true",
                     help="Also fetch OTM/straddle legs for spread strategies")
-    ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
-                    help="BNF=BankNifty legacy, NF=Nifty50 weekly")
+    ap.add_argument("--instrument", choices=["BNF", "NF"], default="NF",
+                    help="NF=Nifty50 weekly (default), BNF=BankNifty legacy")
     ap.add_argument("--dry-run",    action="store_true",
                     help="List what would be fetched — no API calls")
     args = ap.parse_args()

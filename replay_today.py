@@ -31,7 +31,7 @@ MODELS_DIR = "models"
 SL_PCT  = 0.15       # must match auto_trader.py
 RR      = 2.5
 TP_PCT  = SL_PCT * RR   # 0.375
-LOT_SIZE = 30
+LOT_SIZE = 65
 
 MTYPE_NAMES = {"rf": "RandomForest", "xgb": "XGBoost", "lgb": "LightGBM"}
 

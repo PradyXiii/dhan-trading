@@ -333,13 +333,16 @@ def _journal_ic(intent: dict, today_label: str):
     }
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    file_exists = os.path.exists(IC_CSV)
-    with open(IC_CSV, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=IC_FIELDS, extrasaction="ignore")
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-    notify.log(f"IC journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
+    if DRY_RUN:
+        notify.log(f"IC journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f} [DRY RUN — CSV not written]")
+    else:
+        file_exists = os.path.exists(IC_CSV)
+        with open(IC_CSV, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=IC_FIELDS, extrasaction="ignore")
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        notify.log(f"IC journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
 
     emoji    = {"TP": "🟢", "SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
     pnl_sign = "+" if pnl_inr >= 0 else ""
@@ -434,11 +437,14 @@ def _journal_spread(intent: dict, today_label: str):
         "signal_score":      score,
         "ml_conf":           round(ml_conf, 4),
     }
-    _append_spread_row(row)
-    notify.log(
-        f"Spread journal appended: {strategy} | credit ₹{net_credit:.0f} | "
-        f"exit ₹{exit_spread:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}"
-    )
+    if DRY_RUN:
+        notify.log(f"Spread journal [DRY RUN — CSV not written]: {strategy} | credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
+    else:
+        _append_spread_row(row)
+        notify.log(
+            f"Spread journal appended: {strategy} | credit ₹{net_credit:.0f} | "
+            f"exit ₹{exit_spread:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}"
+        )
 
     # Telegram report
     strategy_name = ("Bear Call Spread" if strategy == "bear_call_credit"
@@ -521,13 +527,16 @@ def _journal_straddle(intent: dict, today_label: str):
     }
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    file_exists = os.path.exists(STRADDLE_CSV)
-    with open(STRADDLE_CSV, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=STRADDLE_FIELDS, extrasaction="ignore")
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-    notify.log(f"Straddle journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
+    if DRY_RUN:
+        notify.log(f"Straddle journal [DRY RUN — CSV not written]: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
+    else:
+        file_exists = os.path.exists(STRADDLE_CSV)
+        with open(STRADDLE_CSV, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=STRADDLE_FIELDS, extrasaction="ignore")
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        notify.log(f"Straddle journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
 
     emoji    = {"SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
     pnl_sign = "+" if pnl_inr >= 0 else ""
