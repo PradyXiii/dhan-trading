@@ -19,9 +19,9 @@ SELL ATM CE  + BUY ATM+150 CE    ← upper wing (Bear Call spread)
 SELL ATM PE  + BUY ATM-150 PE    ← lower wing (Bull Put spread)
 ```
 
-You collect cash upfront (net credit). You keep that cash if Nifty stays between the two short strikes until expiry. You lose if Nifty blows past either wing. With weekly Tuesday expiry (DTE ≤ 7), theta decay works in your favour — option premium bleeds out fast when time is short.
+You collect cash upfront (net credit). You keep that cash if Nifty stays between the two short strikes until expiry. You lose if Nifty blows past either wing. With weekly Thursday expiry (DTE ≤ 7), theta decay works in your favour — option premium bleeds out fast when time is short.
 
-**Why NF and not BN?** BankNifty lost weekly expiry in Nov 2024 (SEBI). Monthly contracts = longer DTE = gamma risk dominates theta = IC win rate collapsed to 27% in 2025. Nifty50 kept weekly Tuesday expiry. Every NF IC is naturally DTE ≤ 7.
+**Why NF and not BN?** BankNifty lost weekly expiry in Nov 2024 (SEBI). Monthly contracts = longer DTE = gamma risk dominates theta = IC win rate collapsed to 27% in 2025. Nifty50 kept weekly Thursday expiry. Every NF IC is naturally DTE ≤ 7.
 
 **Backtest result:** 84.6% win rate across 5 years (Aug 2021 – Apr 2026), 1,114 real-money-simulated trades, max drawdown −0.8%. These numbers are from real 1-min Dhan option data, not a formula.
 
@@ -101,7 +101,7 @@ Signal vote breakdown (what auto_trader reads):
 Calls Dhan `/fundlimit` API → available margin for position sizing.
 
 **Step 10: Get expiry**
-Calls Dhan `/optionchain/expirylist` for Nifty50 (scrip=13). Takes first date >= today (IST). This is always the nearest Tuesday.
+Calls Dhan `/optionchain/expirylist` for Nifty50 (scrip=13). Takes first date >= today (IST). This is always the nearest Thursday.
 
 **Step 11: Get IC legs**
 Calls Dhan option chain for this expiry. Finds ATM strike (nearest to current spot). Builds 4 legs:
