@@ -278,7 +278,7 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 IC_SKIP_DAYS       = {2}        # 2=Wed only — all strategies net-negative after costs.
 BEAR_CALL_DAYS     = {3, 4}     # 3=Thu, 4=Fri. CALL signal → Bear Call. PUT signal → Bull Put.
 
-STRADDLE_MARGIN_PER_LOT = 230_000   # fallback SPAN+Exposure for 1 NF short straddle lot (~₹2.26L)
+STRADDLE_MARGIN_PER_LOT = 217_000   # upgrade threshold: actual Dhan SPAN ≈₹2,16,492 + ₹508 buffer
 MAX_LOTS_STRADDLE       = 5         # straddle uses ~2.5× IC margin — lower cap
 
 HEADERS = {
@@ -2509,91 +2509,97 @@ def main():
     if IRON_CONDOR_MODE and _use_straddle_today:
         st = get_straddle_legs(expiry, capital)
         if st is None:
-            die(
-                f"Could not fetch straddle legs for expiry {expiry}.\n"
-                f"ATM CE and PE must have live prices."
-            )
-
-        exp_used = st.get("expiry", expiry)
-        nf_expiry_str = exp_used.strftime('%d%b%Y').upper()
-        sl_trig = st["net_credit"] * (1 + CREDIT_SL_FRAC)
-
-        notify.send(
-            f"⚔️  <b>Nifty Short Straddle</b>  ·  {today_wd}, {today_label}{sig_line}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Score      {score:+d} / {score_max}{score_desc}\n"
-            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
-            f"{news_row}"
-            f"Capital    {cap_label}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
-            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
-            f"Net credit  ₹{st['net_credit']:.0f} / share   "
-            f"({st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  {st['lots']*LOT_SIZE} shares)\n"
-            f"Spot        ₹{st['spot']:,.0f}   DTE {dte:.1f}   Expiry {exp_used.strftime('%d %b')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SL   buyback cost > ₹{sl_trig:.0f}  ({CREDIT_SL_FRAC*100:.0f}% above credit)\n"
-            f"Exit EOD 3:15 PM  (no TP — holds for maximum theta decay)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Max profit ₹{st['lots'] * st['net_credit'] * LOT_SIZE:,.0f}  (credit kept if expires flat)\n"
-            f"<i>Unhedged — no wings. Margin ≈₹{st['margin_per_lot']:,.0f}/lot.</i>"
-        )
-
-        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+            # Leg fetch failed or margin spiked above capital — fall through to IC/Bear Call/Bull Put.
+            # This can happen on high-IV days when Dhan SPAN > STRADDLE_MARGIN_PER_LOT threshold.
             notify.send(
-                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
-                f"An open Nifty position already exists.\n"
-                f"Skipping straddle to avoid double exposure."
+                f"⚠️  <b>Straddle downgrade</b>\n\n"
+                f"Capital ₹{capital:,.0f} but straddle legs unavailable or margin too high today.\n"
+                f"Falling back to IC / Bear Call / Bull Put routing."
             )
-            return
+            notify.log("Straddle legs None — falling back to IC/spread routing")
+            _use_straddle_today = False
 
-        order_result = place_straddle(st, exp_used)
-        if not DRY_RUN:
-            _write_today_straddle_trade(
-                st, signal, dte, score, exp_used, ml_conf, order_result)
+        if _use_straddle_today and st is not None:
+            exp_used = st.get("expiry", expiry)
+            nf_expiry_str = exp_used.strftime('%d%b%Y').upper()
+            sl_trig = st["net_credit"] * (1 + CREDIT_SL_FRAC)
 
-        mode = order_result.get("mode")
-        if mode == "DRY_RUN":
             notify.send(
-                f"✅  <b>Dry Run — Nifty Short Straddle</b>\n\n"
-                f"Would have placed:\n"
+                f"⚔️  <b>Nifty Short Straddle</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Score      {score:+d} / {score_max}{score_desc}\n"
+                f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+                f"{news_row}"
+                f"Capital    {cap_label}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
                 f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
-                f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  Net credit ₹{st['net_credit']:.0f}\n\n"
-                f"<i>DRY RUN — no real order placed.</i>"
+                f"Net credit  ₹{st['net_credit']:.0f} / share   "
+                f"({st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  {st['lots']*LOT_SIZE} shares)\n"
+                f"Spot        ₹{st['spot']:,.0f}   DTE {dte:.1f}   Expiry {exp_used.strftime('%d %b')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"SL   buyback cost > ₹{sl_trig:.0f}  ({CREDIT_SL_FRAC*100:.0f}% above credit)\n"
+                f"Exit EOD 3:15 PM  (no TP — holds for maximum theta decay)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Max profit ₹{st['lots'] * st['net_credit'] * LOT_SIZE:,.0f}  (credit kept if expires flat)\n"
+                f"<i>Unhedged — no wings. Margin ≈₹{st['margin_per_lot']:,.0f}/lot.</i>"
             )
-            return
-        if mode == "PAPER":
+
+            if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+                notify.send(
+                    f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+                    f"An open Nifty position already exists.\n"
+                    f"Skipping straddle to avoid double exposure."
+                )
+                return
+
+            order_result = place_straddle(st, exp_used)
+            if not DRY_RUN:
+                _write_today_straddle_trade(
+                    st, signal, dte, score, exp_used, ml_conf, order_result)
+
+            mode = order_result.get("mode")
+            if mode == "DRY_RUN":
+                notify.send(
+                    f"✅  <b>Dry Run — Nifty Short Straddle</b>\n\n"
+                    f"Would have placed:\n"
+                    f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
+                    f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
+                    f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  Net credit ₹{st['net_credit']:.0f}\n\n"
+                    f"<i>DRY RUN — no real order placed.</i>"
+                )
+                return
+            if mode == "PAPER":
+                notify.send(
+                    f"📝  <b>[PAPER] Nifty Short Straddle — No Real Order</b>\n\n"
+                    f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
+                    f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
+                    f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  Net credit ₹{st['net_credit']:.0f}\n"
+                    f"<i>PAPER MODE. Real money safe. Tracking in data/paper_trades.csv.</i>"
+                )
+                return
+            if mode == "FAILED":
+                notify.log("Straddle placement failed — no position. See earlier error.")
+                return
+            if mode and "PARTIAL" in mode:
+                notify.log(f"Partial straddle ({mode}) — emergency alert sent. Check Dhan app immediately.")
+                return
+
             notify.send(
-                f"📝  <b>[PAPER] Nifty Short Straddle — No Real Order</b>\n\n"
+                f"✅  <b>Nifty Short Straddle Placed!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"CE SELL  <code>{order_result.get('ce_sell_oid')}</code>\n"
+                f"PE SELL  <code>{order_result.get('pe_sell_oid')}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
                 f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
-                f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  Net credit ₹{st['net_credit']:.0f}\n"
-                f"<i>PAPER MODE. Real money safe. Tracking in data/paper_trades.csv.</i>"
+                f"Net credit ₹{st['net_credit']:.0f}  ·  "
+                f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  {st['lots']*LOT_SIZE} shares\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"SL   buyback > ₹{sl_trig:.0f}  (auto-exit: spread_monitor.py)\n"
+                f"<i>spread_monitor.py watches every 1 min — both legs exit on SL.</i>"
             )
             return
-        if mode == "FAILED":
-            notify.log("Straddle placement failed — no position. See earlier error.")
-            return
-        if mode and "PARTIAL" in mode:
-            notify.log(f"Partial straddle ({mode}) — emergency alert sent. Check Dhan app immediately.")
-            return
-
-        notify.send(
-            f"✅  <b>Nifty Short Straddle Placed!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"CE SELL  <code>{order_result.get('ce_sell_oid')}</code>\n"
-            f"PE SELL  <code>{order_result.get('pe_sell_oid')}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} CE</code>  @ ₹{st['ce_ltp']:.0f}\n"
-            f"SELL  <code>NIFTY {nf_expiry_str} {int(st['atm_strike'])} PE</code>  @ ₹{st['pe_ltp']:.0f}\n"
-            f"Net credit ₹{st['net_credit']:.0f}  ·  "
-            f"{st['lots']} lot{'s' if st['lots'] > 1 else ''}  ·  {st['lots']*LOT_SIZE} shares\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SL   buyback > ₹{sl_trig:.0f}  (auto-exit: spread_monitor.py)\n"
-            f"<i>spread_monitor.py watches every 1 min — both legs exit on SL.</i>"
-        )
-        return
 
     # ══════════════════════════════════════════════════════════════════════════
     # BEAR CALL PATH  (Thu/Fri CALL days — _use_bear_call_today = True)
