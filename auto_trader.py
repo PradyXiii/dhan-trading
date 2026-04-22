@@ -1620,6 +1620,48 @@ def place_super_order(security_id: str, signal: str, lots: int,
 
 # ── Iron Condor helpers ───────────────────────────────────────────────────────
 
+def _fetch_ic_margin_per_lot(ce_short_sid, ce_short_ltp,
+                              ce_long_sid,  ce_long_ltp,
+                              pe_short_sid, pe_short_ltp,
+                              pe_long_sid,  pe_long_ltp) -> float:
+    """Call Dhan /margincalculator/multi for 1 NF IC lot (all 4 legs).
+    Returns actual SPAN+Exposure margin. Falls back to IC_MARGIN_PER_LOT on error."""
+    try:
+        payload = {
+            "dhanClientId":   CLIENT_ID,
+            "includePosition": True,
+            "includeOrders":   True,
+            "scripts": [
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(ce_short_sid), "price": float(ce_short_ltp), "triggerPrice": 0},
+                {"exchangeSegment": "NSE_FNO", "transactionType": "BUY",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(ce_long_sid),  "price": float(ce_long_ltp),  "triggerPrice": 0},
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(pe_short_sid), "price": float(pe_short_ltp), "triggerPrice": 0},
+                {"exchangeSegment": "NSE_FNO", "transactionType": "BUY",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(pe_long_sid),  "price": float(pe_long_ltp),  "triggerPrice": 0},
+            ],
+        }
+        resp = requests.post("https://api.dhan.co/v2/margincalculator/multi",
+                             headers=HEADERS, json=payload, timeout=10)
+        if resp.status_code == 200:
+            d = resp.json()
+            margin = float(d.get("total_margin") or d.get("totalMargin") or 0)
+            if margin > 10_000:   # sanity: at least ₹10k for a live IC
+                notify.log(f"IC margin/lot from Dhan: ₹{margin:,.0f}")
+                return margin
+            notify.log(f"Margin API returned suspicious value {margin} — using fallback")
+        else:
+            notify.log(f"Margin API {resp.status_code}: {resp.text[:120]} — using fallback")
+    except Exception as e:
+        notify.log(f"Margin API error: {e} — using fallback ₹{IC_MARGIN_PER_LOT:,.0f}")
+    return float(IC_MARGIN_PER_LOT)
+
+
 def _get_oc_leg(oc: dict, strike: float, opt_type_lc: str):
     """Return (security_id, ltp) for a strike from the OC dict, or (None, 0.0)."""
     for k in [f"{float(strike):.6f}", str(int(strike)), f"{float(strike):.1f}"]:
@@ -1686,12 +1728,16 @@ def get_ic_legs(expiry: date, capital: float) -> dict | None:
 
                 max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
 
-                # Lot sizing: how many complete IC lots fit within available capital?
-                # IC_MARGIN_PER_LOT = Dhan SPAN+Exposure for all 4 legs, 1 lot (~₹1L)
-                lots = min(MAX_LOTS, int(capital // IC_MARGIN_PER_LOT))
+                # Lot sizing: query Dhan margin calculator for actual SPAN+Exposure
+                # required for 1 IC lot (all 4 legs). Falls back to IC_MARGIN_PER_LOT.
+                margin_1lot = _fetch_ic_margin_per_lot(
+                    ce_short_sid, ce_short_ltp, ce_long_sid, ce_long_ltp,
+                    pe_short_sid, pe_short_ltp, pe_long_sid, pe_long_ltp,
+                )
+                lots = min(MAX_LOTS, int(capital // margin_1lot))
                 if lots < 1:
                     notify.log(f"IC: insufficient capital for 1 lot "
-                               f"(need ₹{IC_MARGIN_PER_LOT:,.0f}, have ₹{capital:,.0f})")
+                               f"(need ₹{margin_1lot:,.0f}, have ₹{capital:,.0f})")
                     return None
 
                 notify.log(
@@ -1714,6 +1760,7 @@ def get_ic_legs(expiry: date, capital: float) -> dict | None:
                     "pe_credit":       pe_credit,
                     "net_credit":      net_credit,
                     "lots":            lots,
+                    "margin_per_lot":  round(margin_1lot, 0),
                     "spot":            spot,
                     "atm_strike":      atm_strike,
                     "expiry":          exp,
