@@ -643,7 +643,8 @@ def simulate_spread_trade(row, nf_ohlcv, capital, strategy,
 
 def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                         entry_time="09:30", exit_time="15:15",
-                        allow_estimate=False, max_dte=None, instrument="BNF"):
+                        allow_estimate=False, max_dte=None, instrument="BNF",
+                        entry_dow=None):
     """
     Run spread backtest for ONE strategy (or adaptive routing).
 
@@ -709,6 +710,10 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
             strategy = route_fn(sig, vix_val)
             if strategy is None:
                 continue
+
+        # Day-of-week filter (0=Mon … 4=Fri)
+        if entry_dow is not None and date.weekday() != entry_dow:
+            continue
 
         # Apply DTE cap if requested (copy strategy to avoid mutating global)
         strat_use = strategy
@@ -836,6 +841,26 @@ def print_spread_summary(trade_df, strategy_name):
         print(f"     python3 fetch_intraday_options.py --spreads --start 2021-08-01")
     if n_no_otm > 0:
         print(f"  Skipped (no OTM cache): {n_no_otm} days — fetch in progress?")
+
+    # Per day-of-week breakdown
+    if "date" in active.columns:
+        dow_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+        active = active.copy()
+        active["_dow"] = pd.to_datetime(active["date"]).dt.weekday
+        print(f"\n  Day-of-week breakdown:")
+        print(f"  {'Day':<5} {'Trades':>6} {'WR%':>6} {'AvgPnL':>9} {'TP':>4} {'SL':>4} {'EOD':>4}")
+        for d in range(5):
+            grp = active[active["_dow"] == d]
+            if grp.empty:
+                continue
+            g_wins = (grp["pnl"] > 0).sum()
+            g_wr   = g_wins / len(grp) * 100
+            g_avg  = grp["pnl"].mean()
+            g_tp   = (grp["result"] == "TP").sum()
+            g_sl   = (grp["result"] == "SL").sum()
+            g_eod  = (grp["result"] == "EOD").sum()
+            print(f"  {dow_map[d]:<5} {len(grp):>6} {g_wr:>5.1f}% {g_avg:>9,.0f} {g_tp:>4} {g_sl:>4} {g_eod:>4}")
+
     print(f"{'='*80}")
 
 
@@ -864,6 +889,8 @@ def main():
     ap.add_argument("--max-dte", type=int, default=None,
                     help="Skip days where DTE > N. Use 7 to replicate weekly-expiry "
                          "conditions with monthly contracts (last week before expiry).")
+    ap.add_argument("--entry-day", type=int, default=None,
+                    help="Only trade on this weekday: 0=Mon 1=Tue 2=Wed 3=Thu 4=Fri")
     args = ap.parse_args()
 
     inst = args.instrument
@@ -881,13 +908,17 @@ def main():
 
     if args.max_dte:
         print(f"DTE filter: only trading days with DTE ≤ {args.max_dte}")
+    dow_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri"}
+    if args.entry_day is not None:
+        print(f"Entry-day filter: {dow_names.get(args.entry_day, args.entry_day)} only")
 
     if args.adaptive:
         print(f"Adaptive regime router: signal+VIX → strategy")
         df = run_spread_backtest(None, ml=args.ml, adaptive=True,
                                  entry_time=args.entry, exit_time=args.exit,
                                  allow_estimate=args.allow_estimate,
-                                 max_dte=args.max_dte, instrument=inst)
+                                 max_dte=args.max_dte, instrument=inst,
+                                 entry_dow=args.entry_day)
         label = f"Adaptive ({inst} regime router)"
         print_spread_summary(df, label)
         if args.save:
@@ -920,7 +951,8 @@ def main():
         df = run_spread_backtest(key, ml=args.ml,
                                  entry_time=args.entry, exit_time=args.exit,
                                  allow_estimate=args.allow_estimate,
-                                 max_dte=args.max_dte, instrument=inst)
+                                 max_dte=args.max_dte, instrument=inst,
+                                 entry_dow=args.entry_day)
         print_spread_summary(df, all_strategies[key]["name"])
         if args.save and len(strategies) == 1:
             df.to_csv(args.save, index=False)
