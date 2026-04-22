@@ -278,7 +278,7 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 IC_SKIP_DAYS       = {2}        # 2=Wed only — all strategies net-negative after costs.
 BEAR_CALL_DAYS     = {3, 4}     # 3=Thu, 4=Fri. CALL signal → Bear Call. PUT signal → Bull Put.
 
-STRADDLE_MARGIN_PER_LOT = 217_000   # upgrade threshold: actual Dhan SPAN ≈₹2,16,492 + ₹508 buffer
+STRADDLE_MARGIN_PER_LOT = 230_000   # upgrade threshold: actual Dhan SPAN ≈₹2,26,492 + ₹3,508 buffer
 MAX_LOTS_STRADDLE       = 5         # straddle uses ~2.5× IC margin — lower cap
 
 HEADERS = {

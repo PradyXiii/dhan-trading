@@ -262,7 +262,7 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | TP frac: IC has no TP; spreads use 0.65 | IC `spread_monitor.py` path removed TP check (EOD-only). Bear Call / Bull Put TP = `net_credit * 0.35` (spread decayed to 35% = retain 65%). Straddle = SL-only (no TP). | `CREDIT_TP_FRAC = 0.65` applies to spreads only. IC exits at 3:15 PM via `exit_positions.py`. Never add TP logic back to IC path. |
 | Wed/Thu/Fri IC all net-negative; only Bear Call/Bull Put profitable on Thu/Fri | IC: Wed -₹233, Thu -₹258, Fri -₹39 per lot after costs. Bear Call: Thu +₹65/lot, Fri +₹81/lot (CALL days). Bull Put: small positive P&L on Thu/Fri PUT days. | `IC_SKIP_DAYS = {2}` (Wed only). `BEAR_CALL_DAYS = {3,4}`. Thu/Fri CALL → Bear Call. Thu/Fri PUT → Bull Put. |
 | IC TP was costing ₹21L over 5 years | Standard IC (TP=0.65): ₹1.17Cr. EOD-only IC (no TP): ₹1.38Cr. Same WR, lower drawdown. TP captured 65% of credit but left last 35% of theta. | `spread_monitor.py` IC path no longer checks TP — SL only. IC always exits at EOD 3:15 PM via `exit_positions.py`. |
-| Straddle auto-upgrade not firing | `capital >= STRADDLE_MARGIN_PER_LOT` check uses constant ₹2.3L; actual Dhan margin may differ slightly | Verify with `python3 check_margins.py` — if live margin is higher than constant, update `STRADDLE_MARGIN_PER_LOT` in `auto_trader.py`. |
+| Straddle auto-upgrade with 0 lots | `STRADDLE_MARGIN_PER_LOT` set too low (e.g. 217K) but actual Dhan SPAN = 226,492 → capital hits threshold, straddle triggered, but `floor(capital/actual_margin)=0` lots → zero-lot order or crash | Keep `STRADDLE_MARGIN_PER_LOT` ≥ actual Dhan SPAN + 3K buffer. Run `python3 check_margins.py` to verify actual SPAN; update constant if it drifts above threshold. Current: 230,000. |
 | Straddle `today_trade.json` schema differs from IC | Straddle uses `ce_sid`/`pe_sid`/`ce_entry`/`pe_entry` (no `short_sid`/`long_sid`). IC uses `ce_short_sid`/`ce_long_sid`/`pe_short_sid`/`pe_long_sid`. 2-leg uses `short_sid`/`long_sid`. | Match the strategy key: `nf_short_straddle` → straddle schema; `nf_iron_condor` → IC schema; `bear_call_credit`/`bull_put_credit` → 2-leg schema. |
 
 ---
@@ -338,7 +338,7 @@ BEAR_CALL_DAYS       = {3, 4}    # Thu (DTE=5) + Fri (DTE=4)
                                   # CALL signal → Bear Call (+₹65/lot Thu, +₹81/lot Fri)
                                   # PUT signal → Bull Put (small positive P&L on Thu/Fri)
                                   # IC days: Mon (DTE=1, 97%WR) + Tue (DTE=0, 100%WR)
-STRADDLE_MARGIN_PER_LOT = 217_000 # auto-upgrade threshold; actual Dhan SPAN ≈₹2,16,492 + ₹508 buffer
+STRADDLE_MARGIN_PER_LOT = 230_000 # auto-upgrade threshold; actual Dhan SPAN ≈₹2,26,492 + ₹3,508 buffer
 MAX_LOTS_STRADDLE    = 5         # straddle uses ~2.5× IC margin (~₹2.3L vs ₹93K)
 
 # Naked-option legacy params (only used when CREDIT_SPREAD_MODE=False)

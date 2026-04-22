@@ -327,7 +327,7 @@ NIFTY_STRATEGIES = {
         ],
         "entry_debit":   False,
         "sl_frac":       0.50,
-        "tp_frac":       0.65,
+        "tp_frac":       999,    # EOD-only — no TP, mirrors production (IC TP cost ₹21L/5yr)
         "max_lots":      10,
     },
     "nf_short_straddle": {

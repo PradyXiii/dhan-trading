@@ -376,7 +376,7 @@ def _journal_spread(intent: dict, today_label: str):
     short_strike  = float(intent["short_strike"])
     long_strike   = float(intent["long_strike"])
     lots          = int(intent["lots"])
-    lot_size      = int(intent.get("lot_size", 30))
+    lot_size      = int(intent.get("lot_size", 65))
     dte           = float(intent.get("dte", 0))
     spot          = float(intent.get("spot_at_signal", 0))
     net_credit    = float(intent["net_credit"])
