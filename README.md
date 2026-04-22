@@ -89,7 +89,7 @@ Every Sunday, 2:00 AM IST
 
 | | |
 |---|---|
-| Instrument | Nifty50 options (weekly Thursday expiry) |
+| Instrument | Nifty50 options (weekly Tuesday expiry) |
 | Trading days | All 5 weekdays — every day is a valid IC day |
 | Structure | SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE |
 | Spread width | 150 pts per side (NF strike spacing = 50 pts, ATM ± 3 strikes) |
@@ -264,7 +264,7 @@ python3 lot_expiry_scanner.py --show
 
 **Iron Condor over naked options** — Real 1-min backtest (2021–2026, 1114 trades) confirmed IC wins ~85% of the time on NF weekly expiry. Naked long-option buying on the same data was a net loser due to theta decay and IV crush. IC collects premium from both sides simultaneously.
 
-**Weekly Thursday expiry** — Nifty50 has weekly Thursday expiry (confirmed via Dhan expirylist API). Every IC is naturally DTE ≤ 7, maximising theta decay benefit. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
+**Weekly Tuesday expiry** — Nifty50 has weekly Tuesday expiry (confirmed via Dhan expirylist API). Every IC is naturally DTE ≤ 7, maximising theta decay benefit. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
 
 **Real 1-min option data** — All backtests use actual Dhan 1-min option bars from `data/nifty_options_cache/`. OHLCV-formula estimates are never used for strategy decisions — formula can't see theta decay, IV crush, or slippage.
 

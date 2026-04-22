@@ -121,7 +121,7 @@ Trades CALL and PUT signal days — 235 trades/year (weekly expiry)
 
 ### Why NF IC beats BNF IC
 
-BNF lost weekly expiry (SEBI mandate, Nov 20 2024) → monthly contracts → 15-22 DTE → gamma risk dominates theta → IC WR collapsed 70%→27% in 2025. NF kept weekly Thursday expiry. Every NF trade is naturally DTE≤7.
+BNF lost weekly expiry (SEBI mandate, Nov 20 2024) → monthly contracts → 15-22 DTE → gamma risk dominates theta → IC WR collapsed 70%→27% in 2025. NF kept weekly Tuesday expiry. Every NF trade is naturally DTE≤7.
 
 ### ⚠️ MANDATORY LIVE PLACEMENT ORDER: BUY FIRST, THEN SELL
 
@@ -346,7 +346,7 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 7. VIX regime filter                    — skip if VIX < VIX_MIN_TRADE or > VIX_MAX_TRADE
 8. ML confidence filter                 — skip if ml_conf < ML_CONF_THRESHOLD
 9. get_capital()                        — Dhan fundlimit API
-10. get_expiry()                        — Dhan expirylist API (falls back to next-Thursday calc)
+10. get_expiry()                        — Dhan expirylist API (falls back to last-Tuesday calc)
 
 ── CREDIT_SPREAD_MODE = True (active path) ──────────────────────────────────
 11a. get_spread_legs()                  — fetch ATM short + ATM±150 long from option chain
@@ -438,17 +438,8 @@ Live overrides stored in `data/lot_size_overrides.json` (written by `lot_expiry_
 
 ## Nifty50 Expiry
 
-Nifty50 has **weekly Thursday expiry** (confirmed via `auto_trader.py` fallback + Dhan expirylist API — never changed to monthly).
+Nifty50 has **weekly Tuesday expiry** (confirmed via Dhan expirylist API — never changed to monthly).
 Every NF IC trade is naturally DTE ≤ 7. All 5 weekdays are valid entry days.
-
-DOW decay profile (confirmed by real-options backtest 2021–2026):
-| Entry day | DTE | WR | Avg P&L/lot | Notes |
-|---|---|---|---|---|
-| Thu | 0 | 93.7% | ~₹3,700 | Expiry day — explosive theta |
-| Wed | 1 | 87.3% | ~₹748 | Fast decay |
-| Tue | 2 | 91.7% | ~₹933 | Fast decay |
-| Mon | 3 | 82.7% | ~₹319 | Moderate |
-| Fri | 6 | 67.1% | ~₹105 | Thinnest — barely clears costs |
 
 ---
 
