@@ -300,6 +300,20 @@ NIFTY_STRATEGIES = {
         "sl_frac":       0.50,
         "tp_frac":       1.00,
     },
+    "nf_long_strangle": {
+        # BUY ATM+150 CE + BUY ATM-150 PE — OTM long, cheaper than straddle, needs big move.
+        "name":          "NF Long Strangle (OTM±150)",
+        "direction":     "VOLATILE",
+        "signal_match":  ["CALL", "PUT"],
+        "spread_width":  None,
+        "legs": [
+            ("CE", +3, "BUY",  "p3",          "p3_straddle"),
+            ("PE", -3, "BUY",  "m3_straddle", "m3"),
+        ],
+        "entry_debit":   True,
+        "sl_frac":       0.50,
+        "tp_frac":       1.00,
+    },
     "nf_iron_condor": {
         "name":          "NF Iron Condor",
         "direction":     "NEUTRAL",
