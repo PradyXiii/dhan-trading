@@ -382,8 +382,141 @@ def _record_experiment(description: str, kept: bool, score_before: float, score_
     _EXP_HISTORY.write_text(json.dumps(history, indent=2))
 
 
-def _load_experiment_history(n: int = 40) -> str:
-    """Return last n experiments as a prompt-ready string."""
+_STOPWORDS = {
+    "a", "an", "and", "the", "of", "to", "for", "in", "on", "with", "by", "as",
+    "add", "new", "feature", "features", "ml", "engine", "model", "signal",
+    "compute", "interaction", "using", "based", "from", "this", "that", "is",
+    "are", "be", "via", "plus", "also", "not", "no", "or", "but", "when",
+    "change", "changes", "update", "updated", "modify", "modified", "edit",
+    "adding", "added", "use", "used", "new", "create", "created", "propose",
+    "including", "include", "similar", "like", "into", "combine", "combined",
+    "more", "better", "improve", "improves", "improved", "between", "across",
+}
+
+
+def _normalize_description(desc: str) -> str:
+    """Lowercase, strip punctuation, drop stopwords → sorted keyword set."""
+    import re
+    words = re.findall(r"[a-z0-9_]+", desc.lower())
+    keywords = [w for w in words if w not in _STOPWORDS and len(w) > 2]
+    return " ".join(sorted(set(keywords)))
+
+
+def _keyword_set(desc: str) -> set:
+    import re
+    words = re.findall(r"[a-z0-9_]+", desc.lower())
+    return {w for w in words if w not in _STOPWORDS and len(w) > 2}
+
+
+def _check_duplicate(description: str, threshold: float = 0.65) -> tuple[bool, str]:
+    """Scan full lifetime history for duplicates.
+    Returns (is_duplicate, reason).
+    - Exact normalized match → duplicate
+    - Jaccard keyword overlap ≥ threshold → duplicate
+    """
+    if not _EXP_HISTORY.exists():
+        return False, ""
+    try:
+        history = json.loads(_EXP_HISTORY.read_text())
+    except Exception:
+        return False, ""
+    if not history:
+        return False, ""
+
+    new_norm = _normalize_description(description)
+    new_kw   = _keyword_set(description)
+    if not new_kw:
+        return False, ""
+
+    for past in history:
+        past_desc = past.get("description", "")
+        if _normalize_description(past_desc) == new_norm:
+            return True, f"exact match vs {past.get('date','?')}: {past_desc[:80]}"
+        past_kw = _keyword_set(past_desc)
+        if not past_kw:
+            continue
+        overlap = len(new_kw & past_kw) / len(new_kw | past_kw)
+        if overlap >= threshold:
+            return True, (f"{overlap*100:.0f}% keyword overlap vs {past.get('date','?')}: "
+                          f"{past_desc[:80]}")
+    return False, ""
+
+
+def _scan_repeats(threshold: float = 0.65) -> None:
+    """Audit lifetime experiment history for duplicate / near-duplicate proposals.
+    Prints a report grouped by similarity cluster. Usage:
+        python3 autoloop_nf.py --scan-repeats
+    """
+    if not _EXP_HISTORY.exists():
+        print(f"No history file at {_EXP_HISTORY}")
+        return
+    try:
+        history = json.loads(_EXP_HISTORY.read_text())
+    except Exception as e:
+        print(f"ERROR reading history: {e}")
+        return
+    if not history:
+        print("History file is empty.")
+        return
+
+    print(f"\n{'='*70}")
+    print(f"  Experiment history scan — {len(history)} total experiments")
+    print(f"  Duplicate threshold: Jaccard overlap ≥ {threshold*100:.0f}%")
+    print(f"{'='*70}\n")
+
+    # Build keyword sets once
+    entries = []
+    for idx, e in enumerate(history):
+        desc = e.get("description", "")
+        kw   = _keyword_set(desc)
+        if kw:
+            entries.append({"idx": idx, "desc": desc, "kw": kw,
+                            "date": e.get("date", "?"),
+                            "kept": e.get("kept", False)})
+
+    # Find all pairs with overlap >= threshold
+    clusters = []    # list of sets of indices
+    assigned = set()
+    for i in range(len(entries)):
+        if i in assigned:
+            continue
+        cluster = {i}
+        for j in range(i + 1, len(entries)):
+            if j in assigned:
+                continue
+            kw_i = entries[i]["kw"]
+            kw_j = entries[j]["kw"]
+            overlap = len(kw_i & kw_j) / len(kw_i | kw_j)
+            if overlap >= threshold:
+                cluster.add(j)
+        if len(cluster) > 1:
+            clusters.append(cluster)
+            assigned.update(cluster)
+
+    if not clusters:
+        print("✅ No duplicate clusters found. All experiments unique.\n")
+        return
+
+    print(f"⚠️  Found {len(clusters)} duplicate cluster(s):\n")
+    for c_idx, cluster in enumerate(clusters, 1):
+        members = sorted(cluster)
+        print(f"── Cluster {c_idx} ({len(members)} members) ──")
+        for m in members:
+            e = entries[m]
+            flag = "KEPT" if e["kept"] else "DROP"
+            print(f"  [{flag}] {e['date']}  {e['desc'][:110]}")
+        print()
+
+    dup_count = sum(len(c) - 1 for c in clusters)
+    print(f"{'='*70}")
+    print(f"  Redundant experiments: {dup_count} of {len(history)} ({dup_count*100/len(history):.1f}%)")
+    print(f"{'='*70}\n")
+
+
+def _load_experiment_history(n: int = 200) -> str:
+    """Return last n experiments as a prompt-ready string. Window widened from
+    40 → 200 (≈3 months at 3 exp/night) so Claude sees full memory before
+    proposing. Hard dedup via _check_duplicate() is the enforcing layer."""
     if not _EXP_HISTORY.exists():
         return ""
     history = json.loads(_EXP_HISTORY.read_text())
@@ -392,7 +525,7 @@ def _load_experiment_history(n: int = 40) -> str:
     recent = history[-n:]
     lines = [
         f"  {e['date']}  {'✅ KEPT' if e['kept'] else '❌ DISCARD'}  "
-        f"{e['before']:.4f}→{e['after']:.4f}  {e['description'][:120]}"
+        f"{e['before']:.4f}→{e['after']:.4f}  {e['description'][:160]}"
         for e in recent
     ]
     return (
@@ -951,7 +1084,13 @@ def main():
     parser.add_argument("--experiments", type=int, default=N_EXPERIMENTS, help=f"Number of experiments (default: {N_EXPERIMENTS})")
     parser.add_argument("--dry-run", action="store_true", help="Compute baselines only; no Claude API calls")
     parser.add_argument("--no-evolver", action="store_true", help="Skip model_evolver.py after promotion")
+    parser.add_argument("--scan-repeats", action="store_true",
+                        help="Audit data/experiment_history.json for duplicate experiments and exit")
     args = parser.parse_args()
+
+    if args.scan_repeats:
+        _scan_repeats()
+        return
 
     n_experiments = args.experiments
     ist_now = datetime.now(_IST)
@@ -1147,6 +1286,21 @@ def main():
 
         print(f"  Proposal: [{filename}] {description}")
         print(f"  Plain: {plain_eng}")
+
+        # Hard dedup: skip if description repeats prior experiment
+        is_dup, dup_reason = _check_duplicate(description)
+        if is_dup:
+            print(f"  DUPLICATE — {dup_reason} — skipping")
+            experiment_log.append(
+                {
+                    "n": i,
+                    "description": description + f" [DUP: {dup_reason[:60]}]",
+                    "before": best_paper if is_paper else best_bt,
+                    "after": 0.0,
+                    "kept": False,
+                }
+            )
+            continue
 
         # Apply change (paper routing for ml_engine.py)
         ok, reason, actual_file = _apply_change(proposal)
