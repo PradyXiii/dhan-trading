@@ -156,7 +156,7 @@ Cron runs every minute during market hours. Each run:
    - `call_spread_cost = short_CE_ltp − long_CE_ltp`
    - `put_spread_cost = short_PE_ltp − long_PE_ltp`
 4. SL check: `current_spread_cost >= net_credit × 1.5` → spread cost grew 50% above credit collected → close all 4 legs
-5. TP check: `current_spread_cost <= net_credit × 0.10` → spread cost collapsed to 10% → retain 90% of credit → close all 4 legs
+5. TP check: `current_spread_cost <= net_credit × 0.35` → spread cost collapsed to 35% → retain 65% of credit → close all 4 legs
 6. On trigger: places 4 market orders to close (reverse the IC), marks `data/today_trade.json` with exit info
 
 No Telegram on every run — only on SL/TP hit or error.
@@ -321,7 +321,7 @@ MAX_LOTS   = 10           # max 10 IC lots (both sides tie up margin)
 PAPER_MODE = False        # LIVE — real orders from Apr 22 2026
 SPREAD_WIDTH     = 150    # pts between short and long leg (ATM ± 3 strikes)
 CREDIT_SL_FRAC   = 0.5    # SL when spread cost = net_credit × 1.5
-CREDIT_TP_FRAC   = 0.90   # TP when spread cost = net_credit × 0.10
+CREDIT_TP_FRAC   = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
 ML_CONF_THRESHOLD = 0.55  # skip if ensemble confidence below this
 VIX_MIN_TRADE    = 13.0   # dynamic (analyze_confidence updates nightly)
 VIX_MAX_TRADE    = 20.0   # panic ceiling

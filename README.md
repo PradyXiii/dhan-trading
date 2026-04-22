@@ -94,7 +94,7 @@ Every Sunday, 2:00 AM IST
 | Spread width | 150 pts per side (NF strike spacing = 50 pts, ATM ± 3 strikes) |
 | Net credit | ~₹134/lot average at entry |
 | Stop-loss | Total spread cost grows to net_credit × 1.5 (50% loss of credit) |
-| Take-profit | Total spread cost falls to net_credit × 0.10 (retain 90% of credit) |
+| Take-profit | Total spread cost falls to net_credit × 0.35 (retain 65% of credit) |
 | Risk per trade | 5% of available capital |
 | Max lots | 10 (IC uses margin on both sides) |
 | Lot size | 65 (Nifty50, Jan 2026+) |

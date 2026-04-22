@@ -263,7 +263,7 @@ UNDERLYING_SEG     = "IDX_I"
 CREDIT_SPREAD_MODE = True
 SPREAD_WIDTH       = 150    # NF: 50pt strike spacing × 3 = 150pts  (BNF was 300)
 CREDIT_SL_FRAC     = 0.5    # NF IC: SL: spread expands 50% above credit received
-CREDIT_TP_FRAC     = 0.90   # NF IC: TP: retain 90% of credit (scan_ic_rr.py: +18% P&L vs 0.65)
+CREDIT_TP_FRAC     = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
 
 HEADERS = {
     "access-token": TOKEN,

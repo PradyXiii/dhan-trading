@@ -51,7 +51,7 @@ INTENT     = f"{DATA_DIR}/today_trade.json"
 PAPER_CSV  = f"{DATA_DIR}/paper_trades.csv"
 
 CREDIT_SL_FRAC = 0.5     # SL: spread cost grew 50% above entry credit
-CREDIT_TP_FRAC = 0.90    # TP: retain 90% of credit (scan_ic_rr.py: +18% P&L vs 0.65)
+CREDIT_TP_FRAC = 0.65    # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
 
 MKT_OPEN  = dt_time(9,  30)
 MKT_CLOSE = dt_time(15, 10)   # hand off to exit_positions.py at 3:15
