@@ -234,6 +234,43 @@ def _send_exit_telegram(today_trade: dict, sells: list):
         notify.send("\n".join(lines))
         return
 
+    # ── Short Straddle path ───────────────────────────────────────────────────
+    if strategy == "nf_short_straddle":
+        if today_trade.get("exit_done"):
+            notify.log("Straddle exit already handled by spread_monitor.py — skipping duplicate.")
+            return
+        atm_strike = float(today_trade.get("atm_strike", 0))
+        net_credit = float(today_trade.get("net_credit", 0))
+        lots       = int(today_trade.get("lots", 0))
+        lot_size   = int(today_trade.get("lot_size", 65))
+        pnl_inr    = float(today_trade.get("pnl_inr", 0))
+        exit_cost  = float(today_trade.get("exit_cost", 0))
+        exit_time  = today_trade.get("exit_time", "")
+        paper      = today_trade.get("order_mode") == "PAPER"
+        mode_tag   = "[PAPER] " if paper else ""
+        pnl_sign   = "+" if pnl_inr >= 0 else ""
+        lines = [
+            f"⏹  <b>{mode_tag}Straddle Closed  ·  {today_label}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"Strategy    Short Straddle",
+            f"Legs        SELL {int(atm_strike)} CE + SELL {int(atm_strike)} PE",
+            f"Lots        {lots}  ·  {lots * lot_size} shares",
+            "",
+            f"Entry credit  ₹{net_credit:.0f} / share",
+        ]
+        if exit_cost > 0:
+            lines.append(f"Buyback cost  ₹{exit_cost:.0f} / share")
+        if exit_time:
+            lines.append(f"Exit time     {exit_time} IST")
+        lines += [
+            "",
+            f"<b>P&L  {pnl_sign}₹{pnl_inr:,.0f}</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━",
+            "<i>Both short legs bought back — straddle closed at 3:15 PM EOD.</i>",
+        ]
+        notify.send("\n".join(lines))
+        return
+
     # ── Naked option path ─────────────────────────────────────────────────────
     signal   = today_trade.get("signal", "?")
     strike   = today_trade.get("strike", 0)
@@ -317,8 +354,8 @@ def get_open_positions():
     today_trade = _load_today_trade()
     strategy    = today_trade.get("strategy", "")
 
-    if strategy == "nf_iron_condor":
-        # NF: symbol contains "NIFTY" but NOT "BANKNIFTY"
+    if strategy in ("nf_iron_condor", "nf_short_straddle", "bear_call_credit", "bull_put_credit"):
+        # NF strategies: symbol contains "NIFTY" but NOT "BANKNIFTY"
         return [
             p for p in positions
             if int(p.get("netQty", 0)) != 0
@@ -451,6 +488,11 @@ def _build_eod_telegram(today_trade, results, exit_time_str):
                 f"Legs        SELL {int(today_trade.get('short_strike', 0))} {td_opt} / "
                 f"BUY {int(today_trade.get('long_strike', 0))} {td_opt}"
             )
+            lines.append(f"Entry credit  ₹{float(today_trade.get('net_credit', 0)):.0f} / share")
+        elif td_strategy == "nf_short_straddle":
+            atm = int(today_trade.get("atm_strike", 0))
+            lines.append("Strategy    Short Straddle")
+            lines.append(f"Legs        SELL {atm} CE + SELL {atm} PE")
             lines.append(f"Entry credit  ₹{float(today_trade.get('net_credit', 0)):.0f} / share")
         else:
             lines.append(

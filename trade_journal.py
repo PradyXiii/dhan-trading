@@ -46,8 +46,9 @@ INTENT_FILE     = f"{DATA_DIR}/today_trade.json"
 JOURNAL_CSV     = f"{DATA_DIR}/live_trades.csv"
 SPREAD_CSV      = f"{DATA_DIR}/live_spread_trades.csv"
 
-SPREAD_STRATEGIES = {"bear_call_credit", "bull_put_credit"}
-IC_STRATEGIES     = {"nf_iron_condor"}
+SPREAD_STRATEGIES   = {"bear_call_credit", "bull_put_credit"}
+IC_STRATEGIES       = {"nf_iron_condor"}
+STRADDLE_STRATEGIES = {"nf_short_straddle"}
 
 IC_CSV    = f"{DATA_DIR}/live_ic_trades.csv"
 IC_FIELDS = [
@@ -59,6 +60,16 @@ IC_FIELDS = [
     "pe_short_entry", "pe_long_entry", "pe_net_credit",
     "net_credit",
     "exit_reason", "exit_time",
+    "pnl_inr", "pnl_pct_of_credit",
+    "oracle_correct", "signal_score", "ml_conf",
+]
+
+STRADDLE_CSV    = f"{DATA_DIR}/live_straddle_trades.csv"
+STRADDLE_FIELDS = [
+    "date", "strategy", "signal",
+    "atm_strike", "lots", "lot_size", "dte", "spot_at_signal",
+    "ce_entry", "pe_entry", "net_credit",
+    "exit_cost", "exit_reason", "exit_time",
     "pnl_inr", "pnl_pct_of_credit",
     "oracle_correct", "signal_score", "ml_conf",
 ]
@@ -459,6 +470,89 @@ def _journal_spread(intent: dict, today_label: str):
     notify.send("\n".join(lines))
 
 
+def _journal_straddle(intent: dict, today_label: str):
+    """Journal a Short Straddle trade (2-leg: SELL CE + SELL PE, no wings)."""
+    paper      = (intent.get("order_mode") == "PAPER" or intent.get("mode") == "PAPER")
+    signal     = intent.get("signal", "CALL")
+    atm_strike = float(intent.get("atm_strike", 0))
+    lots       = int(intent.get("lots", 1))
+    lot_size   = int(intent.get("lot_size", 65))
+    dte        = float(intent.get("dte", 0))
+    spot       = float(intent.get("spot_at_signal", 0))
+    ce_entry   = float(intent.get("ce_entry", intent.get("ce_ltp", 0)))
+    pe_entry   = float(intent.get("pe_entry", intent.get("pe_ltp", 0)))
+    net_credit = float(intent.get("net_credit", ce_entry + pe_entry))
+    score      = int(intent.get("signal_score", 0))
+    ml_conf    = float(intent.get("ml_conf", 0))
+
+    exit_cost   = float(intent.get("exit_cost", 0))
+    exit_reason = intent.get("exit_reason", "") or "OPEN"
+    exit_time   = intent.get("exit_time", "")
+    pnl_inr     = float(intent.get("pnl_inr", 0))
+
+    pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
+
+    oracle_correct = None
+    if exit_reason == "SL":
+        oracle_correct = False
+    elif exit_reason in ("EOD", "OPEN"):
+        oracle_correct = pnl_inr > 0
+
+    row = {
+        "date":              date.today().isoformat(),
+        "strategy":          "nf_short_straddle",
+        "signal":            signal,
+        "atm_strike":        atm_strike,
+        "lots":              lots,
+        "lot_size":          lot_size,
+        "dte":               dte,
+        "spot_at_signal":    spot,
+        "ce_entry":          ce_entry,
+        "pe_entry":          pe_entry,
+        "net_credit":        net_credit,
+        "exit_cost":         exit_cost,
+        "exit_reason":       exit_reason,
+        "exit_time":         exit_time,
+        "pnl_inr":           pnl_inr,
+        "pnl_pct_of_credit": round(pnl_pct, 1),
+        "oracle_correct":    oracle_correct if oracle_correct is not None else "",
+        "signal_score":      score,
+        "ml_conf":           round(ml_conf, 4),
+    }
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    file_exists = os.path.exists(STRADDLE_CSV)
+    with open(STRADDLE_CSV, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=STRADDLE_FIELDS, extrasaction="ignore")
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+    notify.log(f"Straddle journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
+
+    emoji    = {"SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
+    pnl_sign = "+" if pnl_inr >= 0 else ""
+    mode_tag = "[PAPER] " if paper else ""
+
+    lines = [
+        f"📓 <b>{mode_tag}Straddle Journal · {today_label}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Short Straddle  ·  {lots} lot",
+        f"SELL {int(atm_strike)} CE @ ₹{ce_entry:.0f}  +  SELL {int(atm_strike)} PE @ ₹{pe_entry:.0f}",
+        f"Total credit  ₹{net_credit:.0f} / share",
+        "",
+        (f"Exit  {emoji} {exit_reason}" + (f"  at {exit_time} IST" if exit_time else "")
+         if exit_reason != "OPEN" else "Exit  🔓 position still open"),
+    ]
+    if exit_cost > 0:
+        lines.append(f"Buyback cost  ₹{exit_cost:.0f} / share")
+    lines += [
+        "",
+        f"<b>P&L  {pnl_sign}₹{pnl_inr:,.0f}  ({pnl_sign}{pnl_pct:.0f}% of max credit)</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    notify.send("\n".join(lines))
+
+
 def main():
     today_label = date.today().strftime("%d %b %Y")
     notify.log(f"Trade journal — {today_label}")
@@ -472,6 +566,9 @@ def main():
     # Branch by strategy
     if intent.get("strategy") in IC_STRATEGIES:
         _journal_ic(intent, today_label)
+        return
+    if intent.get("strategy") in STRADDLE_STRATEGIES:
+        _journal_straddle(intent, today_label)
         return
     if intent.get("strategy") in SPREAD_STRATEGIES:
         _journal_spread(intent, today_label)

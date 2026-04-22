@@ -338,7 +338,7 @@ BEAR_CALL_DAYS       = {3, 4}    # Thu (DTE=5) + Fri (DTE=4)
                                   # CALL signal → Bear Call (+₹65/lot Thu, +₹81/lot Fri)
                                   # PUT signal → Bull Put (small positive P&L on Thu/Fri)
                                   # IC days: Mon (DTE=1, 97%WR) + Tue (DTE=0, 100%WR)
-STRADDLE_MARGIN_PER_LOT = 230_000 # auto-upgrade: if capital ≥ this → straddle all days (except Wed)
+STRADDLE_MARGIN_PER_LOT = 217_000 # auto-upgrade threshold; actual Dhan SPAN ≈₹2,16,492 + ₹508 buffer
 MAX_LOTS_STRADDLE    = 5         # straddle uses ~2.5× IC margin (~₹2.3L vs ₹93K)
 
 # Naked-option legacy params (only used when CREDIT_SPREAD_MODE=False)
