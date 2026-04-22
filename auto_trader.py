@@ -264,7 +264,7 @@ CREDIT_SPREAD_MODE = True
 SPREAD_WIDTH       = 150    # NF: 50pt strike spacing × 3 = 150pts  (BNF was 300)
 CREDIT_SL_FRAC     = 0.5    # NF IC: SL: spread expands 50% above credit received
 CREDIT_TP_FRAC     = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
-IC_MARGIN_PER_LOT  = 100_000  # Dhan SPAN+Exposure margin for 1 NF IC lot (all 4 legs, ~₹1L)
+IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margincalculator/multi for actual margin
 
 HEADERS = {
     "access-token": TOKEN,

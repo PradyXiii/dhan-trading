@@ -308,8 +308,9 @@ CREDIT_SPREAD_MODE = True        # primary strategy; False = legacy naked-option
 # Sizing
 LOT_SIZE         = 65            # Nifty50 lot size (Jan 6 2026+ — was 75 before Jan 6 2026)
 MAX_LOTS         = 10            # NF IC max lots (margin tied on both sides)
-IC_MARGIN_PER_LOT = 100_000      # Dhan SPAN margin for 1 NF IC lot (all 4 legs, ~₹1L)
-                                  # lots = floor(capital / IC_MARGIN_PER_LOT), max MAX_LOTS
+IC_MARGIN_PER_LOT = 100_000      # FALLBACK only; live call goes to /margincalculator/multi
+                                  # Actual sizing: lots = floor(capital / Dhan_API_margin), max MAX_LOTS
+                                  # All 4 legs placed at same lot count (equal quantity each)
 
 # Credit-spread params (active path)
 SPREAD_WIDTH     = 150           # NF: 50pt strike spacing × 3 = ATM±150 (BNF was 300)
@@ -350,7 +351,9 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 ── CREDIT_SPREAD_MODE = True (active path) ──────────────────────────────────
 11a. get_spread_legs()                  — fetch ATM short + ATM±150 long from option chain
                                           compute net_credit = short_ltp − long_ltp
-                                          size lots: floor(capital / IC_MARGIN_PER_LOT), cap MAX_LOTS
+                                          query Dhan /margincalculator/multi for 1-lot IC margin
+                                          lots = floor(capital / api_margin), cap MAX_LOTS
+                                          all 4 legs get same lot count (equal qty)
 12a. compute_chain_signals()            — max-pain + GEX + straddle (informational)
 13a. Telegram: spread details message   — strategy, both legs, net credit, SL/TP triggers
 14a. _check_no_existing_position()      — abort if any open BN FNO position (netQty != 0)

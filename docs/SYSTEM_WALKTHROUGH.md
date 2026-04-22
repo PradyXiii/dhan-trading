@@ -113,7 +113,7 @@ Put signal:   Same structure — IC is symmetric regardless of signal direction
 
 Computes `net_credit = short_CE_ltp + short_PE_ltp − long_CE_ltp − long_PE_ltp`.
 
-Sizes position: `lots = min(MAX_LOTS=10, floor(capital / IC_MARGIN_PER_LOT))` — 1 lot per ₹1L of capital (Dhan SPAN margin requirement).
+Sizes position: queries Dhan `/margincalculator/multi` with all 4 legs × 1 lot → returns actual SPAN+Exposure margin. Then `lots = min(MAX_LOTS=10, floor(capital / api_margin))`. All 4 legs placed at `lots × 65` shares each (equal qty across legs). Fallback to ₹1L constant only if API errors.
 
 **Step 12: Chain signals (informational)**
 Computes max pain, GEX, straddle cost — sent to Telegram for context, doesn't affect trade decision.
