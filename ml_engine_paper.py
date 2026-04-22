@@ -30,7 +30,7 @@ The CALL/PUT direction feeds the credit-spread router in auto_trader.py:
 The ML predicts directional bias; spread structure provides theta + IV crush edge.
 
 For every Mon/Tue/Thu/Fri:
-  1. Compute 60 features (FEATURE_COLS) from OHLCV + global + macro + options data.
+  1. Compute 63 features (FEATURE_COLS) from OHLCV + global + macro + options data.
   2. Walk-forward RandomForest (train on past, predict present) outputs:
        P(CALL) = probability the day favours a bullish options trade
        P(PUT)  = probability the day favours a bearish options trade
@@ -738,7 +738,7 @@ def compute_features(df):
     return d.dropna(subset=req)
 
 
-# 60 features fed into the RF
+# 63 features fed into the RF
 FEATURE_COLS = [
     # Rule-based score components (discrete ±1 signals) + yesterday's conviction
     "s_ema20", "s_trend5", "s_vix", "s_nf_gap", "rule_score_lag1",
