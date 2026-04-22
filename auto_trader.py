@@ -268,14 +268,15 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 
 # ── Day-of-week filter ────────────────────────────────────────────────────────
 # NF expiry = Tuesday (from Sep 1 2025, NSE circular).
-# Post-Sep-2025 backtest (151 trades, real 1-min data):
-#   Tue DTE=0: 100% WR, ₹4,011/lot gross  → +₹3,731 net  ✅  IC
-#   Mon DTE=1:  97% WR, ₹1,123/lot gross  → +₹843 net    ✅  IC
-#   Fri DTE=4:  80% WR,   ₹241/lot gross  → -₹39 net     ⚠  IC marginal → replace with directional credit spread
-#   Thu DTE=5:  61% WR,    ₹22/lot gross  → -₹258 net    ❌  IC → replace with directional credit spread
-#   Wed DTE=6:  60% WR,    ₹47/lot gross  → -₹233 net    ❌  IC → replace with directional credit spread
-# IC only on Mon+Tue. Wed/Thu/Fri → directional credit spread (Bull Put or Bear Call per signal).
-IC_SKIP_DAYS       = {2, 3, 4}  # 2=Wed, 3=Thu, 4=Fri. IC plays Mon+Tue only.
+# Post-Sep-2025 backtest (7 months, real 1-min data):
+#   Tue DTE=0: 100% WR, ₹4,011/lot gross → IC ✅
+#   Mon DTE=1:  97% WR, ₹1,123/lot gross → IC ✅
+#   Fri DTE=4: Bear Call (CALL days) +₹81/lot net, Bull Put (PUT days) -₹134/lot → Bear Call only ✅
+#   Thu DTE=5: Bear Call (CALL days) +₹65/lot net, Bull Put (PUT days) -₹31/lot  → Bear Call only ✅
+#   Wed DTE=6: Bear Call -₹16/lot, Bull Put -₹51/lot, naked worthless → NO TRADE ❌
+# IC only Mon+Tue. Thu+Fri CALL days → Bear Call. Thu+Fri PUT days → no trade. Wed → no trade.
+IC_SKIP_DAYS       = {2}  # 2=Wed only. Thu/Fri handled by BEAR_CALL_DAYS below.
+BEAR_CALL_DAYS     = {3, 4}  # 3=Thu, 4=Fri. CALL signal → Bear Call. PUT signal → no trade.
 
 HEADERS = {
     "access-token": TOKEN,
@@ -2040,24 +2041,21 @@ def main():
         notify.log(f"Market holiday detected ({today_label}) — no BN data in CSV. Exiting.")
         return
 
-    # 2. Day-of-week filter (IC only)
-    if IRON_CONDOR_MODE and IC_SKIP_DAYS:
-        from datetime import datetime as _dt
-        _today_ist = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
-        if _today_ist.weekday() in IC_SKIP_DAYS:
-            _dow_name = {2: "Wednesday (DTE 6)", 3: "Thursday (DTE 5)", 4: "Friday (DTE 4)"}.get(
-                _today_ist.weekday(), f"Day {_today_ist.weekday()}"
-            )
-            notify.send(
-                f"⏸  <b>No IC Trade — {_dow_name}</b>\n"
-                f"─────────────────────\n"
-                f"{today_wd}  ·  {today_label}\n\n"
-                f"IC reserved for Mon + Tue (DTE 0-1, 97-100% WR).\n"
-                f"{_dow_name}: directional credit spread strategy pending backtest.\n"
-                f"No trade placed today."
-            )
-            notify.log(f"IC day-of-week filter: {_dow_name} skipped")
-            return
+    # 2. Wednesday hard skip (no profitable strategy — all options lose on DTE 6)
+    from datetime import datetime as _dt
+    _today_ist    = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
+    _today_weekday = _today_ist.weekday()
+    if IRON_CONDOR_MODE and _today_weekday in IC_SKIP_DAYS:
+        notify.send(
+            f"⏸  <b>No Trade — Wednesday (DTE 6)</b>\n"
+            f"─────────────────────\n"
+            f"{today_wd}  ·  {today_label}\n\n"
+            f"No profitable strategy on Wed in Tuesday-expiry regime.\n"
+            f"IC, Bear Call, Bull Put all net-negative after costs on DTE 6.\n"
+            f"Capital preserved."
+        )
+        notify.log("DOW filter: Wednesday — no trade")
+        return
 
     # 3. Read signal
     sig, sig_note = get_todays_signal()
@@ -2094,6 +2092,27 @@ def main():
         return
 
     score_max = 4
+
+    # ── Thu/Fri routing: Bear Call on CALL days, no trade on PUT days ─────────
+    # Post-Sep-2025 backtest: Bear Call +₹65-81/lot net on Thu/Fri CALL days.
+    # Bull Put loses on both days; naked options lose on all days.
+    _use_bear_call_today = False
+    if IRON_CONDOR_MODE and _today_weekday in BEAR_CALL_DAYS:
+        _dow_name = {3: "Thursday (DTE 5)", 4: "Friday (DTE 4)"}.get(_today_weekday, "")
+        if signal == "PUT":
+            notify.send(
+                f"⏸  <b>No Trade — {_dow_name}, PUT signal</b>\n"
+                f"─────────────────────\n"
+                f"{today_wd}  ·  {today_label}\n\n"
+                f"Bull Put Credit Spread loses on {_dow_name.split()[0]} in current regime.\n"
+                f"Only Bear Call profitable on {_dow_name.split()[0]} — no CALL signal today.\n"
+                f"Capital preserved."
+            )
+            notify.log(f"DOW filter: {_dow_name} PUT day — no trade")
+            return
+        # CALL signal on Thu/Fri → Bear Call Credit Spread
+        _use_bear_call_today = True
+        notify.log(f"DOW routing: {_dow_name} CALL signal → Bear Call Credit Spread")
 
     # ── News sentiment (morning_brief.py output, written at 9:15 AM) ────────
     news_vote    = 0    # +1 aligns with signal, -1 opposes
@@ -2205,9 +2224,73 @@ def main():
     news_row  = f"News       {news_note}\n" if news_note else ""
 
     # ══════════════════════════════════════════════════════════════════════════
+    # BEAR CALL PATH  (Thu/Fri CALL days — _use_bear_call_today = True)
+    # NF Bear Call: BUY ATM+150 CE + SELL ATM CE (2 legs, directional credit)
+    # ══════════════════════════════════════════════════════════════════════════
+    if IRON_CONDOR_MODE and _use_bear_call_today:
+        (short_sid, long_sid, short_strike, long_strike,
+         short_ltp, long_ltp, net_credit, lots, spot) = get_spread_legs(
+             signal, expiry, capital)
+
+        if short_sid is None:
+            die(f"Could not fetch Bear Call legs for expiry {expiry}.")
+
+        _dow_label = {3: "Thursday", 4: "Friday"}.get(_today_weekday, "")
+        nf_expiry_str = expiry.strftime('%d%b%Y').upper()
+        max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+        sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
+
+        notify.send(
+            f"🐻  <b>Nifty Bear Call — {_dow_label}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Score      {score:+d} / {score_max}{score_desc}\n"
+            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+            f"{news_row}"
+            f"Capital    {cap_label}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SELL  <code>NIFTY {nf_expiry_str} {int(short_strike)} CE</code>  @ ₹{short_ltp:.0f}\n"
+            f"BUY   <code>NIFTY {nf_expiry_str} {int(long_strike)} CE</code>  @ ₹{long_ltp:.0f}\n"
+            f"Net credit  ₹{net_credit:.0f} / share   "
+            f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
+            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"SL   spread cost > ₹{sl_trig:.0f}  (cost grew {CREDIT_SL_FRAC*100:.0f}% above credit)\n"
+            f"Exit EOD 3:15 PM (hold for maximum theta decay)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
+            f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
+        )
+
+        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+            notify.send(
+                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+                f"An open Nifty position already exists.\n"
+                f"Skipping Bear Call to avoid double exposure."
+            )
+            return
+
+        order_result = place_credit_spread(
+            short_sid, long_sid, signal, lots, net_credit,
+            short_strike, long_strike, short_ltp, long_ltp, spot,
+        )
+        if not DRY_RUN:
+            _write_today_spread_trade(
+                signal=signal,
+                short_sid=short_sid, long_sid=long_sid,
+                short_strike=short_strike, long_strike=long_strike,
+                short_ltp=short_ltp, long_ltp=long_ltp,
+                net_credit=net_credit, lots=lots, dte=dte, spot=spot,
+                score=score, expiry=expiry, ml_conf=ml_conf,
+                order_mode=order_result.get("mode", "CREDIT_SPREAD"),
+                buy_oid=order_result.get("buy_oid"),
+                sell_oid=order_result.get("sell_oid"),
+            )
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
     # IRON CONDOR PATH  (IRON_CONDOR_MODE = True)
     # NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
-    # Trades every CALL/PUT signal day — direction-neutral, theta-positive
+    # Trades every CALL/PUT signal day (Mon+Tue) — direction-neutral, theta-positive
     # ══════════════════════════════════════════════════════════════════════════
     if IRON_CONDOR_MODE:
         ic = get_ic_legs(expiry, capital)
@@ -2269,8 +2352,7 @@ def main():
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"SL   spread cost > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  "
             f"(cost grew {CREDIT_SL_FRAC*100:.0f}% above credit received)\n"
-            f"TP   spread cost < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  "
-            f"({CREDIT_TP_FRAC*100:.0f}% of credit in pocket)\n"
+            f"Exit EOD 3:15 PM  (no TP — holds for maximum theta decay)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
             f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"

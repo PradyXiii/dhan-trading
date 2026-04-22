@@ -51,7 +51,8 @@ INTENT     = f"{DATA_DIR}/today_trade.json"
 PAPER_CSV  = f"{DATA_DIR}/paper_trades.csv"
 
 CREDIT_SL_FRAC = 0.5     # SL: spread cost grew 50% above entry credit
-CREDIT_TP_FRAC = 0.65    # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
+CREDIT_TP_FRAC = 0.65    # TP for 2-leg spreads (bear_call / bull_put)
+# IC has no TP — backtest proves holding to EOD adds +18% P&L. IC only exits on SL or EOD.
 
 MKT_OPEN  = dt_time(9,  30)
 MKT_CLOSE = dt_time(15, 10)   # hand off to exit_positions.py at 3:15
@@ -327,15 +328,14 @@ def main():
         current_cost = ce_cost + pe_cost
 
         sl_trigger = net_credit * (1 + CREDIT_SL_FRAC)
-        tp_trigger = net_credit * (1 - CREDIT_TP_FRAC)
 
+        # IC: no TP. Backtest shows EOD-only = +18% P&L vs TP=0.65. Always hold to 3:15 PM.
         hit_sl = current_cost >= sl_trigger
-        hit_tp = current_cost <= tp_trigger
 
-        if not (hit_sl or hit_tp):
+        if not hit_sl:
             return
 
-        reason = "SL" if hit_sl else "TP"
+        reason = "SL"
 
         if not paper:
             close_result = _close_ic(intent)
@@ -362,9 +362,8 @@ def main():
         if paper:
             _update_paper_csv_exit(intent)
 
-        emoji   = "🟢" if reason == "TP" else "🔴"
-        verdict = "65% of credit kept — winner" if reason == "TP" else \
-                  "IC spread cost doubled — stopped out"
+        emoji   = "🔴"
+        verdict = "IC spread cost doubled — stopped out"
         mode_tag = "[PAPER] " if paper else ""
 
         notify.send(
