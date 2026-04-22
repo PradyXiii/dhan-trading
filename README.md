@@ -1,8 +1,23 @@
-# Nifty50 Iron Condor Auto-Trader
+# Nifty50 Multi-Strategy Auto-Trader
 
-Fully automated Nifty50 options trading on a GCP VM. Every weekday at 9:30 AM IST the system wakes up, reads the market, picks a direction, builds a 4-leg Iron Condor (SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE), places all 4 legs via Dhan, and sends a Telegram alert. `spread_monitor.py` watches every 1 minute during market hours and exits all 4 legs automatically on SL or TP hit. Every weeknight at 11 PM an ML model retrains. Every night at midnight an AI experiment loop tries to improve the model.
+Fully automated Nifty50 options trading on a GCP VM. Every trading day at 9:30 AM IST (except Wednesday) the system reads the market, routes to the right strategy, places orders via Dhan, and sends a Telegram alert. `spread_monitor.py` watches every minute and exits on SL. Every weeknight at 11 PM the ML model retrains. Every night at midnight an AI experiment loop tries to improve the model.
 
-> **Disclaimer:** This project is for educational and research purposes only. Nothing here is financial advice. Options trading involves substantial risk of loss. Past results do not guarantee future performance. Trade at your own risk. Consult a SEBI-registered advisor before making any real trading decisions.
+> **Disclaimer:** Educational and research purposes only. Not financial advice. Options trading involves substantial risk of loss. Past results do not guarantee future performance. Trade at your own risk. Consult a SEBI-registered advisor before making any real trading decisions.
+
+---
+
+## Strategy Routing (9:30 AM IST)
+
+| Day | Signal | Strategy | Legs |
+|---|---|---|---|
+| Mon | CALL or PUT | Iron Condor | SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE |
+| Tue | CALL or PUT | Iron Condor | same 4-leg IC |
+| Wed | — | **No trade** | DTE 6 — all strategies net-negative after costs |
+| Thu | CALL | Bear Call Credit Spread | SELL ATM CE + BUY ATM+150 CE |
+| Thu | PUT | Bull Put Credit Spread | SELL ATM PE + BUY ATM-150 PE |
+| Fri | CALL | Bear Call Credit Spread | SELL ATM CE + BUY ATM+150 CE |
+| Fri | PUT | Bull Put Credit Spread | SELL ATM PE + BUY ATM-150 PE |
+| Any (capital ≥ ₹2.17L) | CALL or PUT | Short Straddle | SELL ATM CE + SELL ATM PE (overrides all above) |
 
 ---
 
@@ -20,43 +35,43 @@ Every 5 minutes (all 7 days)
 9:15 AM IST, Mon–Fri
   └── morning_brief.py
         — Fetches Nifty50 headlines, asks Claude for sentiment
-        — Writes data/news_sentiment.json (consumed by auto_trader.py as one vote)
+        — Writes data/news_sentiment.json (one vote in auto_trader.py)
 
-9:30 AM IST, Mon–Fri
+9:30 AM IST, Mon–Fri (except Wed)
   └── auto_trader.py
-        1. Pull latest market data
-        2. Rule-based signal engine        →  CALL / PUT
-        3. ML direction model              →  overrides rules when confident
-        4. Build Iron Condor legs          →  SELL ATM CE + BUY ATM+150 CE
-                                               SELL ATM PE + BUY ATM-150 PE
-        5. Size position (lots)            →  floor(capital / Dhan_API_margin), max 10 lots
-                                               all 4 legs get equal lot count
-        6. Place 4 legs via Dhan           →  BUY long wings first (margin rule),
-                                               then SELL short legs
-        7. Send Telegram alert
+        1. Pull latest market data + ML signal
+        2. Wed skip — no trade (DTE 6, all strategies lose after costs)
+        3. Straddle auto-upgrade — if capital ≥ ₹2.17L → straddle all days
+        4. Thu/Fri routing — CALL signal → Bear Call, PUT signal → Bull Put
+        5. Mon/Tue → Iron Condor (4 legs)
+        6. Size position — floor(capital / Dhan live margin API)
+        7. Place orders via Dhan — BUY long leg first (margin rule), then SELL
+        8. Write today_trade.json, send Telegram alert
 
 Every 1 min, 9:30 AM–3:14 PM IST
   └── spread_monitor.py
-        — Fetches live LTPs for all 4 IC legs
-        — SL fires if total spread cost ≥ net_credit × 1.5  (50% loss)
-        — TP fires if total spread cost ≤ net_credit × 0.10 (90% of credit kept)
-        — On hit: closes all 4 legs, marks exit in today_trade.json
+        — Fetches live LTPs for all active legs
+        — IC/spread SL: total spread cost ≥ net_credit × 1.5  (50% loss)
+        — Straddle SL:  CE_ltp + PE_ltp ≥ net_credit × 1.5
+        — IC: SL-only, exits at EOD 3:15 PM (no TP — EOD maximises theta capture)
+        — Spread/Straddle: SL-only
+        — On SL hit: closes all legs, marks exit in today_trade.json
 
 11:00 AM IST, Mon–Fri
   └── midday_conviction.py
-        — Checks all 4 IC leg LTPs + macro (S&P futures, DXY, VIX, crude)
-        — Sends plain-English IC health summary to Telegram
+        — Fetches live option LTPs + macro (S&P futures, DXY, VIX, crude)
+        — Sends plain-English trade health summary to Telegram
         — Writes data/midday_checkpoints.csv (evolver uses reversal days)
 
 3:15 PM IST, Mon–Fri
   └── exit_positions.py
-        — Closes any open Nifty NRML positions not already hit by SL/TP
+        — Closes any open Nifty NRML positions not already hit by SL
         — Prevents unintended overnight carry
 
 3:30 PM IST, Mon–Fri
   └── trade_journal.py
         — Reads exit data from today_trade.json
-        — Computes P&L, exit reason (SL/TP/EOD)
+        — Computes P&L, exit reason (SL/EOD)
         — Appends row to data/live_ic_trades.csv
         — Sends EOD journal to Telegram
 
@@ -64,6 +79,7 @@ Every 1 min, 9:30 AM–3:14 PM IST
   └── model_evolver.py
         — Retrains ML brain: Optuna HPO across RF + XGBoost + LightGBM + CatBoost
         — Injects live trade outcomes as real-label signal (10× weight)
+        — Injects midday reversal days at 5× weight
         — Saves models/champion.pkl + models/ensemble/*.pkl
         — Sends plain-English brain-training report to Telegram
 
@@ -85,44 +101,66 @@ Every Sunday, 2:00 AM IST
 
 ---
 
-## Strategy: Nifty50 Iron Condor
+## Strategy Details
+
+### Iron Condor (Mon/Tue)
 
 | | |
 |---|---|
-| Instrument | Nifty50 options (weekly Tuesday expiry) |
-| Trading days | All 5 weekdays — every day is a valid IC day |
 | Structure | SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE |
 | Spread width | 150 pts per side (NF strike spacing = 50 pts, ATM ± 3 strikes) |
-| Net credit | ~₹134/lot average at entry |
-| Stop-loss | Total spread cost grows to net_credit × 1.5 (50% loss of credit) |
-| Take-profit | Total spread cost falls to net_credit × 0.35 (retain 65% of credit) |
-| Lots | floor(capital / live Dhan margin API) per IC, max 10. All 4 legs equal qty |
-| Max lots | 10 (IC uses margin on both sides) |
-| Lot size | 65 (Nifty50, Jan 2026+) |
-| Order type | MARKET — BUY long wings first, SELL short legs second (Dhan margin rule) |
-| Product | NRML — `spread_monitor.py` watches 1 min; `exit_positions.py` squares off at 3:15 PM |
+| Net credit | ~₹108/lot average |
+| Stop-loss | Total spread cost ≥ net_credit × 1.5 (50% loss) |
+| Take-profit | None — holds to EOD 3:15 PM (EOD captures last 35% of theta; TP cost ₹21L/5yr) |
+| Lots | floor(capital / live Dhan margin), max 10 |
+| Margin/lot | ~₹93,202 (Dhan SPAN+Exposure) |
+| WR (backtest) | 84.6% over 1114 trades, 2021–2026 |
 
-### Why Iron Condor works on Nifty50
-
-Weekly Tuesday expiry means every IC is naturally DTE ≤ 7. Theta (time decay) destroys option premium from both sides simultaneously. The IC wins when Nifty stays within the wings — which happens ~85% of the time. The max-loss scenario (one wing blown through) is capped by the long legs.
-
-### Order placement sequence (mandatory)
-
-Dhan requires long leg on books before short leg gets margin benefit:
+**Order sequence (mandatory):**
 1. BUY ATM+150 CE (long call wing)
-2. SELL ATM CE (short call leg)
+2. SELL ATM CE (short call)
 3. BUY ATM-150 PE (long put wing)
-4. SELL ATM PE (short put leg)
+4. SELL ATM PE (short put)
 
-Never reverse this — full unhedged margin triggered on short legs if long not placed first.
+Long leg must be on books before short leg — Dhan margin rule.
+
+### Bear Call Credit Spread (Thu/Fri, CALL signal)
+
+| | |
+|---|---|
+| Structure | SELL ATM CE + BUY ATM+150 CE |
+| Net credit | ~₹65–81/lot |
+| SL | Spread cost ≥ net_credit × 1.5 |
+| Lots | floor(capital / live Dhan margin), max 10 |
+| Margin/lot | ~₹51,244 |
+
+### Bull Put Credit Spread (Thu/Fri, PUT signal)
+
+| | |
+|---|---|
+| Structure | SELL ATM PE + BUY ATM-150 PE |
+| Net credit | small positive |
+| SL | Spread cost ≥ net_credit × 1.5 |
+| Lots | floor(capital / live Dhan margin), max 10 |
+| Margin/lot | ~₹51,699 |
+
+### Short Straddle (auto-upgrade when capital ≥ ₹2.17L)
+
+| | |
+|---|---|
+| Structure | SELL ATM CE + SELL ATM PE (unhedged — no wings) |
+| SL | CE_ltp + PE_ltp ≥ net_credit × 1.5 |
+| Lots | floor(capital / live Dhan margin), max 5 |
+| Margin/lot | ~₹2,16,492 (Dhan SPAN+Exposure) |
+| Trigger | capital ≥ STRADDLE_MARGIN_PER_LOT (₹2,17,000) |
 
 ---
 
 ## How direction is decided
 
-Signal engine and ML model still vote on CALL vs PUT (which side of the market is favored). The IC trades BOTH sides regardless — the signal just determines which days the system enters (CALL signal → market expected to hold or rise moderately, PUT signal → hold or fall moderately; both suit IC). No VIX or ML confidence filter applied — maximum trade frequency gives maximum P&L.
+Signal engine and ML model vote CALL vs PUT. IC trades both sides regardless — signal governs Thu/Fri routing (CALL → Bear Call, PUT → Bull Put) and Mon/Tue IC entry. No VIX or ML confidence filter — maximum trade frequency = maximum P&L per backtest.
 
-**60 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
+**63 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
 
 **Nightly model competition:** RF, XGBoost, LightGBM, CatBoost compete via Optuna HPO (30 trials each = 120 total). Winner saved as champion.pkl. Full 4-model ensemble saved for live voting.
 
@@ -131,10 +169,10 @@ Signal engine and ML model still vote on CALL vs PUT (which side of the market i
 ## Architecture
 
 ```
-auto_trader.py              9:30 AM runner — builds IC legs, places 4 orders, Telegram
-spread_monitor.py           1-min intraday SL/TP watch — closes all 4 IC legs on trigger
+auto_trader.py              9:30 AM runner — strategy router, places orders, Telegram
+spread_monitor.py           1-min intraday SL watch — handles IC/spread/straddle schemas
 exit_positions.py           3:15 PM EOD squareoff — closes any open Nifty NRML positions
-trade_journal.py            3:30 PM — logs IC trade outcome to live_ic_trades.csv + Telegram
+trade_journal.py            3:30 PM — logs trade outcome to live_ic_trades.csv + Telegram
 signal_engine.py            Rule-based indicators → data/signals.csv
 ml_engine.py                Walk-forward ML → data/signals_ml.csv; champion.pkl fast predict
 ml_engine_paper.py          Paper copy — autoresearcher tests here before promoting to live
@@ -142,7 +180,7 @@ model_evolver.py            11 PM — Optuna HPO + ensemble retrain → models/
 data_fetcher.py             Downloads OHLCV + global + options data → data/
 morning_brief.py            9:15 AM — news sentiment via Claude API → data/news_sentiment.json
 health_ping.py              8:50 AM — pre-market heartbeat: token + capital + freshness
-midday_conviction.py        11 AM — IC leg LTP check + macro + Telegram summary
+midday_conviction.py        11 AM — leg LTP check + macro + reversal detection + Telegram
 lot_expiry_scanner.py       Monthly — Nifty50 lot size / expiry change detection
 replay_today.py             Post-mortem — replay today's prediction with current ensemble
 analyze_confidence.py       Confidence bucket + VIX regime diagnostics
@@ -154,7 +192,7 @@ autoexperiment_backtest.py  Backtest evaluator for strategy constant changes
 validate_all.py             Pre-deployment end-to-end health check
 backtest_spreads.py         Multi-leg spread backtest — NF IC + 7 other NF variants
 fetch_intraday_options.py   Fetch 1-min NF option cache → data/nifty_options_cache/
-scan_ic_rr.py               IC SL/TP parameter scanner (RR optimisation)
+check_margins.py            Live margin checker — all 5 strategies vs account balance
 optimize_params.py          VIX + confidence grid search
 CLAUDE.md                   Architecture map + standing rules — auto-loaded every session
 setup_automation.sh         One-shot VM setup: deps + all cron jobs
@@ -234,43 +272,48 @@ python3 ml_engine.py --analyze
 # Backtest (real 1-min option data)
 python3 backtest_spreads.py --instrument NF --strategy nf_iron_condor --ml
 python3 backtest_spreads.py --instrument NF --strategy all --ml
-python3 scan_ic_rr.py               # scan SL/TP combinations
 
-# Dry runs (safe — no orders placed, no Telegram sent)
+# Live margin check (all 5 strategies vs current balance)
+python3 check_margins.py
+
+# Dry runs (safe — no orders placed)
 python3 auto_trader.py --dry-run
 python3 spread_monitor.py --dry-run
 python3 midday_conviction.py --dry-run
 python3 exit_positions.py --dry-run
 python3 trade_journal.py --dry-run
+python3 autoloop_nf.py --dry-run
+python3 fetch_intraday_options.py --dry-run
+python3 lot_expiry_scanner.py --dry-run
+
+# Standalone diagnostics (read-only)
+python3 health_ping.py
+python3 validate_all.py
+python3 lot_expiry_scanner.py --show
+python3 analyze_confidence.py
+python3 replay_today.py
+python3 autoexperiment_nf.py
 
 # Model
 python3 model_evolver.py
 python3 model_evolver.py --no-data
-python3 replay_today.py
-
-# Autoresearch
-python3 autoloop_nf.py --dry-run
-python3 autoexperiment_nf.py
-
-# Health
-python3 health_ping.py
-python3 validate_all.py
-python3 lot_expiry_scanner.py --show
 ```
 
 ---
 
 ## Key design choices
 
-**Iron Condor over naked options** — Real 1-min backtest (2021–2026, 1114 trades) confirmed IC wins ~85% of the time on NF weekly expiry. Naked long-option buying on the same data was a net loser due to theta decay and IV crush. IC collects premium from both sides simultaneously.
+**Multi-strategy routing over single-strategy** — IC optimal on Mon/Tue (DTE 0-1, 84.6% WR). On Thu/Fri (DTE 4-5) IC net-negative after costs; Bear Call and Bull Put directional credits win instead (+₹65–81/lot). Wed skipped entirely (DTE 6, all strategies lose). Routing maximises capital efficiency across the week.
 
-**Weekly Tuesday expiry** — Nifty50 has weekly Tuesday expiry (confirmed via Dhan expirylist API). Every IC is naturally DTE ≤ 7, maximising theta decay benefit. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
+**EOD-only IC exit** — IC holds to 3:15 PM with no TP. A TP at 65% capture cost ₹21L over 5 years vs EOD hold — last 35% of theta is free money.
+
+**Weekly Tuesday expiry** — Nifty50 has weekly Tuesday expiry (confirmed via Dhan expirylist API). Every trade is naturally DTE ≤ 7, maximising theta decay. BankNifty lost weekly expiry in Nov 2024 — this is why the system moved to Nifty50.
 
 **Real 1-min option data** — All backtests use actual Dhan 1-min option bars from `data/nifty_options_cache/`. OHLCV-formula estimates are never used for strategy decisions — formula can't see theta decay, IV crush, or slippage.
 
-**No VIX/confidence filter** — Grid search confirmed: filtering by VIX or ML confidence reduces trade frequency without improving P&L. Maximum frequency = maximum P&L for this strategy.
+**No VIX/confidence filter** — Grid search confirmed: filtering by VIX or ML confidence reduces trade frequency without improving P&L. Maximum frequency = maximum P&L for this strategy set.
 
-**SL=50%, TP=90%** — Confirmed optimal via `scan_ic_rr.py` on 5-year real data. TP=90% fires ~16 times/year (expiry-day theta collapse). Holding to EOD on other days captures natural decay. Both parameters produce identical max drawdown.
+**Straddle auto-upgrade** — When capital reaches ₹2.17L, Short Straddle (no wings, higher credit) automatically replaces all other strategies. Monitored by `check_margins.py`.
 
 **Nightly model competition** — RF, XGBoost, LightGBM, CatBoost compete every night. Live trade outcomes injected at 10× weight. Midday reversal checkpoints injected at 5×. Model corrects its own mistakes over time.
 
@@ -284,7 +327,7 @@ Gitignored — lives only on the VM:
 
 - `.env` — credentials
 - `data/` — all CSVs, signals, trade history, today_trade.json
-- `data/live_ic_trades.csv` — IC trade journal
+- `data/live_ic_trades.csv` — trade journal
 - `data/nifty_options_cache/` — real 1-min NF option bars
 - `models/` — trained champion.pkl, ensemble/*.pkl
 - `logs/` — cron output
