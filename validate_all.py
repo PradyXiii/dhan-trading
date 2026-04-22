@@ -342,11 +342,14 @@ try:
         dupes = lt["date"].duplicated().sum()
         check("live_ic_trades.csv: no duplicate dates", dupes == 0,
               "OK" if dupes == 0 else f"{dupes} duplicate rows")
-        # Live feedback threshold: 3 labeled rows activates 10x weight
-        check("live_ic_trades.csv: ≥ 3 labeled (activates 10x weight)",
-              n_labeled >= 3,
-              f"{n_labeled} labeled (need ≥3) — {'ACTIVE' if n_labeled >= 3 else 'not yet active'}",
-              warn_only=n_labeled < 3)
+        # Live feedback threshold: 3 labeled rows activates 10x weight (info-only — accumulates over trading days)
+        remaining = max(0, 3 - n_labeled)
+        _plural = "s" if remaining != 1 else ""
+        _fb_status = "ACTIVE" if n_labeled >= 3 else f"need ≥3 — {remaining} more day{_plural}"
+        check("live_ic_trades.csv: live feedback status",
+              True,
+              f"{n_labeled} labeled — {_fb_status}",
+              warn_only=False)
         if "oracle_correct" in lt.columns:
             recent = lt.tail(10)
             acc = recent["oracle_correct"].mean()
