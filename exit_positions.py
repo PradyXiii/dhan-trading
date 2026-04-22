@@ -9,8 +9,8 @@ MARGIN (NRML) positions do NOT auto-square off — this script does it.
 If SL or TP already fired, netQty will be 0 → nothing to do.
 If neither fired by 3:15 PM → squareoff at market price.
 
-Cron (3:10 PM IST = 9:40 AM UTC — retries until 3:20 PM hard deadline):
-  40 9 * * 1-5 cd ~/dhan-trading && python3 exit_positions.py >> logs/exit.log 2>&1
+Cron (3:15 PM IST = 9:45 AM UTC — retries until 3:20 PM hard deadline):
+  45 9 * * 1-5 cd ~/dhan-trading && python3 exit_positions.py >> logs/exit.log 2>&1
 """
 import json
 import os
@@ -381,7 +381,6 @@ def square_off(pos) -> dict:
         return {"error": str(e)}
 
 
-_EXIT_WINDOW_START_MINS = 3 * 60 + 10   # 3:10 PM IST in minutes since midnight
 _EXIT_WINDOW_END_MINS   = 3 * 60 + 20   # 3:20 PM IST hard deadline
 _RETRY_INTERVAL_SECS    = 60            # retry every 60 s within the window
 

@@ -103,10 +103,10 @@ SCANNER_COMMENT="# Nifty50 lot/expiry scanner — runs 1st of month 10 AM IST"
 EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DIR/evolver.log 2>&1"
 EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
 
-# EOD position squareoff — 3:10 PM IST = 9:40 AM UTC, Mon–Fri
-# Retry loop runs 3:10–3:20 PM IST (60 s intervals). Hard deadline: 3:20 PM alert if any remain.
-EXIT_CMD="40 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/exit.log 2>&1"
-EXIT_COMMENT="# EOD squareoff — 3:10 PM IST, retries until 3:20 PM hard deadline"
+# EOD position squareoff — 3:15 PM IST = 9:45 AM UTC, Mon–Fri
+# Retry loop runs 3:15–3:20 PM IST (60 s intervals). Hard deadline: 3:20 PM alert if any remain.
+EXIT_CMD="45 9 * * 1-5 cd $SCRIPT_DIR && python3 exit_positions.py >> $LOG_DIR/exit.log 2>&1"
+EXIT_COMMENT="# EOD squareoff — 3:15 PM IST, retries until 3:20 PM hard deadline"
 
 # Intraday spread monitor — every 1 min during market hours, Mon–Fri
 # Checks credit-spread SL/TP triggers; closes both legs (BUY back short + SELL long) if hit.
@@ -235,7 +235,7 @@ echo ""
 echo "  Spread monitor : every 1 min, 9:30 AM–3:29 PM IST (Mon–Fri)"
 echo "  Monitor log    : $LOG_DIR/spread_monitor.log"
 echo ""
-echo "  EOD squareoff  : 3:10 PM IST every weekday (Mon–Fri), retries until 3:20 PM"
+echo "  EOD squareoff  : 3:15 PM IST every weekday (Mon–Fri), retries until 3:20 PM"
 echo "  Exit log       : $LOG_DIR/exit.log"
 echo ""
 echo "  Trade journal  : 3:30 PM IST every weekday (Mon–Fri)"
