@@ -579,6 +579,17 @@ def _extract_section(content: str, section: str, lines_after: int = 80) -> str:
     return content[:3000]
 
 
+def _extract_append_zone(content: str, lines_before: int = 20) -> str:
+    """Extract the AUTOLOOP APPEND ZONE area so Claude can see the exact anchor."""
+    lines = content.splitlines()
+    for i, line in enumerate(lines):
+        if "AUTOLOOP APPEND ZONE" in line:
+            start = max(0, i - lines_before)
+            end   = min(i + 10, len(lines))
+            return "\n".join(lines[start:end])
+    return "(AUTOLOOP APPEND ZONE not found — sync needed)"
+
+
 def _build_column_inventory() -> str:
     """Run load_all_data + compute_features and return a plain inventory of
     column names Claude can safely reference. Anything NOT in this list must
@@ -637,17 +648,20 @@ def _build_context_snippet(use_paper: bool = False) -> str:
         else ""
     )
 
-    feat_section = _extract_section(ml, "FEATURE_COLS", lines_after=40)
+    feat_section    = _extract_section(ml, "FEATURE_COLS", lines_after=40)
     compute_section = _extract_section(ml, "def compute_features", lines_after=70)
-    score_section = _extract_section(sig, "def score_row", lines_after=60)
-    at_section = _extract_section(at, "LOT_SIZE", lines_after=14)
+    append_zone     = _extract_append_zone(ml, lines_before=20)
+    score_section   = _extract_section(sig, "def score_row", lines_after=60)
+    at_section      = _extract_section(at, "LOT_SIZE", lines_after=14)
 
     return (
         paper_note
         + "### ml_engine.py — FEATURE_COLS\n```python\n"
         + feat_section
-        + "\n```\n\n### ml_engine.py — compute_features()\n```python\n"
+        + "\n```\n\n### ml_engine.py — compute_features() top (context)\n```python\n"
         + compute_section
+        + "\n```\n\n### ml_engine.py — AUTOLOOP APPEND ZONE (use this exact anchor for new features)\n```python\n"
+        + append_zone
         + "\n```\n\n### signal_engine.py — score_row()\n```python\n"
         + score_section
         + "\n```\n\n### auto_trader.py — trading constants\n```python\n"
@@ -686,14 +700,14 @@ def _build_system_prompt() -> str:
         "So be bold — paper experiments have no risk.\n\n"
         "CRITICAL RULES:\n"
         "0. CODE PLACEMENT — ALL new feature code MUST be inserted at the AUTOLOOP APPEND ZONE.\n"
-        "   The APPEND ZONE is identified by this exact comment line near the end of compute_features():\n"
-        "       # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────\n"
+        "   The exact anchor line is shown in the code context under the header\n"
+        "   '### ml_engine.py — AUTOLOOP APPEND ZONE (use this exact anchor for new features)'.\n"
+        "   Copy the anchor line CHARACTER-FOR-CHARACTER from that section as your old_code.\n"
         "   When editing ml_engine_paper.py for a new feature, your old_code MUST be exactly:\n"
         "       # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────\n"
-        "   And your new_code must be:  <your feature code>\\n    # ── AUTOLOOP APPEND ZONE ...\n"
+        "   And your new_code must be:  <your feature code>\\n    # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────\n"
         "   (i.e. prepend your code to that comment, keeping the comment intact as the anchor).\n"
-        "   NEVER insert code anywhere else in compute_features() — not in 'Interaction features',\n"
-        "   not in the 'PCR momentum' block, not anywhere before the APPEND ZONE comment.\n"
+        "   NEVER target any other line in compute_features() for a new feature insertion.\n"
         "   The append zone is safe because ALL existing features are already computed above it.\n"
         "1. Adding a new ML feature requires TWO edits: one to compute_features() and one to FEATURE_COLS.\n"
         "   In BN ml_engine.py, compute_features() is at line ~228 and FEATURE_COLS is at line ~332 — "
