@@ -729,6 +729,19 @@ def compute_features(df):
         d["orb_range_pct"]  = 0.0
         d["orb_break_side"] = 0
 
+    # ── Momentum acceleration (short vs medium-term return differential) ────────
+    d["momentum_accel"] = d["nf_ret5"] - d["nf_ret20"]
+
+    # ── RSI regime × trend interaction ─────────────────────────────────────────
+    # Bucket RSI into oversold(<35)=-1, neutral=0, overbought(>65)=+1
+    _rsi_regime = np.where(d["rsi14"] < 35, -1, np.where(d["rsi14"] > 65, 1, 0))
+    d["rsi_trend_interact"] = _rsi_regime * d["s_ema20"]
+
+    # ── Gap × VIX level interaction ────────────────────────────────────────────
+    # Gaps in high-VIX regimes carry more directional info
+    _vix_z = (_vix - _vix.rolling(60, min_periods=20).mean()) / _vix.rolling(60, min_periods=20).std().replace(0, np.nan)
+    d["gap_vix_interact"] = d["nf_gap"] * _vix_z.fillna(0.0)
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -807,6 +820,10 @@ FEATURE_COLS = [
     # Opening range breakout (prior day's 9:15 candle — from nifty50_15m_orb.csv)
     "orb_range_pct",       # prior-day 9:15 candle range as % of spot — vol proxy
     "orb_break_side",      # +1/-1/0 — did prev close break above/below/inside 9:15 range
+    # Momentum acceleration & regime interactions
+    "momentum_accel",      # ret5 - ret20 — momentum speeding up or slowing down
+    "rsi_trend_interact",  # RSI regime bucket × s_ema20 — mean-reversion in extremes
+    "gap_vix_interact",    # nf_gap × VIX z-score — gaps matter more in high-vol
 ]
 
 
