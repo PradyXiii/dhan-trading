@@ -26,38 +26,39 @@ Two review surfaces, different stages:
 
 ---
 
-## ✅ LIVE MODE — NF IC ACTIVE (April 2026)
+## ✅ LIVE MODE — MULTI-STRATEGY ACTIVE (April 2026)
 
-**`auto_trader.py` is in PAPER_MODE = False.** Real IC orders placed via Dhan.
-`MAX_LOTS = 10` (IC margin tied on both sides).
+**`auto_trader.py` is in PAPER_MODE = False.** Real orders placed via Dhan.
 
-**Why:** Real 1-min option backtest + 4-trade live sample (Apr 13–17, 2026) proved:
-- Naked long-options buying is structurally losing — theta decay + IV crush
-- 2025–26 real-data backtest: WR 17%, -₹1,006/trade per lot
-- Core problem is the strategy (buy naked ATM options), not the signal
+**Daily strategy routing (9:30 AM IST):**
+- **Mon + Tue** → Nifty Iron Condor (4 legs, BUY wings first)
+- **Thu + Fri, CALL signal** → Bear Call Credit Spread (2 legs)
+- **Thu + Fri, PUT signal** → Bull Put Credit Spread (2 legs)
+- **Wed** → No trade (DTE 6, all strategies lose after costs)
+- **Auto-upgrade**: if balance ≥ ₹2.3L → Short Straddle replaces all above (except Wed)
+
+**Capital at go-live (22 Apr 2026): ₹1,12,370**
+- IC: ₹93,202/lot → 1 lot ✅  Bear Call/Bull Put: ₹51K/lot → 2 lots ✅
+- Straddle: ₹2,16-26L/lot → 0 lots ❌ (insufficient — upgrade pending capital growth)
+
+**Why these strategies:**
+- IC (Mon/Tue): WR 84.6% (2021–2026), ₹25L/yr, max DD -0.8%. Theta dominates DTE 0-1.
+- Bear Call (Thu/Fri CALL): +₹65-81/lot net — IC loses on DTE 4-5 but directional credit wins.
+- Bull Put (Thu/Fri PUT): small positive P&L — mirrors Bear Call on PUT signal days.
+- Straddle (when affordable): both sides collected, no wings, higher margin but more credit.
 
 **What happens each morning (9:30 AM IST):**
-- Full signal flow runs (data → rule → ML → 4-leg IC option pick)
-- Real MARKET orders placed via Dhan (BUY wings first, SELL short legs second)
-- Telegram fires with trade details, net credit, SL/TP triggers
-- `spread_monitor.py` watches every minute for SL/TP; `exit_positions.py` squares off at 3:15 PM
+- Data → signal → ML → strategy routing → real MARKET orders via Dhan → Telegram alert
+- `spread_monitor.py` watches every minute for SL; `exit_positions.py` squares off at 3:15 PM
 
-**Confirmed winning strategy: Nifty50 Iron Condor (NF IC)**
-- WR 84.6% (2021–2026), consistent 80–91% each year, no 2025 collapse
-- ~235 trades/year (weekly expiry → no DTE filter needed), ₹25L/year avg
-- Max drawdown -0.8% across 5 years
-- NF IC is superior to BNF IC because NF kept weekly expiry (SEBI mandate);
-  BNF switched to monthly Nov 2024 → IC WR collapsed to 27% in 2025
-- Strategy: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
-  (spread_width=150, NF strike spacing=50pts → ATM±3 strikes)
-- NF lot size: 75 before Jan 6 2026, 65 from Jan 6 2026
+**NF lot size: 75 before Jan 6 2026, 65 from Jan 6 2026**
 
 **Go-live checklist (completed April 2026):**
 1. ✅ Built `fetch_intraday_options.py --instrument NF --spreads` (NF multi-leg cache)
-2. ✅ Built `backtest_spreads.py` with `--instrument NF` + 8 NF strategy variants
+2. ✅ Built `backtest_spreads.py` with `--instrument NF` + hybrid backtest + cost model
 3. ✅ Fetched full NF option cache (5590 files, Aug 2021–Apr 2026)
 4. ✅ Confirmed NF IC: WR 84.6%, ₹1.17Cr (5yr), ₹25L/yr, max DD -0.8%
-5. ✅ Wired NF IC into `auto_trader.py` (scrip=13, lot=65, 4-leg IC, IRON_CONDOR_MODE=True)
+5. ✅ Wired multi-strategy into `auto_trader.py` (IC + Bear Call + Bull Put + straddle upgrade)
 6. ✅ PAPER_MODE=False, MAX_LOTS=10 — live from 22 Apr 2026
 
 ---
@@ -268,9 +269,11 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 
 ## What This System Does
 
-Fully automated Nifty50 Iron Condor trading. Cron fires at 9:30 AM IST on trading days:
-data → rule signal → ML override → 4-leg IC order (BUY wings, SELL short legs) → Telegram alert.
-No human input needed during market hours.
+Fully automated Nifty50 multi-strategy options trading. Cron fires at 9:30 AM IST on trading days:
+data → rule signal → ML override → strategy router → orders via Dhan → Telegram alert.
+
+Strategy by day: Mon/Tue = IC (4-leg), Thu/Fri = Bear Call or Bull Put (2-leg, signal-dependent),
+Wed = skip. Auto-upgrades to Short Straddle when capital ≥ ₹2.3L. No human input needed.
 
 ---
 
@@ -303,6 +306,7 @@ No human input needed during market hours.
 | `analyze_confidence.py` | Diagnostic tool — confidence buckets, VIX regime accuracy, feature importances; `--write-threshold` updates dynamic VIX filter |
 | `morning_brief.py` | 9:15 AM news sentiment — fetches Nifty50 headlines, calls Claude API, writes `data/news_sentiment.json` for auto_trader vote |
 | `setup_automation.sh` | One-shot VM setup: pip deps, cron install, dry-run verification |
+| `check_margins.py` | Live margin checker — queries Dhan /margincalculator/multi for all 5 strategies vs account balance; shows lots affordable, daily income |
 
 ---
 
@@ -351,46 +355,63 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 ```
 0. _acquire_lock()                      — fcntl prevents double cron execution
 1. check_credentials()                  — Dhan token valid? API reachable?
-2. _check_lot_size()                    — alert if LOT_SIZE constant doesn't match expected for today
-3. _check_exit_marker()                 — yesterday's exit_positions.py ran? (skipped in PAPER mode)
-4. refresh_data_and_signal()            — subprocess: data_fetcher → signal_engine → ml_engine --predict-today
-5. _is_trading_day()                    — NSE holiday check (NSE_HOLIDAYS_2026 set)
-6. get_todays_signal()                  — reads signals_ml.csv (falls back to signals.csv)
-   ├── NONE → Telegram "No Trade Today" → exit
+2. _check_lot_size()                    — alert if LOT_SIZE doesn't match expected
+3. _check_exit_marker()                 — yesterday's exit ran? (skipped in PAPER mode)
+4. refresh_data_and_signal()            — data_fetcher → signal_engine → ml_engine --predict-today
+5. _is_trading_day()                    — NSE holiday check
+6. IC_SKIP_DAYS check (Wed=2)           — no trade Wednesday; all strategies lose on DTE 6
+7. get_todays_signal()                  — reads signals_ml.csv (falls back to signals.csv)
+   ├── NONE / score=0 / event_day → Telegram "No Trade" → exit
    └── CALL/PUT → continue
-7. VIX regime filter                    — skip if VIX < VIX_MIN_TRADE or > VIX_MAX_TRADE
-8. ML confidence filter                 — skip if ml_conf < ML_CONF_THRESHOLD
-9. get_capital()                        — Dhan fundlimit API
-10. get_expiry()                        — Dhan expirylist API (falls back to last-Tuesday calc)
+8. Day-of-week routing (IC mode only):
+   ├── BEAR_CALL_DAYS {3,4} + CALL → _use_bear_call_today = True
+   ├── BEAR_CALL_DAYS {3,4} + PUT  → _use_bull_put_today  = True
+   └── Mon/Tue                     → IC path (neither flag set)
+9. VIX + ML filters (bypassed for IC/spreads — no filter = max P&L per backtest)
+10. get_capital()                       — Dhan fundlimit API (availabelBalance field)
+    Straddle auto-upgrade check:
+    _use_straddle_today = (capital >= STRADDLE_MARGIN_PER_LOT)
+    If True → overrides bear_call/bull_put/IC for all days (logs upgrade notice)
+11. get_expiry()                        — Dhan expirylist API (falls back to last-Tuesday calc)
 
-── CREDIT_SPREAD_MODE = True (active path) ──────────────────────────────────
-11a. get_spread_legs()                  — fetch ATM short + ATM±150 long from option chain
-                                          compute net_credit = short_ltp − long_ltp
-                                          query Dhan /margincalculator/multi for 1-lot IC margin
-                                          lots = floor(capital / api_margin), cap MAX_LOTS
-                                          all 4 legs get same lot count (equal qty)
-12a. compute_chain_signals()            — max-pain + GEX + straddle (informational)
-13a. Telegram: spread details message   — strategy, both legs, net credit, SL/TP triggers
-14a. _check_no_existing_position()      — abort if any open BN FNO position (netQty != 0)
-15a. place_credit_spread()              — BUY hedge leg first (margin rule), wait 2s, SELL credit leg
-     ├── PAPER mode → log to paper_trades.csv, no Dhan call
-     ├── BUY fails → ❌ FAILED, no position
-     ├── SELL fails after BUY → 🚨 PARTIAL_SPREAD critical alert (naked long exposure!)
-     └── Success → Telegram: both order IDs + SL/TP triggers
-16a. _write_today_spread_trade()        — data/today_trade.json with spread schema
-                                          (read by spread_monitor.py + exit_positions.py + trade_journal.py)
+── STRADDLE PATH (_use_straddle_today = True, capital ≥ ₹2.3L) ─────────────
+12s. get_straddle_legs(expiry, capital) — ATM CE + ATM PE SIDs from OC
+                                          _fetch_straddle_margin_per_lot() → actual SPAN margin
+                                          lots = min(MAX_LOTS_STRADDLE, capital // margin_1lot)
+13s. Telegram: straddle details         — both SELLs, net credit, SL trigger
+14s. _check_no_existing_position()
+15s. place_straddle()                   — SELL CE, wait 2s, SELL PE
+     └── 🚨 PARTIAL_STRADDLE if PE SELL fails after CE placed
+16s. _write_today_straddle_trade()      — today_trade.json: strategy=nf_short_straddle
+                                          fields: ce_sid/pe_sid/ce_entry/pe_entry/net_credit
 
-── CREDIT_SPREAD_MODE = False (legacy fallback) ─────────────────────────────
-11b. get_affordable_option()            — option chain walk ATM → OTM → ITM
-12b. Telegram: trade details message
-13b. _check_no_existing_position()
-14b. place_super_order()                — Super Order (entry+SL+TP in one call)
-     ├── DH-906 market closed → AMO fallback (afterMarketOrder+amoTime=OPEN)
-     ├── Super Order fails → manual BUY + SL-M
-     │   ├── SL fails → 🚨 CRITICAL Telegram (FALLBACK_NO_SL mode)
-     │   └── BUY fails → ❌ FAILED mode
-     └── Success → Telegram: order confirmed
-15b. _write_today_trade()               — data/today_trade.json with naked schema
+── BEAR CALL PATH (_use_bear_call_today = True, Thu/Fri CALL) ───────────────
+12b. get_spread_legs("CALL", expiry, capital) — SELL ATM CE + BUY ATM+150 CE
+13b. Telegram: bear call details
+14b. _check_no_existing_position()
+15b. place_credit_spread()              — BUY long (hedge) first, SELL short
+16b. _write_today_spread_trade()        — strategy=bear_call_credit
+
+── BULL PUT PATH (_use_bull_put_today = True, Thu/Fri PUT) ──────────────────
+12p. get_spread_legs("PUT", expiry, capital)  — SELL ATM PE + BUY ATM-150 PE
+13p. Telegram: bull put details
+14p. _check_no_existing_position()
+15p. place_credit_spread()              — BUY long (hedge) first, SELL short
+16p. _write_today_spread_trade()        — strategy=bull_put_credit
+
+── IC PATH (IRON_CONDOR_MODE, Mon/Tue) ──────────────────────────────────────
+12i. get_ic_legs(expiry, capital)       — all 4 legs from OC; _fetch_ic_margin_per_lot()
+                                          lots = min(MAX_LOTS, capital // api_margin)
+13i. compute_chain_signals()            — max-pain + GEX (informational)
+14i. Telegram: IC details               — 4 legs, net credit, SL trigger
+15i. _check_no_existing_position() via today_trade.json (IC duplicate guard)
+16i. place_iron_condor(ic, expiry)      — BUY CE long → SELL CE short → BUY PE long → SELL PE short
+     └── 🚨 PARTIAL_IC* alerts if any leg fails mid-sequence
+17i. _write_today_ic_trade()            — today_trade.json: strategy=nf_iron_condor
+                                          fields: ce/pe_short_sid/long_sid, ce/pe_credit, net_credit
+
+── LEGACY FALLBACK (CREDIT_SPREAD_MODE = False) ─────────────────────────────
+  Naked option BUY via place_super_order() — kept for reference, never used in IC mode
 ```
 
 ---

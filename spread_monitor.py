@@ -8,11 +8,12 @@ fcntl lock prevents overlapping runs.
 
 What it does:
   1. Reads data/today_trade.json — today's trade
-  2. Handles two strategy families:
-     a. bear_call_credit / bull_put_credit  → 2-leg BNF credit spread
-     b. nf_iron_condor                      → 4-leg NF IC
-  3. Fetches live LTPs for all legs
-  4. Computes current spread cost vs entry net_credit
+  2. Handles three strategy families:
+     a. nf_iron_condor                      → 4-leg IC (SL only, no TP — EOD)
+     b. nf_short_straddle                   → 2-leg straddle (BUY back both; SL only, no TP)
+     c. bear_call_credit / bull_put_credit  → 2-leg credit spread (SL + TP)
+  3. Fetches live LTPs for all legs via /v2/marketfeed/ltp
+  4. Computes current cost vs entry net_credit
   5. SL / TP hit → close all legs, write exit to today_trade.json, Telegram
 
 PAPER MODE: no real orders, writes exit state to json + paper_trades.csv.
