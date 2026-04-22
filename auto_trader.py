@@ -268,10 +268,14 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 
 # ── Day-of-week filter ────────────────────────────────────────────────────────
 # NF expiry = Tuesday (from Sep 1 2025, NSE circular).
-# Wednesday = DTE 6 = worst entry day: equivalent to old-Thursday-regime Friday.
-# Old Friday had 67.1% WR, ~₹105/lot net after costs ≈ breakeven.
-# Skip Wednesday until we have 6+ months of post-Sep-2025 Wednesday data.
-IC_SKIP_WEDNESDAY  = True   # Set False to re-enable; re-evaluate after Oct 2025 data
+# Post-Sep-2025 backtest (151 trades, real 1-min data):
+#   Tue DTE=0: 100% WR, ₹4,011/lot gross  → +₹3,731 net  ✅
+#   Mon DTE=1:  97% WR, ₹1,123/lot gross  → +₹843 net    ✅
+#   Fri DTE=4:  80% WR,   ₹241/lot gross  → -₹39 net     ⚠ marginal
+#   Thu DTE=5:  61% WR,    ₹22/lot gross  → -₹258 net    ❌
+#   Wed DTE=6:  60% WR,    ₹47/lot gross  → -₹233 net    ❌
+# Wed + Thu net-negative after costs → skip both.
+IC_SKIP_DAYS       = {2, 3}  # 2=Wednesday, 3=Thursday. Fri kept (marginal but +EV without costs)
 
 HEADERS = {
     "access-token": TOKEN,
@@ -2037,19 +2041,22 @@ def main():
         return
 
     # 2. Day-of-week filter (IC only)
-    if IRON_CONDOR_MODE and IC_SKIP_WEDNESDAY:
+    if IRON_CONDOR_MODE and IC_SKIP_DAYS:
         from datetime import datetime as _dt
         _today_ist = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
-        if _today_ist.weekday() == 2:   # 2 = Wednesday
+        if _today_ist.weekday() in IC_SKIP_DAYS:
+            _dow_name = {2: "Wednesday (DTE 6)", 3: "Thursday (DTE 5)"}.get(
+                _today_ist.weekday(), f"Day {_today_ist.weekday()}"
+            )
             notify.send(
-                f"⏸  <b>No Trade — Wednesday (DTE 6)</b>\n"
+                f"⏸  <b>No Trade — {_dow_name}</b>\n"
                 f"─────────────────────\n"
                 f"{today_wd}  ·  {today_label}\n\n"
-                f"NF Tuesday expiry → Wednesday = DTE 6 (worst entry day).\n"
-                f"Theta decay too slow relative to round-trip cost.\n"
-                f"Resuming Thursday–Tuesday."
+                f"NF Tuesday expiry → {_dow_name} = net-negative after costs.\n"
+                f"Post-Sep-2025 backtest: 60% WR, ~₹30/lot gross vs ₹280 costs.\n"
+                f"Trading Mon / Tue / Fri only."
             )
-            notify.log("IC day-of-week filter: Wednesday DTE=6 skipped")
+            notify.log(f"IC day-of-week filter: {_dow_name} skipped")
             return
 
     # 3. Read signal

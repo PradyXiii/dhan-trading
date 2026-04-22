@@ -259,6 +259,7 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | Backtest DOW breakdown shows Thursday as best day | Backtest data 2021–Aug 2025 used Thursday expiry; only 7 months (Sep 2025–Apr 2026) use Tuesday expiry. Thursday "expiry day" pattern dominates the stats. | DOW stats are biased toward old Thursday-expiry world. Current (live) DOW profile: Tue = DTE 0 (best), Mon = DTE 1, Wed = DTE 6 (worst same-day). Friday = DTE 4. Don't use pre-Sep-2025 backtest DOW breakdown to judge current regime. |
 | IC lot sizing gave 5 lots instead of 1 | Used `RISK_PCT=5% × capital / risk_per_lot` formula — `risk_per_lot` was theoretical P&L not actual SPAN margin | Fixed: call Dhan `/v2/margincalculator/multi` with all 4 legs × 1 lot → get actual margin → `lots = floor(capital / actual_margin)`. Param key = `scripList` not `scripts` (DH-905 error). |
 | TP frac mismatch: live 0.90 vs backtest 0.65 | `CREDIT_TP_FRAC = 0.90` in live code while backtest used 0.65 | Always verify TP/SL fracs match between `backtest_spreads.py` strategy dict and `auto_trader.py` / `spread_monitor.py` constants. Current correct value: 0.65 (retain 65% of credit). |
+| Wednesday + Thursday net-negative in post-Sep-2025 regime | Post-Sep-2025 backtest: Wed 60% WR ₹47/lot, Thu 61% WR ₹22/lot. After ₹280 costs = -₹233 and -₹258 per lot | `IC_SKIP_DAYS = {2, 3}` in auto_trader.py. Only trade Mon/Tue/Fri (~141/yr). Re-evaluate after 12+ months of Tuesday-expiry data. |
 
 ---
 
@@ -325,6 +326,9 @@ CREDIT_TP_FRAC   = 0.65          # TP when spread cost falls to net_credit × 0.
 ML_CONF_THRESHOLD = 0.55         # skip trade when ML ensemble confidence below this
 VIX_MIN_TRADE     = 13.0         # dynamic — analyze_confidence.py --write-threshold updates nightly
 VIX_MAX_TRADE     = 20.0         # ceiling — panic regime above this
+IC_SKIP_DAYS      = {2, 3}       # skip Wed (DTE=6) + Thu (DTE=5) — both net-negative after costs
+                                  # Post-Sep-2025 real-data: Wed 60%WR ₹47/lot, Thu 61%WR ₹22/lot
+                                  # Trading days: Mon (DTE=1, 97%WR) + Tue (DTE=0, 100%WR) + Fri (DTE=4, 80%WR)
 
 # Naked-option legacy params (only used when CREDIT_SPREAD_MODE=False)
 SL_PCT       = 0.15              # 15% stop-loss on premium
