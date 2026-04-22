@@ -712,9 +712,9 @@ def run_spread_backtest(strategy_key, ml=False, adaptive=False,
                 continue
 
         # Date range filter
-        if start_date is not None and date < start_date:
+        if start_date is not None and date < pd.Timestamp(start_date):
             continue
-        if end_date is not None and date > end_date:
+        if end_date is not None and date > pd.Timestamp(end_date):
             continue
 
         # Day-of-week filter (0=Mon … 4=Fri)
