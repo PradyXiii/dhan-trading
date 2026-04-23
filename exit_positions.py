@@ -422,6 +422,44 @@ _EXIT_WINDOW_END_MINS   = 3 * 60 + 20   # 3:20 PM IST hard deadline
 _RETRY_INTERVAL_SECS    = 60            # retry every 60 s within the window
 
 
+def _exit_all_positions_api() -> bool:
+    """
+    Primary exit: DELETE /v2/positions — one Dhan call closes all open positions.
+    Returns True on SUCCESS; False means fall back to _squareoff_all().
+    Always returns False in DRY_RUN so dry-run logging stays in _squareoff_all().
+    """
+    if DRY_RUN:
+        return False
+    try:
+        resp = requests.delete("https://api.dhan.co/v2/positions",
+                               headers=HEADERS, timeout=15)
+        data = resp.json()
+        if data.get("status") == "SUCCESS":
+            notify.log(f"EXIT ALL via DELETE /v2/positions: {data.get('message', '')}")
+            return True
+        notify.log(f"EXIT ALL API non-SUCCESS {resp.status_code}: {data}")
+        return False
+    except Exception as e:
+        notify.log(f"EXIT ALL API exception: {e}")
+        return False
+
+
+def _positions_to_results(positions: list) -> list:
+    """Build the result-dict list for Telegram when DELETE API handled the exit."""
+    results = []
+    for pos in positions:
+        symbol  = str(pos.get("tradingSymbol", pos.get("securityId", "?")))
+        net_qty = int(pos.get("netQty", 0))
+        avg     = float(pos.get("costPrice",        pos.get("buyAvg",        0)))
+        ltp     = float(pos.get("lastTradedPrice",  pos.get("ltp",           0)))
+        pnl     = float(pos.get("unrealizedProfit", pos.get("unrealizedPnl", 0)))
+        results.append({
+            "symbol": symbol, "qty": net_qty, "avg": avg,
+            "ltp": ltp, "pnl": pnl, "order_id": "EXIT_ALL_API", "error": None,
+        })
+    return results
+
+
 def _ist_mins_now() -> int:
     """Current IST time in minutes since midnight."""
     now_ist = datetime.now(_IST)
@@ -557,15 +595,30 @@ def main():
     attempt = 0
 
     # ── Retry loop: pulse every 60 s from 3:10 to 3:20 PM IST ────────────────
-    # If called before 3:10 PM (e.g. dry-run or early manual call), still executes
-    # one pass immediately then loops if within window.
+    # Primary path: DELETE /v2/positions (one Dhan call, fastest).
+    # Backup path:  _squareoff_all() leg-by-leg (also handles DRY_RUN logging).
     while True:
         attempt += 1
         notify.log(f"Exit attempt #{attempt}: {len(positions)} position(s) remaining.")
+
+        # Primary: EXIT ALL API
+        if _exit_all_positions_api():
+            if not DRY_RUN:
+                time.sleep(15)
+            remaining = get_open_positions()
+            if len(remaining) == 0:
+                notify.log(f"All positions closed via EXIT ALL API on attempt #{attempt}.")
+                final_results.extend(_positions_to_results(positions))
+                break
+            notify.log(
+                f"EXIT ALL API returned SUCCESS but {len(remaining)} position(s) still open "
+                f"— falling back to leg-by-leg.")
+            positions = remaining
+
+        # Backup (or DRY_RUN): leg-by-leg squareoff
         results = _squareoff_all(positions)
         final_results.extend(results)
 
-        # Wait briefly for orders to register, then re-check open positions
         if not DRY_RUN:
             time.sleep(15)
         remaining = get_open_positions()

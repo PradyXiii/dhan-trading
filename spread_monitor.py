@@ -135,6 +135,27 @@ def _get_ltps(security_ids: list) -> dict:
         return {}
 
 
+# ── Primary exit: DELETE /v2/positions ───────────────────────────────────────
+
+def _exit_all_api() -> bool:
+    """
+    Primary exit: DELETE /v2/positions — one call closes all open positions.
+    Returns True on SUCCESS; False means fall back to leg-by-leg functions.
+    """
+    try:
+        resp = requests.delete("https://api.dhan.co/v2/positions",
+                               headers=HEADERS, timeout=15)
+        data = resp.json()
+        if data.get("status") == "SUCCESS":
+            notify.log(f"EXIT ALL via DELETE /v2/positions: {data.get('message', '')}")
+            return True
+        notify.log(f"EXIT ALL API non-SUCCESS {resp.status_code}: {data}")
+        return False
+    except Exception as e:
+        notify.log(f"EXIT ALL API exception: {e}")
+        return False
+
+
 # ── 2-leg spread close (BNF bear_call / bull_put) ────────────────────────────
 
 def _close_spread(intent: dict) -> dict:
@@ -397,8 +418,9 @@ def main():
         reason = "SL"
 
         if not paper:
-            close_result = _close_ic(intent)
-            notify.log(f"IC exit ({reason}) — {close_result}")
+            if not _exit_all_api():                    # primary: one DELETE call
+                close_result = _close_ic(intent)       # backup: leg-by-leg
+                notify.log(f"IC exit backup ({reason}) — {close_result}")
         else:
             notify.log(f"IC exit ({reason}) — PAPER, no real order")
 
@@ -473,8 +495,9 @@ def main():
         reason = "SL"
 
         if not paper:
-            close_result = _close_straddle(intent, ce_ltp=ce_ltp, pe_ltp=pe_ltp)
-            notify.log(f"Straddle exit ({reason}) — {close_result}")
+            if not _exit_all_api():                                                    # primary
+                close_result = _close_straddle(intent, ce_ltp=ce_ltp, pe_ltp=pe_ltp)  # backup
+                notify.log(f"Straddle exit backup ({reason}) — {close_result}")
         else:
             notify.log(f"Straddle exit ({reason}) — PAPER, no real order")
 
@@ -539,8 +562,9 @@ def main():
     reason = "SL" if hit_sl else "TP"
 
     if not paper:
-        close_result = _close_spread(intent)
-        notify.log(f"Spread exit ({reason}) — close result: {close_result}")
+        if not _exit_all_api():                    # primary: one DELETE call
+            close_result = _close_spread(intent)   # backup: leg-by-leg
+            notify.log(f"Spread exit backup ({reason}) — {close_result}")
     else:
         notify.log(f"Spread exit ({reason}) — PAPER, no real order")
 

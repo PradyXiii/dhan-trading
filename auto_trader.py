@@ -1712,6 +1712,36 @@ def _fetch_spread_margin_per_lot(short_sid, short_ltp, long_sid, long_ltp) -> fl
     return float(BULL_PUT_MARGIN_PER_LOT)
 
 
+def _setup_pnl_exit(net_credit: float, lots: int):
+    """
+    Safety net: POST /v2/pnlExit — fires only if spread_monitor.py misses the SL
+    (VM crash, LTP API down). lossValue mirrors our SL level so Dhan auto-exits
+    before losses exceed the SL threshold. Resets at end of trading session.
+    """
+    if DRY_RUN or PAPER_MODE:
+        return
+    qty          = lots * LOT_SIZE
+    loss_value   = round(net_credit * CREDIT_SL_FRAC * qty, 2)
+    profit_value = round(net_credit * qty * 5, 2)  # 5× theoretical max — won't trigger normally
+    payload = {
+        "profitValue":      str(profit_value),
+        "lossValue":        str(loss_value),
+        "productType":      ["INTRADAY", "DELIVERY"],
+        "enableKillSwitch": False,
+    }
+    try:
+        resp = requests.post("https://api.dhan.co/v2/pnlExit",
+                             headers=HEADERS, json=payload, timeout=10)
+        data = resp.json()
+        if data.get("pnlExitStatus") == "ACTIVE":
+            notify.log(
+                f"P&L exit active: loss ₹{loss_value:,.0f}  profit ₹{profit_value:,.0f}")
+        else:
+            notify.log(f"P&L exit setup non-ACTIVE: {data}")
+    except Exception as e:
+        notify.log(f"P&L exit setup failed (non-critical): {e}")
+
+
 def _get_oc_leg(oc: dict, strike: float, opt_type_lc: str):
     """Return (security_id, ltp) for a strike from the OC dict, or (None, 0.0)."""
     for k in [f"{float(strike):.6f}", str(int(strike)), f"{float(strike):.1f}"]:
@@ -2583,6 +2613,7 @@ def main():
             if not DRY_RUN:
                 _write_today_straddle_trade(
                     st, signal, dte, score, exp_used, ml_conf, order_result)
+                _setup_pnl_exit(st["net_credit"], st["lots"])
 
             mode = order_result.get("mode")
             if mode == "DRY_RUN":
@@ -2689,6 +2720,7 @@ def main():
                 buy_oid=order_result.get("buy_oid"),
                 sell_oid=order_result.get("sell_oid"),
             )
+            _setup_pnl_exit(net_credit, lots)
         return
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2760,6 +2792,7 @@ def main():
                 buy_oid=order_result.get("buy_oid"),
                 sell_oid=order_result.get("sell_oid"),
             )
+            _setup_pnl_exit(net_credit, lots)
         return
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2857,6 +2890,7 @@ def main():
 
         if not DRY_RUN:
             _write_today_ic_trade(ic, signal, dte, score, exp_used, ml_conf, order_result)
+            _setup_pnl_exit(net_credit, lots)
 
         mode = order_result.get("mode")
 
