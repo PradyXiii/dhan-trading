@@ -785,6 +785,17 @@ def compute_features(df):
     _dxy_ret5 = (_dxy / _dxy.shift(5) - 1).fillna(0.0) * 100
     d['dxy_vix_interact'] = _dxy_ret5 * d['vix_pct_rank_252']
 
+    # ── VIX 3-day rate of change (fear acceleration) ─────────────────────────────
+    d['vix_roc3'] = ((_vix / _vix.shift(3) - 1) * 100).fillna(0.0)
+
+    # ── Trend consistency: fraction of up-days in last 5 sessions ────────────────
+    _daily_up = (_c > _c.shift(1)).astype(float)  # 1 if yesterday up vs day before
+    _up_count = _daily_up.rolling(5, min_periods=3).sum()  # 0-5 up days
+    d['nf_trend_consistency'] = (_up_count / 5 * 2 - 1).fillna(0.0)  # rescale to -1..+1
+
+    # ── VIX acceleration × trend consistency interaction ──────────────────────────
+    d['vix_accel_trend'] = d['vix_roc3'] * d['nf_trend_consistency']
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -870,6 +881,10 @@ FEATURE_COLS = [
     # OI directional bias + IV acceleration + ADX-momentum
     "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
     "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    # VIX acceleration + trend consistency
+    "vix_roc3",              # 3-day VIX rate of change — fear acceleration/deceleration
+    "nf_trend_consistency",  # fraction of up-days in last 5 — trend cleanliness (-1..+1)
+    "vix_accel_trend",       # VIX ROC × trend consistency — accelerating fear in clean trend
     # Currency/macro stress features
     "usdinr_zscore",        # USDINR 60d z-score — rupee stress → equity risk-off
     "crude_mom20",          # crude 20-day momentum — inflation/macro signal
