@@ -112,7 +112,8 @@ def _build_compile_prompt(raw_content: str, raw_filename: str) -> tuple[str, str
     return system, user
 
 
-def _call_claude(system: str, user: str) -> dict | None:
+def _call_claude(system: str, user: str, raw: bool = False) -> dict | str | None:
+    """Call Claude API. raw=True returns plain text; raw=False parses as JSON dict."""
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         print("ERROR: ANTHROPIC_API_KEY not set in .env")
@@ -127,7 +128,9 @@ def _call_claude(system: str, user: str) -> dict | None:
             messages=[{"role": "user", "content": user}],
         )
         text = response.content[0].text.strip()
-        # Strip markdown fences if present
+        if raw:
+            return text
+        # Strip markdown fences then parse JSON
         if text.startswith("```"):
             text = text.split("```", 2)[1]
             if text.startswith("json"):
@@ -188,12 +191,11 @@ def _lint(deep: bool = False):
             "Return a numbered list. If none found, return 'No contradictions found.'"
         )
         user = f"Review these wiki pages for contradictions:\n{all_content}"
-        result = _call_claude(system, user)
+        result = _call_claude(system, user, raw=True)
         if result:
             print("Contradiction check result:")
             print(result)
         else:
-            # _call_claude returns dict for compile, but here we want raw text
             print("  (Claude API unavailable for deep lint)")
 
 
@@ -207,6 +209,10 @@ def _query(question: str, save: bool = True):
         rel = str(page.relative_to(_WIKI)).replace("\\", "/")
         all_content += f"\n\n### {rel}\n{page.read_text(encoding='utf-8')[:3000]}"
 
+    if not all_content.strip():
+        print("  Wiki is empty — run wiki_compiler.py first to compile raw discoveries.")
+        return
+
     system = (
         "You are a knowledge base for an automated Nifty50 options trading system. "
         "Answer the question using ONLY information from the wiki pages provided. "
@@ -216,38 +222,24 @@ def _query(question: str, save: bool = True):
     )
     user = f"Wiki pages:\n{all_content}\n\nQuestion: {question}"
 
-    # Use raw text call for query (not JSON)
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("ERROR: ANTHROPIC_API_KEY not set")
+    answer = _call_claude(system, user, raw=True)
+    if not answer:
         return
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS,
-            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": user}],
-        )
-        answer = response.content[0].text.strip()
-        print(f"\nAnswer:\n{answer}\n")
+    print(f"\nAnswer:\n{answer}\n")
 
-        if save:
-            # Save valuable query results as new wiki pages
-            slug = question.lower()[:40].replace(" ", "_").replace("?", "")
-            slug = "".join(c for c in slug if c.isalnum() or c == "_")
-            page_path = f"queries/{slug}.md"
-            content = (
-                f"# Query: {question}\n\n"
-                f"**Asked:** {_today_ist()}\n\n"
-                f"## Answer\n\n{answer}\n\n"
-                f"## Related pages\n*(add links manually)*\n"
-            )
-            _write_wiki_page(page_path, content)
-            _append_log(f"query | '{question[:60]}' → saved as {page_path}")
-            print(f"  Answer saved to: docs/wiki/{page_path}")
-    except Exception as e:
-        print(f"Query failed: {e}")
+    if save:
+        slug = question.lower()[:40].replace(" ", "_").replace("?", "")
+        slug = "".join(c for c in slug if c.isalnum() or c == "_")
+        page_path = f"queries/{slug}.md"
+        content = (
+            f"# Query: {question}\n\n"
+            f"**Asked:** {_today_ist()}\n\n"
+            f"## Answer\n\n{answer}\n\n"
+            f"## Related pages\n*(add links manually)*\n"
+        )
+        _write_wiki_page(page_path, content)
+        _append_log(f"query | '{question[:60]}' → saved as {page_path}")
+        print(f"  Answer saved to: docs/wiki/{page_path}")
 
 
 def _refresh_research_program():
@@ -264,7 +256,11 @@ def _refresh_research_program():
         print("  Skipping research program refresh (files not found).")
         return
 
-    history = json.loads(exp_history.read_text())
+    try:
+        history = json.loads(exp_history.read_text())
+    except (json.JSONDecodeError, ValueError):
+        print("  Skipping research program refresh (experiment_history.json malformed).")
+        return
     if not history:
         return
 
