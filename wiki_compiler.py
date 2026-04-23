@@ -130,12 +130,15 @@ def _call_claude(system: str, user: str, raw: bool = False) -> dict | str | None
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
+        # Streaming required when max_tokens could exceed 10-min server timeout.
+        # .get_final_message() assembles the full message object once stream ends.
+        with client.messages.stream(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user}],
-        )
+        ) as stream:
+            response = stream.get_final_message()
         text = response.content[0].text.strip()
         stop_reason = getattr(response, "stop_reason", "?")
         usage = getattr(response, "usage", None)
