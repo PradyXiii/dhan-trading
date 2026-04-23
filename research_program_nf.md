@@ -163,3 +163,31 @@ Before proposing any experiment:
 - DTE ≤ 3 (max theta)
 - No gap > 1.5% expected
 - PCR near neutral (0.9–1.1)
+
+
+---
+
+## Recently tried (auto-updated 2026-04-24, last 19 experiments)
+
+### Kept (11 experiments improved composite):
+  ✅ 2026-04-17: Remove noisy features (crude_ret, dxy_ret, us10y_chg, usdinr_ret, pcr, pcr_ma5, pcr_chg, fii_net_cash_z) that likely add noise for RandomForest with limited data
+  ✅ 2026-04-18: Add gap-momentum alignment, IV-direction interaction, and 52w-high regime interaction features
+  ✅ 2026-04-18: Add VIX-trend interaction, prev_body_momentum, and PCR/FII features with proper computation
+  ✅ 2026-04-18: Add ADX14 computation before FEATURE_COLS reference and add adx_trend_interact feature combining ADX with trend direction
+  ✅ 2026-04-23: Add mean-reversion signal: distance from 10-day VWAP proxy (volume-weighted), plus RSI-regime interaction (oversold/overbought × trend direction) and a momentum acceleration feature (ret5 - ret20 normalized)
+  ✅ 2026-04-23: Add OI-weighted directional bias and straddle change rate features: oi_dir_bias combines ATM OI imbalance with put/call skew for a stronger directional signal; straddle_velocity measures rate of change of straddle premium (IV acceleration); plus an ADX-momentum interaction that amplifies momentum signals when trend is strong
+  ✅ 2026-04-23: Add mean-reversion features: nf_ret5_zscore (z-scored 5-day return using 60d window) captures overextended short-term moves, and pcr_oi_combined (PCR from OI surface × straddle expansion) captures options market positioning. Also add vix_gap_regime (VIX percentile rank × gap direction) to weight gaps by volatility regime.
+  ✅ 2026-04-23: Add USDINR z-scored level (currency stress indicator), crude oil momentum signal, and a DXY-VIX interaction feature. USDINR weakening signals risk-off for Indian equities; crude momentum impacts inflation expectations; DXY strength × VIX captures global risk-off episodes.
+  ✅ 2026-04-24: Add VIX rate-of-change (3-day) and trend consistency (count of same-direction days in last 5) features. VIX ROC captures fear acceleration/deceleration which is critical for IC loss prediction. Trend consistency measures how clean the recent trend is - choppy markets (2-3/5) are better for IC than clean trends (5/5).
+  ✅ 2026-04-24: Add EMA separation (EMA20 vs EMA50 distance as %) and IV rank 20-day features. EMA separation captures trend maturity - wide separation means established trend (good for directional plays), narrow means consolidation (good for IC). IV rank shows where current IV sits in its recent range - sell premium when IV rank is high.
+  ✅ 2026-04-24: Add nf_vol_trend_ratio (realized vol divided by absolute trend magnitude - low ratio = clean trend ideal for directional, high ratio = choppy ideal for IC) and vix_ema_separation interaction (VIX regime × trend maturity). These capture the key domain insight: strong trend + low vol = best IC entry, while weak trend + high vol = dangerous.
+
+### Discarded (8 experiments didn't help):
+  ❌ 2026-04-18: Add gap-momentum alignment and IV-direction interaction features
+  ❌ 2026-04-18: Add ADX-weighted trend signal and gap-ema alignment interaction features [CRASHED/FAILED]
+  ❌ 2026-04-18: Add ADX14 computation (was missing, caused exp3 crash) and interaction features: gap_ema_align and iv_x_vix_dir
+  ❌ 2026-04-18: Add rule_score_lag1 (yesterday's conviction momentum) and remove prev_body_pct and bn_ret60 which may add noise [CRASHED/FAILED]
+  ❌ 2026-04-23: Add USDINR momentum and crude oil regime features as macro risk signals, plus a VIX-term-structure proxy (vix_open vs vix_close lagged) and a volume spike detector
+  ❌ 2026-04-23: Add overnight_range feature (gap vs prev range ratio) and vix_mean_revert (VIX distance from 20d mean normalized) plus a combined vol_regime_signal (HV20 rank × VIX percentile interaction). These capture volatility regime persistence and mean-reversion dynamics.
+  ❌ 2026-04-24: Add macro_alignment_score (count of agreeing macro signals) and sp_vix_diverge (S&P up but VIX also up divergence flag). macro_alignment captures cross-asset consensus which increases conviction. sp_vix_diverge flags unusual divergences that often precede reversals - critical for IC loss avoidance.
+  ❌ 2026-04-24: Add PCR momentum (3-day change in PCR) and VIX-DTE interaction features. PCR momentum captures building fear/complacency trend - rising PCR means put buying accelerating which is critical for detecting emerging panic days that kill IC positions. VIX-DTE interaction captures the key domain insight that high VIX + low DTE is dangerous for IC shorts while low VIX + high DTE is ideal theta harvesting.
