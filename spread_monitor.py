@@ -243,8 +243,11 @@ def _close_ic(intent: dict) -> dict:
 
 # ── 2-leg straddle close (NF short straddle) ─────────────────────────────────
 
-def _close_straddle(intent: dict) -> dict:
-    """BUY back both short legs: BUY ATM CE + BUY ATM PE."""
+def _close_straddle(intent: dict, ce_ltp: float = 0.0, pe_ltp: float = 0.0) -> dict:
+    """
+    BUY back both short legs. Close the challenged (higher LTP = more ITM) leg first
+    to stop the bleeding. The winning (lower LTP, nearly OTM) leg closes second.
+    """
     qty     = int(intent["lots"]) * int(intent.get("lot_size", 65))
     day_tag = date.today().strftime("%Y%m%d")
 
@@ -263,11 +266,15 @@ def _close_straddle(intent: dict) -> dict:
     if DRY_RUN:
         return {"ce_buy_back": "DRY_RUN", "pe_buy_back": "DRY_RUN"}
 
+    # Higher LTP = more ITM = challenged leg = close first
+    legs = [
+        ("BUY", intent["ce_sid"], "ce_buy_back", ce_ltp),
+        ("BUY", intent["pe_sid"], "pe_buy_back", pe_ltp),
+    ]
+    legs.sort(key=lambda x: x[3], reverse=True)  # ITM (highest cost) first
+
     result = {}
-    for trans, sid, tag in [
-        ("BUY", intent["ce_sid"], "ce_buy_back"),
-        ("BUY", intent["pe_sid"], "pe_buy_back"),
-    ]:
+    for trans, sid, tag, _ in legs:
         try:
             r = requests.post(
                 "https://api.dhan.co/v2/orders", headers=HEADERS,
@@ -466,7 +473,7 @@ def main():
         reason = "SL"
 
         if not paper:
-            close_result = _close_straddle(intent)
+            close_result = _close_straddle(intent, ce_ltp=ce_ltp, pe_ltp=pe_ltp)
             notify.log(f"Straddle exit ({reason}) — {close_result}")
         else:
             notify.log(f"Straddle exit ({reason}) — PAPER, no real order")
