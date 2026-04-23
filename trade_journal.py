@@ -110,7 +110,7 @@ def _load_intent():
     try:
         with open(INTENT_FILE) as f:
             d = json.load(f)
-        if d.get("date") != date.today().isoformat():
+        if d.get("date") != datetime.now(_IST).date().isoformat():
             notify.log(f"today_trade.json is from {d.get('date')}, not today — skipping")
             return None
         return d
@@ -304,7 +304,7 @@ def _journal_ic(intent: dict, today_label: str):
         oracle_correct = pnl_inr > 0
 
     row = {
-        "date":              date.today().isoformat(),
+        "date":              datetime.now(_IST).date().isoformat(),
         "strategy":          "nf_iron_condor",
         "signal":            signal,
         "ce_short_strike":   ce_short_strike,
@@ -413,7 +413,7 @@ def _journal_spread(intent: dict, today_label: str):
         oracle_correct = pnl_inr > 0
 
     row = {
-        "date":              date.today().isoformat(),
+        "date":              datetime.now(_IST).date().isoformat(),
         "strategy":          strategy,
         "signal":            signal,
         "short_strike":      short_strike,
@@ -505,7 +505,7 @@ def _journal_straddle(intent: dict, today_label: str):
         oracle_correct = pnl_inr > 0
 
     row = {
-        "date":              date.today().isoformat(),
+        "date":              datetime.now(_IST).date().isoformat(),
         "strategy":          "nf_short_straddle",
         "signal":            signal,
         "atm_strike":        atm_strike,
@@ -633,7 +633,7 @@ def main():
 
     # 4. Append to CSV
     row = {
-        "date":               date.today().isoformat(),
+        "date":               datetime.now(_IST).date().isoformat(),
         "signal":             signal,
         "strike":             strike,
         "lots":               lots,

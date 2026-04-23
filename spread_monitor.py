@@ -100,7 +100,7 @@ def _load_intent() -> dict:
     try:
         with open(INTENT) as f:
             d = json.load(f)
-        if d.get("date") != date.today().isoformat():
+        if d.get("date") != datetime.now(_IST).date().isoformat():
             return {}
         return d
     except Exception:
@@ -323,7 +323,7 @@ def _update_paper_csv_exit(intent: dict):
     try:
         with open(PAPER_CSV) as f:
             rows = list(csv.DictReader(f))
-        today_s = date.today().isoformat()
+        today_s = datetime.now(_IST).date().isoformat()
 
         exit_cols = [
             "exit_reason", "exit_spread",

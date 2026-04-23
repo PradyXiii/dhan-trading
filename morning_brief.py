@@ -255,7 +255,7 @@ def run() -> dict:
     result = _call_claude(headlines, live_ctx)
 
     output = {
-        "date":        date.today().isoformat(),
+        "date":        datetime.now(_ist).date().isoformat(),
         "generated":   datetime.now(timezone.utc).isoformat(),
         "direction":   result["direction"],
         "confidence":  result["confidence"],

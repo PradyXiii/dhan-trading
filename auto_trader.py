@@ -88,7 +88,7 @@ def _check_exit_marker():
     Skips check when yesterday was a weekend or NSE holiday (no trading, no exit needed).
     Called early in main() before any market data or order work.
     """
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = _ist_today() - timedelta(days=1)
     # No exit runs on weekends — skip
     if yesterday.weekday() >= 5:
         return
@@ -247,6 +247,14 @@ DRY_RUN   = "--dry-run" in sys.argv
 # IV crush). Paper-trading new spread strategy before risking ₹51K capital.
 PAPER_MODE = False
 
+# IST timezone helper — VM runs UTC. date.today() at 00:00-05:30 IST returns
+# yesterday UTC, mismatching IST-based trading schedule. Use this for today_trade.json
+# date field + any stale-check roundtrip.
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+def _ist_today():
+    return datetime.now(_IST_TZ).date()
+
+
 # ── Iron Condor Mode — Nifty50 (confirmed strategy, April 2026) ──────────────
 # NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
 # 5yr backtest: WR 84.6%, ₹1.17Cr total, ₹25L/yr avg, max DD -0.8%
@@ -371,7 +379,7 @@ def _check_lot_size():
     NF: 75 before Jan 6 2026, 65 from Jan 6 2026.
     Does NOT block trading — alerts operator to fix the constant.
     """
-    today = date.today()
+    today = _ist_today()
     if IRON_CONDOR_MODE:
         # Nifty50 lot size timeline
         expected = 65 if today >= date(2026, 1, 6) else 75
@@ -458,7 +466,7 @@ def _log_paper_trade(security_id, signal, lots, qty, premium, sl_price, tp_price
         "max_loss_inr", "max_profit_inr",
     ]
     row = {
-        "date":           date.today().isoformat(),
+        "date":           _ist_today().isoformat(),
         "signal":         signal,
         "security_id":    str(security_id),
         "lots":           int(lots),
@@ -499,7 +507,7 @@ def _log_paper_spread_trade(short_sid, long_sid, signal, lots, qty,
     ]
     max_loss_per_share = SPREAD_WIDTH - net_credit
     row = {
-        "date":           date.today().isoformat(),
+        "date":           _ist_today().isoformat(),
         "signal":         signal,
         "strategy":       "bear_call_credit" if signal == "CALL" else "bull_put_credit",
         "short_sid":      str(short_sid),
@@ -731,7 +739,7 @@ def _write_today_spread_trade(signal, short_sid, long_sid, short_strike, long_st
     """
     strategy = "bear_call_credit" if signal == "CALL" else "bull_put_credit"
     payload = {
-        "date":           date.today().isoformat(),
+        "date":           _ist_today().isoformat(),
         "strategy":       strategy,
         "signal":         signal,
         "short_sid":      str(short_sid),
@@ -774,7 +782,7 @@ def _write_today_trade(signal, strike, lots, dte, spot, oracle_premium,
     Data stays on VM only — gitignored.
     """
     payload = {
-        "date":           date.today().isoformat(),
+        "date":           _ist_today().isoformat(),
         "signal":         signal,
         "strike":         float(strike),
         "lots":           int(lots),
@@ -836,7 +844,7 @@ def _is_trading_day() -> bool:
 
     Update NSE_HOLIDAYS_2026 each December from the official NSE circular.
     """
-    today = date.today()
+    today = _ist_today()
     if today.weekday() >= 5:            # Saturday / Sunday
         return False
     return today not in NSE_HOLIDAYS_2026
@@ -1187,7 +1195,7 @@ def _append_chain_signals(chain_sig: dict, spot: float) -> None:
     try:
         import csv
         path     = f"{DATA_DIR}/options_atm_daily.csv"
-        today_s  = date.today().isoformat()
+        today_s  = _ist_today().isoformat()
         fieldnames = ["date", "call_premium", "put_premium",
                       "max_pain_strike", "max_pain_dist", "gex_positive", "straddle"]
 
@@ -1870,7 +1878,7 @@ def _log_paper_ic_trade(ic: dict, qty: int):
     ]
     max_loss_per_share = SPREAD_WIDTH - ic["net_credit"]
     row = {
-        "date":            date.today().isoformat(),
+        "date":            _ist_today().isoformat(),
         "signal":          "IC",
         "strategy":        "nf_iron_condor",
         "ce_short_sid":    str(ic["ce_short_sid"]),
@@ -1913,7 +1921,7 @@ def _write_today_ic_trade(ic: dict, signal: str, dte: float, score: int,
                           expiry: date, ml_conf: float, order_result: dict):
     """Write 4-leg IC trade intent to data/today_trade.json."""
     payload = {
-        "date":            date.today().isoformat(),
+        "date":            _ist_today().isoformat(),
         "strategy":        "nf_iron_condor",
         "signal":          signal,
         "atm_strike":      float(ic["atm_strike"]),
@@ -2183,7 +2191,7 @@ def _log_paper_straddle_trade(st: dict, qty: int):
         "ce_ltp", "pe_ltp", "net_credit", "max_profit_inr",
     ]
     row = {
-        "date":           date.today().isoformat(),
+        "date":           _ist_today().isoformat(),
         "signal":         "STRADDLE",
         "strategy":       "nf_short_straddle",
         "ce_sid":         str(st["ce_sid"]),
@@ -2215,7 +2223,7 @@ def _write_today_straddle_trade(st: dict, signal: str, dte: float, score: int,
                                 expiry: date, ml_conf: float, order_result: dict):
     """Write short straddle trade intent to data/today_trade.json."""
     payload = {
-        "date":           date.today().isoformat(),
+        "date":           _ist_today().isoformat(),
         "strategy":       "nf_short_straddle",
         "signal":         signal,
         "atm_strike":     float(st["atm_strike"]),

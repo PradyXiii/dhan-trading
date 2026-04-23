@@ -58,7 +58,7 @@ def load_trade() -> dict | None:
         return None
     with open(path) as f:
         t = json.load(f)
-    if str(t.get("date", "")) != str(date.today()):
+    if str(t.get("date", "")) != datetime.now(IST).date().isoformat():
         _log(f"today_trade.json dated {t.get('date')} — not today's trade.")
         return None
     return t
@@ -586,7 +586,7 @@ def _write_midday_checkpoint(record: dict) -> None:
     from pathlib import Path
 
     path      = Path(DATA_DIR) / "midday_checkpoints.csv"
-    today_str = str(date.today())
+    today_str = datetime.now(IST).date().isoformat()
 
     existing = []
     if path.exists():

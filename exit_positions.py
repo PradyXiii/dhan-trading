@@ -47,7 +47,7 @@ def _write_exit_marker():
     """
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        marker = os.path.join(DATA_DIR, f"exit_completed_{date.today().isoformat()}.marker")
+        marker = os.path.join(DATA_DIR, f"exit_completed_{datetime.now(_IST).date().isoformat()}.marker")
         with open(marker, "w") as f:
             f.write(f"exit_positions.py completed at "
                     f"{datetime.now(_IST).strftime('%H:%M:%S IST')}\n")
@@ -97,7 +97,7 @@ def _load_today_trade() -> dict:
     try:
         with open(path) as f:
             td = json.load(f)
-        if td.get("date") != date.today().isoformat():
+        if td.get("date") != datetime.now(_IST).date().isoformat():
             return {}
         return td
     except Exception:
