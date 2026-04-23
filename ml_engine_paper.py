@@ -785,6 +785,35 @@ def compute_features(df):
     _dxy_ret5 = (_dxy / _dxy.shift(5) - 1).fillna(0.0) * 100
     d['dxy_vix_interact'] = _dxy_ret5 * d['vix_pct_rank_252']
 
+    # ── VIX 3-day rate of change (fear acceleration) ─────────────────────────────
+    d['vix_roc3'] = ((_vix / _vix.shift(3) - 1) * 100).fillna(0.0)
+
+    # ── Trend consistency: fraction of up-days in last 5 sessions ────────────────
+    _daily_up = (_c > _c.shift(1)).astype(float)  # 1 if yesterday up vs day before
+    _up_count = _daily_up.rolling(5, min_periods=3).sum()  # 0-5 up days
+    d['nf_trend_consistency'] = (_up_count / 5 * 2 - 1).fillna(0.0)  # rescale to -1..+1
+
+    # ── VIX acceleration × trend consistency interaction ──────────────────────────
+    d['vix_accel_trend'] = d['vix_roc3'] * d['nf_trend_consistency']
+
+    # ── EMA separation (trend maturity signal) ────────────────────────────────
+    _ema50 = _c.ewm(span=50, adjust=False).mean()
+    d['ema_separation'] = (d['ema20'] - _ema50) / _ema50 * 100
+
+    # ── IV rank 20-day (where IV sits in recent range — premium richness) ─────
+    _iv = pd.to_numeric(d.get('call_iv_atm', pd.Series(dtype=float)), errors='coerce').shift(1)
+    _iv_min20 = _iv.rolling(20, min_periods=10).min()
+    _iv_max20 = _iv.rolling(20, min_periods=10).max()
+    _iv_range = (_iv_max20 - _iv_min20).replace(0, np.nan)
+    d['iv_rank_20'] = ((_iv - _iv_min20) / _iv_range).fillna(0.5)
+
+    # ── Vol-trend ratio: vol normalized by trend strength (IC quality signal) ──────
+    _abs_trend = d['trend5'].abs().replace(0, np.nan)
+    d['nf_vol_trend_ratio'] = (d['hv20'] / _abs_trend).clip(0, 50).fillna(10.0)
+
+    # ── VIX-EMA separation interaction: fear regime × trend maturity ──────────────
+    d['vix_ema_sep_interact'] = d['vix_pct_chg'] * d['ema_separation']
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -870,6 +899,16 @@ FEATURE_COLS = [
     # OI directional bias + IV acceleration + ADX-momentum
     "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
     "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    # Vol-trend quality + VIX-trend maturity interaction
+    "nf_vol_trend_ratio",    # HV20 / |trend5| — clean trend (low) vs choppy (high)
+    "vix_ema_sep_interact",  # vix_pct_chg × ema_separation — fear × trend maturity
+    # EMA separation + IV rank
+    "ema_separation",       # EMA20-EMA50 gap % — trend maturity / consolidation
+    "iv_rank_20",           # IV percentile in 20-day range — premium richness signal
+    # VIX acceleration + trend consistency
+    "vix_roc3",              # 3-day VIX rate of change — fear acceleration/deceleration
+    "nf_trend_consistency",  # fraction of up-days in last 5 — trend cleanliness (-1..+1)
+    "vix_accel_trend",       # VIX ROC × trend consistency — accelerating fear in clean trend
     # Currency/macro stress features
     "usdinr_zscore",        # USDINR 60d z-score — rupee stress → equity risk-off
     "crude_mom20",          # crude 20-day momentum — inflation/macro signal
