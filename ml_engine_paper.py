@@ -796,6 +796,17 @@ def compute_features(df):
     # ── VIX acceleration × trend consistency interaction ──────────────────────────
     d['vix_accel_trend'] = d['vix_roc3'] * d['nf_trend_consistency']
 
+    # ── EMA separation (trend maturity signal) ────────────────────────────────
+    _ema50 = _c.ewm(span=50, adjust=False).mean()
+    d['ema_separation'] = (d['ema20'] - _ema50) / _ema50 * 100
+
+    # ── IV rank 20-day (where IV sits in recent range — premium richness) ─────
+    _iv = pd.to_numeric(d.get('call_iv_atm', pd.Series(dtype=float)), errors='coerce').shift(1)
+    _iv_min20 = _iv.rolling(20, min_periods=10).min()
+    _iv_max20 = _iv.rolling(20, min_periods=10).max()
+    _iv_range = (_iv_max20 - _iv_min20).replace(0, np.nan)
+    d['iv_rank_20'] = ((_iv - _iv_min20) / _iv_range).fillna(0.5)
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -881,6 +892,9 @@ FEATURE_COLS = [
     # OI directional bias + IV acceleration + ADX-momentum
     "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
     "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    # EMA separation + IV rank
+    "ema_separation",       # EMA20-EMA50 gap % — trend maturity / consolidation
+    "iv_rank_20",           # IV percentile in 20-day range — premium richness signal
     # VIX acceleration + trend consistency
     "vix_roc3",              # 3-day VIX rate of change — fear acceleration/deceleration
     "nf_trend_consistency",  # fraction of up-days in last 5 — trend cleanliness (-1..+1)
