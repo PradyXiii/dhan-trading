@@ -291,6 +291,148 @@ def pick_best_strategy(results):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Monthly margin freshness check
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_live_bull_put_margin():
+    """
+    Query Dhan /v2/margincalculator/multi for a representative Bull Put spread (1 lot).
+    Uses the nearest expiry and ATM PE / ATM-150 PE from the live option chain.
+    Returns actual margin float or None on failure.
+    """
+    if not DHAN_TOKEN:
+        return None
+    try:
+        # Get nearest expiry
+        r = requests.post(
+            "https://api.dhan.co/v2/optionchain/expirylist",
+            headers=DHAN_HEADERS,
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        expiry = r.json().get("data", [None])[0]
+        if not expiry:
+            return None
+
+        # Get ATM PE and ATM-150 PE SIDs
+        r2 = requests.post(
+            "https://api.dhan.co/v2/optionchain",
+            headers=DHAN_HEADERS,
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": expiry},
+            timeout=10,
+        )
+        if r2.status_code != 200:
+            return None
+        inner = r2.json().get("data", {})
+        spot  = float(inner.get("last_price", 0))
+        oc    = inner.get("oc", {})
+        if not spot or not oc:
+            return None
+
+        # Find ATM strike (round to nearest 50)
+        atm = round(spot / 50) * 50
+        long_strike = atm - 150   # BUY ATM-150 PE
+
+        def _get_sid_ltp(strike, opt_type="pe"):
+            for k in [f"{float(strike):.6f}", str(int(strike)), f"{float(strike):.1f}"]:
+                if k in oc:
+                    sub = oc[k].get(opt_type) or oc[k].get(opt_type.upper()) or {}
+                    sid = sub.get("security_id") or sub.get("securityId")
+                    ltp = float(sub.get("last_price") or sub.get("ltp") or 0)
+                    if sid and ltp > 0:
+                        return str(sid), ltp
+            return None, 0.0
+
+        short_sid, short_ltp = _get_sid_ltp(atm)
+        long_sid,  long_ltp  = _get_sid_ltp(long_strike)
+        if not short_sid or not long_sid:
+            return None
+
+        # Get current lot size from auto_trader constants
+        text = AUTO_TRADER.read_text()
+        m = re.search(r"^LOT_SIZE\s*=\s*(\d+)", text, re.MULTILINE)
+        lot_size = int(m.group(1)) if m else 65
+
+        payload = {
+            "dhanClientId":    DHAN_CLIENT_ID,
+            "includePosition": True,
+            "includeOrders":   True,
+            "scripList": [
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": lot_size, "productType": "MARGIN",
+                 "securityId": short_sid, "price": float(short_ltp), "triggerPrice": 0},
+                {"exchangeSegment": "NSE_FNO", "transactionType": "BUY",
+                 "quantity": lot_size, "productType": "MARGIN",
+                 "securityId": long_sid, "price": float(long_ltp), "triggerPrice": 0},
+            ],
+        }
+        r3 = requests.post(
+            "https://api.dhan.co/v2/margincalculator/multi",
+            headers=DHAN_HEADERS, json=payload, timeout=10,
+        )
+        if r3.status_code == 200:
+            d = r3.json()
+            margin = float(d.get("total_margin") or d.get("totalMargin") or 0)
+            if margin > 5_000:
+                return margin
+    except Exception as e:
+        print(f"  Bull Put live margin fetch failed: {e}")
+    return None
+
+
+def check_and_patch_bull_put_margin(dry_run=False):
+    """
+    Compare BULL_PUT_MARGIN_PER_LOT fallback against live Dhan SPAN.
+    If off by more than 10%, auto-patch the constant so the fallback stays relevant.
+    Returns (live_margin, patched: bool, patch_msg: str).
+    """
+    live_margin = fetch_live_bull_put_margin()
+    if live_margin is None:
+        print("  Could not fetch live Bull Put margin — skipping freshness check.")
+        return None, False, ""
+
+    text = AUTO_TRADER.read_text()
+    m = re.search(r"^BULL_PUT_MARGIN_PER_LOT\s*=\s*(\d+)", text, re.MULTILINE)
+    if not m:
+        print("  BULL_PUT_MARGIN_PER_LOT not found in auto_trader.py")
+        return live_margin, False, ""
+
+    current_fallback = int(m.group(1))
+    drift_pct = abs(live_margin - current_fallback) / current_fallback
+
+    print(f"  Live Bull Put SPAN margin: ₹{live_margin:,.0f}  "
+          f"  Fallback: ₹{current_fallback:,.0f}  "
+          f"  Drift: {drift_pct:.1%}")
+
+    if drift_pct <= 0.10:
+        print("  Fallback within 10% of live margin — no patch needed.")
+        return live_margin, False, ""
+
+    # Patch: round up to next 1000 for headroom
+    new_fallback = int((live_margin // 1000 + 1) * 1000)
+    new_text = re.sub(
+        r"^(BULL_PUT_MARGIN_PER_LOT\s*=\s*)\d+",
+        lambda match: f"{match.group(1)}{new_fallback}",
+        text, flags=re.MULTILINE,
+    )
+
+    msg = f"BULL_PUT_MARGIN_PER_LOT: ₹{current_fallback:,} → ₹{new_fallback:,} (live SPAN ₹{live_margin:,.0f})"
+    if dry_run:
+        print(f"  [DRY RUN] Would patch: {msg}")
+        return live_margin, True, msg
+
+    try:
+        AUTO_TRADER.write_text(new_text)
+        print(f"  Patched auto_trader.py: {msg}")
+        return live_margin, True, msg
+    except Exception as e:
+        print(f"  Failed to patch: {e}")
+        return live_margin, False, ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Auto-patch auto_trader.py
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -521,6 +663,12 @@ def main():
             patches.append(f"auto_trader.py: LOT_SIZE updated {old_lot} → {current_lot}")
     else:
         print("\n[7] LOT_SIZE unchanged — no patch needed.")
+
+    # 6b. Monthly Bull Put margin freshness check
+    print("\n[7b] Checking Bull Put margin fallback freshness...")
+    live_margin, margin_patched, margin_msg = check_and_patch_bull_put_margin(dry_run=dry)
+    if margin_patched and margin_msg:
+        patches.append(f"auto_trader.py: {margin_msg}")
 
     # 7. Update state
     new_state = dict(state)
