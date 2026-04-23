@@ -138,7 +138,7 @@ def _get_ltps(security_ids: list) -> dict:
 # ── 2-leg spread close (BNF bear_call / bull_put) ────────────────────────────
 
 def _close_spread(intent: dict) -> dict:
-    """BUY back short leg, SELL long leg."""
+    """BUY back short leg first, then SELL long leg. Short first = no naked exposure between legs."""
     short_sid = str(intent["short_sid"])
     long_sid  = str(intent["long_sid"])
     qty       = int(intent["lots"]) * int(intent.get("lot_size", 30))
@@ -189,8 +189,10 @@ def _close_spread(intent: dict) -> dict:
 
 def _close_ic(intent: dict) -> dict:
     """
-    Close all 4 IC legs:
-    BUY back CE short, SELL CE long, BUY back PE short, SELL PE long.
+    Close all 4 IC legs — shorts first, then longs.
+    Order matters: buying back shorts first removes margin obligation before
+    selling wings. Selling a long wing while short is still open = naked short.
+    Sequence: BUY CE short → BUY PE short → SELL CE long → SELL PE long.
     """
     qty     = int(intent["lots"]) * int(intent.get("lot_size", 65))
     day_tag = date.today().strftime("%Y%m%d")
@@ -209,12 +211,14 @@ def _close_ic(intent: dict) -> dict:
 
     if DRY_RUN:
         return {leg: "DRY_RUN" for leg in
-                ["ce_buy_back", "ce_sell_long", "pe_buy_back", "pe_sell_long"]}
+                ["ce_buy_back", "pe_buy_back", "ce_sell_long", "pe_sell_long"]}
 
     legs = [
+        # Shorts first — removes obligation + margin risk immediately
         ("BUY",  intent["ce_short_sid"], "ce_buy_back"),
-        ("SELL", intent["ce_long_sid"],  "ce_sell_long"),
         ("BUY",  intent["pe_short_sid"], "pe_buy_back"),
+        # Longs second — wings are already paid for, safe to sell after shorts closed
+        ("SELL", intent["ce_long_sid"],  "ce_sell_long"),
         ("SELL", intent["pe_long_sid"],  "pe_sell_long"),
     ]
     result = {}

@@ -429,7 +429,13 @@ def _ist_mins_now() -> int:
 
 
 def _squareoff_all(positions) -> list:
-    """Attempt to square off every position in the list. Returns result records."""
+    """
+    Square off every position — shorts (netQty < 0) first, longs (netQty > 0) second.
+    Closing shorts first removes margin obligation before selling wings.
+    Selling a long wing while short is still open = naked short = margin spike.
+    """
+    # Sort: netQty < 0 (short, BUY to cover) → netQty > 0 (long, SELL to close)
+    positions = sorted(positions, key=lambda p: (0 if int(p.get("netQty", 0)) < 0 else 1))
     results = []
     for pos in positions:
         symbol  = str(pos.get("tradingSymbol", pos.get("securityId", "?")))
