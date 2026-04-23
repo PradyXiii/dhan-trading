@@ -31,7 +31,7 @@ _LOG        = _WIKI / "log.md"
 _IST        = timezone(timedelta(hours=5, minutes=30))
 
 MODEL       = "claude-opus-4-6"
-MAX_TOKENS  = 16384   # wiki pages can be large; 4K truncated mid-JSON causing parse errors
+MAX_TOKENS  = 32768   # Claude Opus 4.6 max output. Full wiki rewrites can be big
 
 WIKI_PAGES = {
     "strategy/ic_research.md":      "NF IC + Bull Put strategy research, backtest results, discarded strategies",
@@ -95,9 +95,13 @@ def _build_compile_prompt(raw_content: str, raw_filename: str) -> tuple[str, str
         "1. Return ONLY a JSON object — no markdown fences, no prose before or after.\n"
         "2. Each key = wiki page path relative to docs/wiki/ (e.g. 'bugs/known_issues.md').\n"
         "3. Each value = COMPLETE new content for that page (full replacement, not a diff).\n"
-        "4. Only include pages that actually need updating.\n"
+        "4. Only include pages that actually need updating based on raw content.\n"
         "5. If no updates needed, return exactly {} (empty object).\n"
         "6. Preserve all existing entries — never delete existing knowledge.\n"
+        "6a. Do NOT rewrite pages purely to reformat — only update when raw content\n"
+        "    adds new facts, bugs, or experiments not already in the page.\n"
+        "6b. Aim for minimum viable update — append new rows/entries to existing\n"
+        "    tables/sections rather than restructuring. Prefer SMALL delta.\n"
         "7. Keep [[wikilink]] cross-reference format.\n"
         "8. 'Last updated' date should be today: " + _today_ist() + "\n"
         "9. CRITICAL JSON escaping: inside string values, every newline must be \\n,\n"
@@ -133,6 +137,10 @@ def _call_claude(system: str, user: str, raw: bool = False) -> dict | str | None
             messages=[{"role": "user", "content": user}],
         )
         text = response.content[0].text.strip()
+        stop_reason = getattr(response, "stop_reason", "?")
+        usage = getattr(response, "usage", None)
+        out_tokens = getattr(usage, "output_tokens", "?") if usage else "?"
+
         if raw:
             return text
         # Strip markdown fences then parse JSON
@@ -144,21 +152,32 @@ def _call_claude(system: str, user: str, raw: bool = False) -> dict | str | None
         if not text:
             print("  Empty Claude response — nothing to update.")
             return {}
+
+        # Always save raw response for debugging (overwrite per run)
+        dump_path = _HERE / "data" / f"wiki_compile_raw_{_today_ist()}.txt"
+        dump_path.parent.mkdir(exist_ok=True)
+        dump_path.write_text(
+            f"=== stop_reason: {stop_reason} | output_tokens: {out_tokens} | chars: {len(text)} ===\n\n{text}",
+            encoding="utf-8",
+        )
+
+        # If Claude hit max_tokens, the response is truncated — no point parsing
+        if stop_reason == "max_tokens":
+            print(f"  Claude hit max_tokens ({out_tokens}). Response truncated. Saved → {dump_path}")
+            print(f"  Fix: raise MAX_TOKENS in wiki_compiler.py or simplify raw discovery file.")
+            return None
+
         # Extract biggest {...} block (tolerates prose before/after JSON)
         first = text.find("{")
         last  = text.rfind("}")
         if first == -1 or last == -1 or last <= first:
-            print(f"  No JSON object in response. First 300 chars:\n{text[:300]}")
-            return {}
+            print(f"  No JSON object in response (stop={stop_reason}, out_tokens={out_tokens}). Saved → {dump_path}")
+            return None
         text = text[first:last + 1]
         import json
         try:
             return json.loads(text)
         except json.JSONDecodeError as e:
-            # Save raw response for manual inspection
-            dump_path = _HERE / "data" / f"wiki_compile_failed_{_today_ist()}.txt"
-            dump_path.parent.mkdir(exist_ok=True)
-            dump_path.write_text(text, encoding="utf-8")
             print(f"  JSON parse failed ({e}). Raw response saved → {dump_path}")
             return None
     except Exception as e:
