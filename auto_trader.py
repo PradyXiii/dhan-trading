@@ -272,12 +272,12 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 #   Tue DTE=0: 100% WR, ₹4,011/lot gross → IC ✅
 #   Mon DTE=1:  97% WR, ₹1,123/lot gross → IC ✅
 #   Fri DTE=4: Bear Call (CALL days) +₹81/lot net, Bull Put (PUT days) -₹134/lot → Bear Call only ✅
-#   Mon DTE=1: IC 97% WR ✅  Tue DTE=0: IC 100% WR ✅ (expiry day, fastest theta)
-#   Wed DTE=6: all strategies net-negative → NO TRADE ❌
-#   Thu DTE=5, Fri DTE=4: IC backtest profitable but DTE risk higher; skip until capital grows.
-#   Bear Call Credit (Thu/Fri CALL) was -₹1.25L in 7 months — dumped.
-# Active trade days: Mon + Tue only.
-IC_SKIP_DAYS       = {2, 3, 4}  # 2=Wed (DTE 6), 3=Thu (DTE 5), 4=Fri (DTE 4) — IC Mon+Tue only
+# DOW backtest (Sep 2025+, Tue-expiry regime): IC profitable ALL 5 days.
+#   Mon DTE=1: 88.5% WR +₹32.7K  Tue DTE=0: 89.5% WR +₹38.9K
+#   Wed DTE=6: 95.8% WR +₹14.0K  Thu DTE=5: 100% WR +₹15.2K  Fri DTE=4: 100% WR +₹20.8K
+# "Wed is bad" rule was old Thu-expiry data — stale. Bear Call dumped (negative every day).
+# Trade every weekday. No skip days.
+IC_SKIP_DAYS       = set()      # no skip — IC profitable all 5 days in Tue-expiry regime
 
 STRADDLE_MARGIN_PER_LOT = 230_000   # upgrade threshold: actual Dhan SPAN ≈₹2,26,492 + ₹3,508 buffer
 MAX_LOTS_STRADDLE       = 5         # straddle uses ~2.5× IC margin — lower cap
