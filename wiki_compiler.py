@@ -31,7 +31,7 @@ _LOG        = _WIKI / "log.md"
 _IST        = timezone(timedelta(hours=5, minutes=30))
 
 MODEL       = "claude-opus-4-6"
-MAX_TOKENS  = 4096
+MAX_TOKENS  = 16384   # wiki pages can be large; 4K truncated mid-JSON causing parse errors
 
 WIKI_PAGES = {
     "strategy/ic_research.md":      "NF IC + Bull Put strategy research, backtest results, discarded strategies",
@@ -92,21 +92,26 @@ def _build_compile_prompt(raw_content: str, raw_filename: str) -> tuple[str, str
         "You are a knowledge base compiler for an automated Nifty50 options trading system. "
         "Your job: read raw discovery text and update the relevant wiki articles.\n\n"
         "Rules:\n"
-        "1. Return ONLY a JSON object — no markdown fences, no explanation outside JSON.\n"
+        "1. Return ONLY a JSON object — no markdown fences, no prose before or after.\n"
         "2. Each key = wiki page path relative to docs/wiki/ (e.g. 'bugs/known_issues.md').\n"
-        "3. Each value = the COMPLETE new content for that page (not a diff — full replacement).\n"
-        "4. Only include pages that actually need updating based on the raw content.\n"
-        "5. Preserve all existing entries — never delete existing knowledge.\n"
-        "6. Add new entries in the correct section.\n"
+        "3. Each value = COMPLETE new content for that page (full replacement, not a diff).\n"
+        "4. Only include pages that actually need updating.\n"
+        "5. If no updates needed, return exactly {} (empty object).\n"
+        "6. Preserve all existing entries — never delete existing knowledge.\n"
         "7. Keep [[wikilink]] cross-reference format.\n"
         "8. 'Last updated' date should be today: " + _today_ist() + "\n"
+        "9. CRITICAL JSON escaping: inside string values, every newline must be \\n,\n"
+        "   every double-quote must be \\\", every backslash must be \\\\. Markdown\n"
+        "   tables, code blocks, bullet lists all need proper \\n escaping. The output\n"
+        "   must parse via json.loads() without modification.\n"
     )
 
     user = (
         f"### Raw discovery file: {raw_filename}\n\n"
         f"```\n{raw_content}\n```\n\n"
         f"### Current wiki pages:\n{pages_context}\n\n"
-        "Which pages need updating? Return JSON: {\"path/to/page.md\": \"full updated content\", ...}"
+        "Return JSON: {\"path/to/page.md\": \"full updated content with \\\\n escaped\"} "
+        "or {} if no updates needed."
     )
 
     return system, user
@@ -136,8 +141,26 @@ def _call_claude(system: str, user: str, raw: bool = False) -> dict | str | None
             if text.startswith("json"):
                 text = text[4:]
             text = text.rsplit("```", 1)[0].strip()
+        if not text:
+            print("  Empty Claude response — nothing to update.")
+            return {}
+        # Extract biggest {...} block (tolerates prose before/after JSON)
+        first = text.find("{")
+        last  = text.rfind("}")
+        if first == -1 or last == -1 or last <= first:
+            print(f"  No JSON object in response. First 300 chars:\n{text[:300]}")
+            return {}
+        text = text[first:last + 1]
         import json
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            # Save raw response for manual inspection
+            dump_path = _HERE / "data" / f"wiki_compile_failed_{_today_ist()}.txt"
+            dump_path.parent.mkdir(exist_ok=True)
+            dump_path.write_text(text, encoding="utf-8")
+            print(f"  JSON parse failed ({e}). Raw response saved → {dump_path}")
+            return None
     except Exception as e:
         print(f"Claude API error: {e}")
         return None

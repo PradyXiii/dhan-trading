@@ -10,7 +10,7 @@ Source: CLAUDE.md Known Gotchas table (synchronized at each wiki compile).
 
 ### `_c` loop variable shadow
 - **Symptom:** `could not convert string to float: 'pe_oi_p3'` — column name where price number expected
-- **Cause:** `_c` is reserved for BN close price series in `compute_features()`. Using it as a loop variable overwrites it.
+- **Cause:** `_c` is reserved for NF close price series in `compute_features()`. Using it as a loop variable overwrites it.
 - **Fix:** Rename loop var to `_oi_col`, `_col`, or `_k`
 
 ### New yfinance CSV has only 1 row
