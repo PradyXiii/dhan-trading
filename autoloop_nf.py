@@ -368,6 +368,28 @@ def _clear_paper_changes() -> None:
         _PAPER_PERF_CSV.unlink()
 
 
+_WIKI_RAW = _HERE / "docs" / "wiki" / "raw"
+
+
+def _dump_experiment_to_wiki(description: str, kept: bool, score_before: float, score_after: float) -> None:
+    """Append experiment result to monthly wiki raw file for future compilation."""
+    try:
+        _WIKI_RAW.mkdir(parents=True, exist_ok=True)
+        month = datetime.now(_IST).strftime("%Y-%m")
+        raw_file = _WIKI_RAW / f"{month}_experiments.txt"
+        today = datetime.now(_IST).strftime("%Y-%m-%d")
+        status = "KEPT" if kept else "DISCARDED"
+        delta = score_after - score_before
+        line = (
+            f"{today} | {status} | {score_before:.4f} → {score_after:.4f} "
+            f"({delta:+.4f}) | {description}\n"
+        )
+        with open(raw_file, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass  # wiki dump is non-critical
+
+
 def _record_experiment(description: str, kept: bool, score_before: float, score_after: float) -> None:
     """Append every experiment (kept or discarded) to the lifetime history. Never reset."""
     _EXP_HISTORY.parent.mkdir(exist_ok=True)
@@ -380,6 +402,7 @@ def _record_experiment(description: str, kept: bool, score_before: float, score_
         "after": round(score_after, 4),
     })
     _EXP_HISTORY.write_text(json.dumps(history, indent=2))
+    _dump_experiment_to_wiki(description, kept, score_before, score_after)
 
 
 _STOPWORDS = {

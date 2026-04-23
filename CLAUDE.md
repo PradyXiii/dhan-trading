@@ -2,6 +2,26 @@
 
 Quick reference for Claude Code. Read this before touching any file.
 
+## 🧠 TRADING WIKI — FULL KNOWLEDGE BASE
+
+**`docs/wiki/index.md`** — master index of all compiled knowledge (Karpathy LLM Wiki pattern).
+
+| Page | What it contains |
+|---|---|
+| `docs/wiki/strategy/ic_research.md` | 7yr backtest, IC+BullPut verdict, discarded strategies, DOW breakdown |
+| `docs/wiki/features/feature_history.md` | All 60 features, kept/discarded log, reserved names |
+| `docs/wiki/bugs/known_issues.md` | 15+ session bugs — ML shadows, API format, lot sizing |
+
+Auto-populated by `autoloop_nf.py` after every experiment. Compiled by `wiki_compiler.py`.
+
+```bash
+python3 wiki_compiler.py           # compile raw discoveries → wiki articles
+python3 wiki_compiler.py --dry-run # preview without API call
+python3 wiki_compiler.py --lint    # check broken links + orphan pages
+```
+
+**`docs/wiki/raw/`** — gitignored (VM only). Drop discoveries here; wiki_compiler ingests them.
+
 ---
 
 ## 🗜️ RESPONSE STYLE — CAVEMAN MODE

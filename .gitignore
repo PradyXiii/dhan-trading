@@ -53,3 +53,8 @@ models/
 
 # GAS morning brief scripts — never committed (contain private prompts/logic)
 *.gs
+
+# Wiki raw sources — VM only (trade outcomes, session discoveries, experiment logs)
+# Compiled wiki articles in docs/wiki/*.md ARE committed (knowledge base)
+docs/wiki/raw/*
+!docs/wiki/raw/.gitkeep
