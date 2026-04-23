@@ -217,7 +217,8 @@ STRATEGIES = {
 # Simulation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_trade(entry_date, signal, strategy, hold_days, ohlcv, vix_df, opts_daily):
+def simulate_trade(entry_date, signal, strategy, hold_days, ohlcv, vix_df, opts_daily,
+                   lots_override=None):
     """Simulate one trade held for hold_days trading days."""
     strat_sig = strategy["signal"]
     if strat_sig not in ("BOTH", signal):
@@ -261,7 +262,7 @@ def simulate_trade(entry_date, signal, strategy, hold_days, ohlcv, vix_df, opts_
                     iv_entry = iv_cal
 
     lot_size = get_nf_lot_size(entry_date.date())
-    lots = strategy["max_lots"]
+    lots = lots_override if lots_override is not None else strategy["max_lots"]
 
     # Entry net value
     net_entry = 0.0
@@ -391,7 +392,8 @@ def simulate_trade(entry_date, signal, strategy, hold_days, ohlcv, vix_df, opts_
         "dow": entry_date.strftime("%a"),
     }
 
-def run_strategy(strategy_key, hold_days, signals, ohlcv, vix_df, opts_daily, start_date=None):
+def run_strategy(strategy_key, hold_days, signals, ohlcv, vix_df, opts_daily,
+                 start_date=None, end_date=None, lots_override=None):
     """Run backtest for one strategy × one hold period."""
     strategy = STRATEGIES[strategy_key]
     trades = []
@@ -400,15 +402,18 @@ def run_strategy(strategy_key, hold_days, signals, ohlcv, vix_df, opts_daily, st
         d = row["date"]
         if start_date is not None and d < pd.Timestamp(start_date):
             continue
+        if end_date is not None and d > pd.Timestamp(end_date):
+            continue
         sig = str(row["signal"]).upper()
 
         if strategy.get("signal") == "HYBRID":
-            # Route by signal: CALL days use call_key, PUT days use put_key
             sub_key = strategy["call_key"] if sig == "CALL" else strategy["put_key"]
             sub_strat = STRATEGIES[sub_key]
-            result = simulate_trade(d, sig, sub_strat, hold_days, ohlcv, vix_df, opts_daily)
+            result = simulate_trade(d, sig, sub_strat, hold_days, ohlcv, vix_df, opts_daily,
+                                    lots_override)
         else:
-            result = simulate_trade(d, sig, strategy, hold_days, ohlcv, vix_df, opts_daily)
+            result = simulate_trade(d, sig, strategy, hold_days, ohlcv, vix_df, opts_daily,
+                                    lots_override)
 
         if result:
             trades.append(result)
@@ -462,15 +467,27 @@ def aggregate_dow(trades):
     return out
 
 
+REGIMES = [
+    ("Thu expiry  2019–Aug25", "2019-01-01", "2025-08-31"),
+    ("Tue expiry  Sep25–now ", "2025-09-01", None),
+    ("Full history 2019–now ", "2019-01-01", None),
+]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--strategy", default=None, help="single strategy (all if omitted)")
     parser.add_argument("--ml", action="store_true", help="use ML signals")
     parser.add_argument("--start", default=None, help="start date (YYYY-MM-DD)")
+    parser.add_argument("--end",   default=None, help="end date (YYYY-MM-DD)")
+    parser.add_argument("--lots",  default=None, type=int,
+                        help="override lot count for all strategies (e.g. --lots 1)")
     parser.add_argument("--dow", default=None,
                         help="filter to specific days e.g. --dow Mon,Tue or --dow Thu,Fri")
     parser.add_argument("--dow-breakdown", action="store_true",
                         help="show WR/P&L per day-of-week (hold=0d, all strategies)")
+    parser.add_argument("--regime-report", action="store_true",
+                        help="compare all strategies across 3 regimes (hold=0d)")
     args = parser.parse_args()
 
     # Parse DOW filter
@@ -498,6 +515,47 @@ def main():
         dow_label = "All days"
 
     strategies = {args.strategy: STRATEGIES[args.strategy]} if args.strategy else STRATEGIES
+    lots_ov = args.lots  # None = use strategy default
+
+    # ── REGIME REPORT MODE ────────────────────────────────────────────────────
+    if args.regime_report:
+        col = 26
+        r_col = 30
+        print("\n" + "="*120)
+        lots_note = f"  [lots override: {lots_ov}]" if lots_ov else "  [lots = strategy default]"
+        print(f"REGIME COMPARISON — hold=0d, all strategies{lots_note}")
+        print(f"{'Strategy':<{col}}", end="")
+        for label, _, _ in REGIMES:
+            print(f"  {label:<{r_col}}", end="")
+        print()
+        print(f"{'':.<{col}}", end="")
+        for _ in REGIMES:
+            print(f"  {'Trades WR%    P&L(₹K) AvgP&L':<{r_col}}", end="")
+        print()
+        print("="*120)
+
+        for strat_key, strat_def in sorted(strategies.items()):
+            row = f"{strat_def['name']:<{col}}"
+            for _, r_start, r_end in REGIMES:
+                trades = run_strategy(strat_key, 0, signals, ohlcv, vix_df, opts_daily,
+                                      start_date=r_start, end_date=r_end,
+                                      lots_override=lots_ov)
+                s = aggregate(trades)
+                if s:
+                    pnl_k = s["total_pnl"] / 1000
+                    sign = "+" if pnl_k >= 0 else ""
+                    cell = (f"{s['trades']:>4}  {s['wr_pct']:>5.1f}%  "
+                            f"{sign}{pnl_k:>7.1f}K  ₹{s['avg_pnl']:>6,.0f}")
+                else:
+                    cell = "  —"
+                row += f"  {cell:<{r_col}}"
+            print(row)
+
+        print("="*120)
+        print("P&L in ₹K. AvgP&L per trade. hold=0d (EOD exit same day).")
+        print("Regimes: Thu expiry (pre-Sep2025) vs Tue expiry (Sep2025+) vs full history.")
+        print("="*120)
+        return
 
     # ── DOW BREAKDOWN MODE ────────────────────────────────────────────────────
     if args.dow_breakdown:
@@ -510,7 +568,8 @@ def main():
         print("-"*100)
 
         for strat_key, strat_def in sorted(strategies.items()):
-            trades = run_strategy(strat_key, 0, signals, ohlcv, vix_df, opts_daily, args.start)
+            trades = run_strategy(strat_key, 0, signals, ohlcv, vix_df, opts_daily,
+                                  args.start, args.end, lots_ov)
             dow_stats = aggregate_dow(trades)
 
             row = f"{strat_def['name']:<24}"
@@ -542,7 +601,8 @@ def main():
         print("-" * 100)
 
         for hold_days in range(6):
-            trades = run_strategy(strat_key, hold_days, signals, ohlcv, vix_df, opts_daily, args.start)
+            trades = run_strategy(strat_key, hold_days, signals, ohlcv, vix_df, opts_daily,
+                                  args.start, args.end, lots_ov)
             stats = aggregate(trades)
 
             if stats:
