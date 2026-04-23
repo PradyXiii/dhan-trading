@@ -192,6 +192,25 @@ STRATEGIES = {
         "legs": [("PE", 0, "BUY")],
         "credit": False, "sl_frac": 0.50, "tp_frac": 1.00, "max_lots": 2,
     },
+    # ── HYBRID STRATEGIES (route by signal) ───────────────────────────────────
+    "nf_hybrid_ic_bullput": {
+        "name": "IC(CALL) + BullPut(PUT) ★",
+        "signal": "HYBRID",
+        "call_key": "nf_iron_condor",
+        "put_key":  "nf_bull_put_credit",
+    },
+    "nf_hybrid_bullcall_bullput": {
+        "name": "BullCall(CALL) + BullPut(PUT)",
+        "signal": "HYBRID",
+        "call_key": "nf_bull_call_spread",
+        "put_key":  "nf_bull_put_credit",
+    },
+    "nf_hybrid_ic_both": {
+        "name": "IC(CALL) + IC(PUT) = pure IC",
+        "signal": "HYBRID",
+        "call_key": "nf_iron_condor",
+        "put_key":  "nf_iron_condor",
+    },
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,8 +400,16 @@ def run_strategy(strategy_key, hold_days, signals, ohlcv, vix_df, opts_daily, st
         d = row["date"]
         if start_date is not None and d < pd.Timestamp(start_date):
             continue
+        sig = str(row["signal"]).upper()
 
-        result = simulate_trade(d, str(row["signal"]).upper(), strategy, hold_days, ohlcv, vix_df, opts_daily)
+        if strategy.get("signal") == "HYBRID":
+            # Route by signal: CALL days use call_key, PUT days use put_key
+            sub_key = strategy["call_key"] if sig == "CALL" else strategy["put_key"]
+            sub_strat = STRATEGIES[sub_key]
+            result = simulate_trade(d, sig, sub_strat, hold_days, ohlcv, vix_df, opts_daily)
+        else:
+            result = simulate_trade(d, sig, strategy, hold_days, ohlcv, vix_df, opts_daily)
+
         if result:
             trades.append(result)
 
