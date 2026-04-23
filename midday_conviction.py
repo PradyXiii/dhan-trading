@@ -110,7 +110,7 @@ def _get_ltp_from_marketfeed(security_id: str) -> float | None:
             _log(f"marketfeed/ltp {resp.status_code}: {resp.text[:80]}")
             return None
         d = resp.json()
-        # Response: {"data": {"NSE_FNO": {<sid>: {"last_price": ...}}}} or similar
+        # Response: {"data": {"NSE_FNO": {"<sid>": {"last_price": ...}}}}
         fno_data = (d.get("data") or {}).get("NSE_FNO") or d.get("NSE_FNO") or {}
         entry = fno_data.get(sid_int) or fno_data.get(str(sid_int)) or fno_data.get(security_id) or {}
         ltp = float(entry.get("last_price") or entry.get("ltp") or entry.get("lastTradedPrice") or 0)
@@ -121,6 +121,93 @@ def _get_ltp_from_marketfeed(security_id: str) -> float | None:
     except Exception as e:
         _log(f"marketfeed/ltp failed: {e}")
     return None
+
+
+def _get_spread_ltps(short_sid: str, long_sid: str,
+                     short_strike: float, long_strike: float,
+                     expiry: str, opt_type: str) -> tuple[float | None, float | None]:
+    """Fetch LTPs for both spread legs.
+    Tier 1: single batched marketfeed/ltp call with both SIDs (1 API call).
+    Tier 2: option chain lookup by strike (if tier 1 returns 0 for either leg).
+    Returns (short_ltp, long_ltp) — None if unavailable.
+    """
+    short_ltp = long_ltp = None
+
+    # ── Tier 1: batch both SIDs in one marketfeed call ────────────────────────
+    try:
+        sids = [int(s) for s in (short_sid, long_sid) if s]
+        if sids:
+            resp = requests.post(
+                "https://api.dhan.co/v2/marketfeed/ltp",
+                headers=HEADERS,
+                json={"NSE_FNO": sids},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                fno = (resp.json().get("data") or {}).get("NSE_FNO") or {}
+                def _pick(sid_str):
+                    sid_i = int(sid_str)
+                    e = fno.get(sid_i) or fno.get(str(sid_i)) or fno.get(sid_str) or {}
+                    v = float(e.get("last_price") or e.get("ltp") or 0)
+                    return v if v > 0 else None
+                short_ltp = _pick(short_sid) if short_sid else None
+                long_ltp  = _pick(long_sid)  if long_sid  else None
+                _log(f"marketfeed batch: short={short_ltp} long={long_ltp}")
+            else:
+                _log(f"marketfeed batch {resp.status_code}: {resp.text[:80]}")
+    except Exception as e:
+        _log(f"marketfeed batch failed: {e}")
+
+    if short_ltp and long_ltp:
+        return short_ltp, long_ltp
+
+    # ── Tier 2: option chain by strike (fallback for any missing leg) ──────────
+    try:
+        exp = expiry or ""
+        if not exp:
+            r = requests.post(
+                "https://api.dhan.co/v2/optionchain/expirylist",
+                headers=HEADERS,
+                json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
+                timeout=10,
+            )
+            exp = r.json()["data"][0]
+
+        r2 = requests.post(
+            "https://api.dhan.co/v2/optionchain",
+            headers=HEADERS,
+            json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": exp},
+            timeout=15,
+        )
+        inner = r2.json().get("data") or {}
+        if isinstance(inner, dict) and "oc" not in inner and "last_price" not in inner:
+            inner = next(iter(inner.values()), {})
+        oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
+
+        def _from_chain(strike: float) -> float | None:
+            ot_lc = opt_type.lower()
+            ot_uc = opt_type.upper()
+            key = (f"{strike:.6f}" if f"{strike:.6f}" in oc
+                   else str(int(strike)) if str(int(strike)) in oc else None)
+            if key is None:
+                _log(f"chain fallback: strike {strike:.0f} not in oc")
+                return None
+            sub = oc[key].get(ot_lc) or oc[key].get(ot_uc) or {}
+            v = float(sub.get("last_price") or sub.get("ltp") or 0)
+            return v if v > 0 else None
+
+        if short_ltp is None:
+            short_ltp = _from_chain(short_strike)
+            if short_ltp:
+                _log(f"chain fallback: short ₹{short_ltp:.0f} [{short_strike:.0f} {opt_type}]")
+        if long_ltp is None:
+            long_ltp = _from_chain(long_strike)
+            if long_ltp:
+                _log(f"chain fallback: long ₹{long_ltp:.0f} [{long_strike:.0f} {opt_type}]")
+    except Exception as e:
+        _log(f"chain fallback failed: {e}")
+
+    return short_ltp, long_ltp
 
 
 def _get_ltp_from_option_chain(trade: dict) -> float | None:
@@ -732,10 +819,13 @@ def main():
                     _log("Spread-closed message sent.")
             return
 
-        # Fetch LTP for both legs
-        short_ltp = _get_ltp_from_marketfeed(short_sid) if short_sid else None
-        long_ltp  = _get_ltp_from_marketfeed(long_sid)  if long_sid  else None
-        macro     = get_macro()
+        # Fetch LTP for both legs (batch marketfeed → chain fallback)
+        opt_type_str = "CE" if direction == "CALL" else "PE"
+        expiry_str   = trade.get("expiry") or ""
+        short_ltp, long_ltp = _get_spread_ltps(
+            short_sid, long_sid, short_strike, long_strike, expiry_str, opt_type_str
+        )
+        macro = get_macro()
 
         # Spread P&L and SL/TP proximity
         sl_trigger = net_credit * 1.5    # CREDIT_SL_FRAC = 0.5
@@ -785,15 +875,30 @@ def main():
                 verdict_sub  = "Stop-loss is your safety net. System handles it."
                 conv_score   = -1
         else:
+            # Partial data path — show whatever we have + SL/TP distances
             current_cost = 0
             pnl_inr      = 0
             conv_score   = 0
-            spread_line  = f"Spread LTP unavailable  (entry credit was ₹{net_credit:.0f})"
-            legs_line    = ""
-            sl_line      = f"🛡️ SL triggers at ₹{sl_trigger:.0f}"
-            tp_line      = f"🎯 TP triggers at ₹{tp_trigger:.0f}"
-            verdict_line = "⬜ <b>Cannot check — option prices unavailable.</b>"
-            verdict_sub  = "Check Dhan app manually."
+            partial_legs = []
+            if short_ltp:
+                partial_legs.append(f"Short ₹{short_ltp:.0f} ✓")
+            else:
+                partial_legs.append("Short LTP unavailable")
+            if long_ltp:
+                partial_legs.append(f"Long ₹{long_ltp:.0f} ✓")
+            else:
+                partial_legs.append("Long LTP unavailable")
+            legs_line   = "📍 " + "  ·  ".join(partial_legs)
+            spread_line = (f"⚠️ Spread cost unavailable — check Dhan app\n"
+                           f"Entry credit ₹{net_credit:.0f}  ·  "
+                           f"SL fires if spread reaches ₹{sl_trigger:.0f}  "
+                           f"(₹{sl_trigger - net_credit:.0f} above credit, i.e. 50% loss)\n"
+                           f"TP fires if spread falls to ₹{tp_trigger:.0f}  "
+                           f"(65% of credit captured)")
+            sl_line      = f"🛡️ SL at ₹{sl_trigger:.0f}  (spread_monitor.py watches every 1 min)"
+            tp_line      = f"🎯 TP at ₹{tp_trigger:.0f}"
+            verdict_line = "⬜ <b>Live prices unavailable — system still monitoring via spread_monitor.py.</b>"
+            verdict_sub  = "SL/TP auto-triggers even without this check. Review Dhan app for current cost."
 
         # Macro
         macro_parts = []
