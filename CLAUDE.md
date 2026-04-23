@@ -32,19 +32,16 @@ Two review surfaces, different stages:
 
 **Daily strategy routing (9:30 AM IST):**
 - **Mon + Tue** → Nifty Iron Condor (4 legs, BUY wings first)
-- **Thu + Fri, CALL signal** → Bear Call Credit Spread (2 legs)
-- **Thu + Fri, PUT signal** → Bull Put Credit Spread (2 legs)
-- **Wed** → No trade (DTE 6, all strategies lose after costs)
-- **Auto-upgrade**: if balance ≥ ₹2.3L → Short Straddle replaces all above (except Wed)
+- **Wed + Thu + Fri** → No trade (Wed=DTE6 all lose; Thu/Fri Bear Call backtest = -₹1.25L/7mo)
+- **Auto-upgrade**: if balance ≥ ₹2.3L → Short Straddle on Mon+Tue (same skip days)
 
 **Capital at go-live (22 Apr 2026): ₹1,12,370**
-- IC: ₹93,202/lot → 1 lot ✅  Bear Call/Bull Put: ₹51K/lot → 2 lots ✅
-- Straddle: ₹2,16-26L/lot → 0 lots ❌ (insufficient — upgrade pending capital growth)
+- IC: ₹93,202/lot → 1 lot ✅
+- Straddle: ₹2,16-26L/lot → 0 lots ❌ (upgrade pending capital growth)
 
 **Why these strategies:**
 - IC (Mon/Tue): WR 84.6% (2021–2026), ₹25L/yr, max DD -0.8%. Theta dominates DTE 0-1.
-- Bear Call (Thu/Fri CALL): +₹65-81/lot net — IC loses on DTE 4-5 but directional credit wins.
-- Bull Put (Thu/Fri PUT): small positive P&L — mirrors Bear Call on PUT signal days.
+- Bear Call (Thu/Fri) DUMPED Apr 2026: -₹1.25L over 7 months. Signal model says CALL → market went up → Bear Call (short CE) got hit. Direction conflict.
 - Straddle (when affordable): both sides collected, no wings, higher margin but more credit.
 
 **What happens each morning (9:30 AM IST):**
@@ -260,7 +257,7 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | Backtest DOW breakdown shows Thursday as best day | Backtest data 2021–Aug 2025 used Thursday expiry; only 7 months (Sep 2025–Apr 2026) use Tuesday expiry. Thursday "expiry day" pattern dominates the stats. | DOW stats are biased toward old Thursday-expiry world. Current (live) DOW profile: Tue = DTE 0 (best), Mon = DTE 1, Wed = DTE 6 (worst same-day). Friday = DTE 4. Don't use pre-Sep-2025 backtest DOW breakdown to judge current regime. |
 | IC lot sizing gave 5 lots instead of 1 | Used `RISK_PCT=5% × capital / risk_per_lot` formula — `risk_per_lot` was theoretical P&L not actual SPAN margin | Fixed: call Dhan `/v2/margincalculator/multi` with all 4 legs × 1 lot → get actual margin → `lots = floor(capital / actual_margin)`. Param key = `scripList` not `scripts` (DH-905 error). |
 | TP frac: IC has no TP; spreads use 0.65 | IC `spread_monitor.py` path removed TP check (EOD-only). Bear Call / Bull Put TP = `net_credit * 0.35` (spread decayed to 35% = retain 65%). Straddle = SL-only (no TP). | `CREDIT_TP_FRAC = 0.65` applies to spreads only. IC exits at 3:15 PM via `exit_positions.py`. Never add TP logic back to IC path. |
-| Wed/Thu/Fri IC all net-negative; only Bear Call/Bull Put profitable on Thu/Fri | IC: Wed -₹233, Thu -₹258, Fri -₹39 per lot after costs. Bear Call: Thu +₹65/lot, Fri +₹81/lot (CALL days). Bull Put: small positive P&L on Thu/Fri PUT days. | `IC_SKIP_DAYS = {2}` (Wed only). `BEAR_CALL_DAYS = {3,4}`. Thu/Fri CALL → Bear Call. Thu/Fri PUT → Bull Put. |
+| Bear Call looked profitable in 5yr backtest but destroyed capital in live 7-month run | Bear Call: 17.9% WR, -₹1.25L over Sep 2025–Apr 2026. Signal model has CALL bias → market went up → short CE got hit. Backtest used historical signal accuracy; live accuracy lower. | `IC_SKIP_DAYS = {2,3,4}`. No trade Wed/Thu/Fri. IC Mon+Tue only. Bear Call fully removed Apr 2026. |
 | IC TP was costing ₹21L over 5 years | Standard IC (TP=0.65): ₹1.17Cr. EOD-only IC (no TP): ₹1.38Cr. Same WR, lower drawdown. TP captured 65% of credit but left last 35% of theta. | `spread_monitor.py` IC path no longer checks TP — SL only. IC always exits at EOD 3:15 PM via `exit_positions.py`. |
 | Straddle auto-upgrade with 0 lots | `STRADDLE_MARGIN_PER_LOT` set too low (e.g. 217K) but actual Dhan SPAN = 226,492 → capital hits threshold, straddle triggered, but `floor(capital/actual_margin)=0` lots → zero-lot order or crash | Keep `STRADDLE_MARGIN_PER_LOT` ≥ actual Dhan SPAN + 3K buffer. Run `python3 check_margins.py` to verify actual SPAN; update constant if it drifts above threshold. Current: 230,000. |
 | Straddle `today_trade.json` schema differs from IC | Straddle uses `ce_sid`/`pe_sid`/`ce_entry`/`pe_entry` (no `short_sid`/`long_sid`). IC uses `ce_short_sid`/`ce_long_sid`/`pe_short_sid`/`pe_long_sid`. 2-leg uses `short_sid`/`long_sid`. | Match the strategy key: `nf_short_straddle` → straddle schema; `nf_iron_condor` → IC schema; `bear_call_credit`/`bull_put_credit` → 2-leg schema. |
@@ -333,11 +330,9 @@ CREDIT_TP_FRAC   = 0.65          # TP when spread cost falls to net_credit × 0.
 ML_CONF_THRESHOLD = 0.55         # skip trade when ML ensemble confidence below this
 VIX_MIN_TRADE     = 13.0         # dynamic — analyze_confidence.py --write-threshold updates nightly
 VIX_MAX_TRADE     = 20.0         # ceiling — panic regime above this
-IC_SKIP_DAYS         = {2}       # Wed only — all strategies net-negative on DTE 6
-BEAR_CALL_DAYS       = {3, 4}    # Thu (DTE=5) + Fri (DTE=4)
-                                  # CALL signal → Bear Call (+₹65/lot Thu, +₹81/lot Fri)
-                                  # PUT signal → Bull Put (small positive P&L on Thu/Fri)
-                                  # IC days: Mon (DTE=1, 97%WR) + Tue (DTE=0, 100%WR)
+IC_SKIP_DAYS         = {2, 3, 4}  # Wed(DTE6)+Thu(DTE5)+Fri(DTE4) — IC Mon+Tue ONLY
+                                  # Bear Call dumped Apr 2026: -₹1.25L/7mo
+                                  # Mon=DTE1 97%WR, Tue=DTE0 100%WR
 STRADDLE_MARGIN_PER_LOT = 230_000 # auto-upgrade threshold; actual Dhan SPAN ≈₹2,26,492 + ₹3,508 buffer
 MAX_LOTS_STRADDLE    = 5         # straddle uses ~2.5× IC margin (~₹2.3L vs ₹93K)
 
@@ -363,15 +358,13 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 7. get_todays_signal()                  — reads signals_ml.csv (falls back to signals.csv)
    ├── NONE / score=0 / event_day → Telegram "No Trade" → exit
    └── CALL/PUT → continue
-8. Day-of-week routing (IC mode only):
-   ├── BEAR_CALL_DAYS {3,4} + CALL → _use_bear_call_today = True
-   ├── BEAR_CALL_DAYS {3,4} + PUT  → _use_bull_put_today  = True
-   └── Mon/Tue                     → IC path (neither flag set)
-9. VIX + ML filters (bypassed for IC/spreads — no filter = max P&L per backtest)
+8. IC_SKIP_DAYS check {2,3,4} — Wed/Thu/Fri → no trade (Bear Call dumped)
+   Only Mon (DTE=1) + Tue (DTE=0) reach trade path
+9. VIX + ML filters (bypassed for IC — no filter = max P&L per backtest)
 10. get_capital()                       — Dhan fundlimit API (availabelBalance field)
     Straddle auto-upgrade check:
     _use_straddle_today = (capital >= STRADDLE_MARGIN_PER_LOT)
-    If True → overrides bear_call/bull_put/IC for all days (logs upgrade notice)
+    If True → IC replaced by Short Straddle on Mon+Tue
 11. get_expiry()                        — Dhan expirylist API (falls back to last-Tuesday calc)
 
 ── STRADDLE PATH (_use_straddle_today = True, capital ≥ ₹2.3L) ─────────────

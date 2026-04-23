@@ -272,11 +272,12 @@ IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margin
 #   Tue DTE=0: 100% WR, ₹4,011/lot gross → IC ✅
 #   Mon DTE=1:  97% WR, ₹1,123/lot gross → IC ✅
 #   Fri DTE=4: Bear Call (CALL days) +₹81/lot net, Bull Put (PUT days) -₹134/lot → Bear Call only ✅
-#   Thu DTE=5: Bear Call (CALL days) +₹65/lot net, Bull Put (PUT days) -₹31/lot  → Bear Call only ✅
-#   Wed DTE=6: Bear Call -₹16/lot, Bull Put -₹51/lot, naked worthless → NO TRADE ❌
-# IC: Mon+Tue. Thu+Fri CALL → Bear Call. Thu+Fri PUT → Bull Put. Wed → no trade (all lose).
-IC_SKIP_DAYS       = {2}        # 2=Wed only — all strategies net-negative after costs.
-BEAR_CALL_DAYS     = {3, 4}     # 3=Thu, 4=Fri. CALL signal → Bear Call. PUT signal → Bull Put.
+#   Mon DTE=1: IC 97% WR ✅  Tue DTE=0: IC 100% WR ✅ (expiry day, fastest theta)
+#   Wed DTE=6: all strategies net-negative → NO TRADE ❌
+#   Thu DTE=5, Fri DTE=4: IC backtest profitable but DTE risk higher; skip until capital grows.
+#   Bear Call Credit (Thu/Fri CALL) was -₹1.25L in 7 months — dumped.
+# Active trade days: Mon + Tue only.
+IC_SKIP_DAYS       = {2, 3, 4}  # 2=Wed (DTE 6), 3=Thu (DTE 5), 4=Fri (DTE 4) — IC Mon+Tue only
 
 STRADDLE_MARGIN_PER_LOT = 230_000   # upgrade threshold: actual Dhan SPAN ≈₹2,26,492 + ₹3,508 buffer
 MAX_LOTS_STRADDLE       = 5         # straddle uses ~2.5× IC margin — lower cap
@@ -2319,15 +2320,19 @@ def main():
     today_wd       = date.today().strftime("%A")
     today_label    = date.today().strftime("%d %b %Y")
     if IRON_CONDOR_MODE and _today_weekday in IC_SKIP_DAYS:
+        _skip_reason = {
+            2: "Wednesday (DTE 6) — all strategies net-negative",
+            3: "Thursday (DTE 5) — IC active Mon+Tue only",
+            4: "Friday (DTE 4) — IC active Mon+Tue only",
+        }.get(_today_weekday, "non-IC day")
         notify.send(
-            f"⏸  <b>No Trade — Wednesday (DTE 6)</b>\n"
+            f"⏸  <b>No Trade — {today_wd}</b>\n"
             f"─────────────────────\n"
-            f"{today_wd}  ·  {today_label}\n\n"
-            f"No profitable strategy on Wed in Tuesday-expiry regime.\n"
-            f"IC, Bear Call, Bull Put all net-negative after costs on DTE 6.\n"
+            f"{today_label}\n\n"
+            f"{_skip_reason}.\n"
             f"Capital preserved."
         )
-        notify.log("DOW filter: Wednesday — no trade")
+        notify.log(f"DOW filter: {today_wd} — no trade ({_skip_reason})")
         return
 
     # 3. Read signal
@@ -2363,21 +2368,8 @@ def main():
         return
 
     score_max = 4
-
-    # ── Thu/Fri routing: Bear Call on CALL days, Bull Put on PUT days ──────────
-    # Post-Sep-2025 backtest: Bear Call +₹65-81/lot net on Thu/Fri.
-    # Bull Put: small positive P&L (~₹12-31/lot net) on Thu/Fri PUT days.
-    _use_bear_call_today = False
-    _use_bull_put_today  = False
-    if IRON_CONDOR_MODE and _today_weekday in BEAR_CALL_DAYS:
-        _dow_name = {3: "Thursday (DTE 5)", 4: "Friday (DTE 4)"}.get(_today_weekday, "")
-        if signal == "PUT":
-            _use_bull_put_today = True
-            notify.log(f"DOW routing: {_dow_name} PUT signal → Bull Put Credit Spread")
-        else:
-            # CALL signal on Thu/Fri → Bear Call Credit Spread
-            _use_bear_call_today = True
-            notify.log(f"DOW routing: {_dow_name} CALL signal → Bear Call Credit Spread")
+    _use_bear_call_today = False   # Bear Call dumped — backtest -₹1.25L in 7 months
+    _use_bull_put_today  = False   # Thu/Fri now in IC_SKIP_DAYS; these paths never reached
 
     # ── News sentiment (morning_brief.py output, written at 9:15 AM) ────────
     news_vote    = 0    # +1 aligns with signal, -1 opposes
