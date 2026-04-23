@@ -24,13 +24,14 @@ The ML engine is a DIRECTION ORACLE, not a filter. It does not reduce the number
 of trades — it takes the same eligible trading days and predicts the better direction
 (CALL or PUT) using pattern recognition across all indicators.
 
-The CALL/PUT direction feeds the credit-spread router in auto_trader.py:
-  CALL signal → Bear Call Spread (SELL ATM CE + BUY ATM+300 CE) — fade upside
-  PUT  signal → Bull Put  Spread (SELL ATM PE + BUY ATM-300 PE) — fade downside
-The ML predicts directional bias; spread structure provides theta + IV crush edge.
+The CALL/PUT direction feeds the strategy router in auto_trader.py:
+  CALL signal → Iron Condor (4-leg: ATM CE/PE + ATM±150 CE/PE) — theta harvest
+  PUT  signal → Bull Put Spread (SELL ATM PE + BUY ATM-150 PE) — fade downside
+  (Bear Call permanently discarded Apr 2026: 13.5% WR, -₹24.03L over 7yr)
+The ML predicts directional bias; strategy structure provides theta + IV crush edge.
 
-For every Mon/Tue/Thu/Fri:
-  1. Compute 63 features (FEATURE_COLS) from OHLCV + global + macro + options data.
+For every Mon/Tue/Wed/Thu/Fri:
+  1. Compute 60+ features (FEATURE_COLS) from OHLCV + global + macro + options data.
   2. Walk-forward RandomForest (train on past, predict present) outputs:
        P(CALL) = probability the day favours a bullish options trade
        P(PUT)  = probability the day favours a bearish options trade

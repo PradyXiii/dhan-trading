@@ -11,7 +11,7 @@ Shows:
   - Each model's individual vote (RF / XGB / LGB)
   - Ensemble majority signal + agreement confidence
   - Actual trade vs ensemble direction comparison
-  - Estimated P&L for BOTH scenarios using today's BN OHLCV
+  - Estimated P&L for BOTH scenarios using today's NF OHLCV
   - Entry premium, SL level, TP level, trailing jump
 
 Usage:

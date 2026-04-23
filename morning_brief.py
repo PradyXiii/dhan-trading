@@ -5,8 +5,8 @@ morning_brief.py — Pre-market Nifty50 IC intelligence brief
 ===========================================================
 Runs at 9:15 AM IST (15 min before auto_trader).
 
-1. Fetches live BN spot from Dhan + S&P futures from yfinance → actual gap data
-2. Fetches BANKING-SPECIFIC headlines from ET Banking / Google News (last 20h)
+1. Fetches live Nifty50 spot from Dhan + S&P futures from yfinance → actual gap data
+2. Fetches Nifty50-relevant headlines from Economic Times / Google News (last 20h)
 3. Calls Claude to identify event-driven catalysts only (ignores price descriptions)
 4. Writes data/news_sentiment.json — auto_trader.py reads this as extra vote
 

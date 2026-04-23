@@ -2440,7 +2440,6 @@ def main():
         return
 
     score_max = 4
-    _use_bear_call_today = False          # Bear Call dumped — -₹24.03L over 7 years, 13.5% WR
     _use_bull_put_today  = (signal == "PUT")  # PUT signal days → Bull Put (2 legs, Dhan-margin-sized lots)
 
     # ── News sentiment (morning_brief.py output, written at 9:15 AM) ────────
@@ -2666,70 +2665,8 @@ def main():
             )
             return
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # BEAR CALL PATH  (Thu/Fri CALL days — _use_bear_call_today = True)
-    # NF Bear Call: BUY ATM+150 CE + SELL ATM CE (2 legs, directional credit)
-    # ══════════════════════════════════════════════════════════════════════════
-    if IRON_CONDOR_MODE and _use_bear_call_today:
-        (short_sid, long_sid, short_strike, long_strike,
-         short_ltp, long_ltp, net_credit, lots, spot) = get_spread_legs(
-             signal, expiry, capital)
-
-        if short_sid is None:
-            die(f"Could not fetch Bear Call legs for expiry {expiry}.")
-
-        _dow_label = {3: "Thursday", 4: "Friday"}.get(_today_weekday, "")
-        nf_expiry_str = expiry.strftime('%d%b%Y').upper()
-        max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
-        sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
-
-        notify.send(
-            f"🐻  <b>Nifty Bear Call — {_dow_label}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Score      {score:+d} / {score_max}{score_desc}\n"
-            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
-            f"{news_row}"
-            f"Capital    {cap_label}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELL  <code>NIFTY {nf_expiry_str} {int(short_strike)} CE</code>  @ ₹{short_ltp:.0f}\n"
-            f"BUY   <code>NIFTY {nf_expiry_str} {int(long_strike)} CE</code>  @ ₹{long_ltp:.0f}\n"
-            f"Net credit  ₹{net_credit:.0f} / share   "
-            f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
-            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SL   spread cost > ₹{sl_trig:.0f}  (cost grew {CREDIT_SL_FRAC*100:.0f}% above credit)\n"
-            f"Exit EOD 3:15 PM (hold for maximum theta decay)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
-            f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
-        )
-
-        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
-            notify.send(
-                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
-                f"An open Nifty position already exists.\n"
-                f"Skipping Bear Call to avoid double exposure."
-            )
-            return
-
-        order_result = place_credit_spread(
-            short_sid, long_sid, signal, lots, net_credit,
-            short_strike, long_strike, short_ltp, long_ltp, spot,
-        )
-        if not DRY_RUN:
-            _write_today_spread_trade(
-                signal=signal,
-                short_sid=short_sid, long_sid=long_sid,
-                short_strike=short_strike, long_strike=long_strike,
-                short_ltp=short_ltp, long_ltp=long_ltp,
-                net_credit=net_credit, lots=lots, dte=dte, spot=spot,
-                score=score, expiry=expiry, ml_conf=ml_conf,
-                order_mode=order_result.get("mode", "CREDIT_SPREAD"),
-                buy_oid=order_result.get("buy_oid"),
-                sell_oid=order_result.get("sell_oid"),
-            )
-            _setup_pnl_exit(net_credit, lots)
-        return
+    # Bear Call path permanently removed Apr 2026 — 13.5% WR, -₹24.03L over 7yr.
+    # See STRATEGY_RESEARCH.md + docs/wiki/strategy/ic_research.md.
 
     # ══════════════════════════════════════════════════════════════════════════
     # BULL PUT PATH  (PUT signal days, all weekdays — _use_bull_put_today = True)
