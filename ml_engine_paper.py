@@ -807,6 +807,13 @@ def compute_features(df):
     _iv_range = (_iv_max20 - _iv_min20).replace(0, np.nan)
     d['iv_rank_20'] = ((_iv - _iv_min20) / _iv_range).fillna(0.5)
 
+    # ── Vol-trend ratio: vol normalized by trend strength (IC quality signal) ──────
+    _abs_trend = d['trend5'].abs().replace(0, np.nan)
+    d['nf_vol_trend_ratio'] = (d['hv20'] / _abs_trend).clip(0, 50).fillna(10.0)
+
+    # ── VIX-EMA separation interaction: fear regime × trend maturity ──────────────
+    d['vix_ema_sep_interact'] = d['vix_pct_chg'] * d['ema_separation']
+
     # ── AUTOLOOP APPEND ZONE — add new features HERE, just above this line ──────
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
@@ -892,6 +899,9 @@ FEATURE_COLS = [
     # OI directional bias + IV acceleration + ADX-momentum
     "oi_dir_bias",          # OI imbalance × put/call skew — combined directional signal
     "straddle_velocity",    # 5-day straddle rate of change — IV acceleration
+    # Vol-trend quality + VIX-trend maturity interaction
+    "nf_vol_trend_ratio",    # HV20 / |trend5| — clean trend (low) vs choppy (high)
+    "vix_ema_sep_interact",  # vix_pct_chg × ema_separation — fear × trend maturity
     # EMA separation + IV rank
     "ema_separation",       # EMA20-EMA50 gap % — trend maturity / consolidation
     "iv_rank_20",           # IV percentile in 20-day range — premium richness signal
