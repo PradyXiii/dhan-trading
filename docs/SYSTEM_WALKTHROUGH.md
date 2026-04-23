@@ -1,258 +1,270 @@
-# Nifty50 Iron Condor — Full System Walkthrough
+# Nifty50 Multi-Strategy Auto-Trader — Full System Walkthrough
 
-A plain-English guide to what happens every trading day, from pre-market to midnight. Written for reference when starting a new session or debugging a live issue.
+Plain-English guide: what happens every trading day, pre-market to midnight.
 
 ---
 
 ## The One-Line Version
 
-Every weekday the system wakes up, reads the market, builds a 4-leg Iron Condor, places 4 real orders via Dhan, monitors every minute, closes automatically on SL/TP, and retrains the ML brain at night.
+Every weekday the system wakes up, reads the market, routes to IC (CALL signal) or Bull Put (PUT signal), places orders via Dhan, monitors every minute for SL/TP, closes automatically, and retrains the ML brain at night.
 
 ---
 
-## Why Iron Condor?
+## Why This Hybrid Strategy?
 
-An Iron Condor sells premium on both sides simultaneously:
-
+**Iron Condor (CALL signal days):**
 ```
-SELL ATM CE  + BUY ATM+150 CE    ← upper wing (Bear Call spread)
-SELL ATM PE  + BUY ATM-150 PE    ← lower wing (Bull Put spread)
+SELL ATM CE  + BUY ATM+150 CE    ← upper wing
+SELL ATM PE  + BUY ATM-150 PE    ← lower wing
 ```
+Market-neutral theta. Wins if Nifty stays inside the wings — even if the CALL signal is wrong and markets go sideways. Weekly Tuesday expiry (DTE ≤ 7) = fast theta decay. Backtest 2021–2026: 84.6% WR, 1,114 trades, max drawdown −0.8%.
 
-You collect cash upfront (net credit). You keep that cash if Nifty stays between the two short strikes until expiry. You lose if Nifty blows past either wing. With weekly Tuesday expiry (DTE ≤ 7), theta decay works in your favour — option premium bleeds out fast when time is short.
+**Bull Put Credit Spread (PUT signal days):**
+```
+SELL ATM PE  + BUY ATM-150 PE    ← 2 legs
+```
+Directional credit — profits when market stays flat or goes UP. The ML model has a CALL bias, so markets often go UP even on PUT signal days. Bull Put profits in exactly that scenario. Backtest Sep 2025–Apr 2026: 100% WR, 51 trades.
 
-**Why NF and not BN?** BankNifty lost weekly expiry in Nov 2024 (SEBI). Monthly contracts = longer DTE = gamma risk dominates theta = IC win rate collapsed to 27% in 2025. Nifty50 kept weekly Tuesday expiry. Every NF IC is naturally DTE ≤ 7.
+**Why not Bear Call on CALL days?** Bear Call = short CE = needs market to go DOWN. CALL signal days = model says market going UP. Direction conflict. 7-year backtest: 13.5% WR, −₹24.03L. Permanently discarded.
 
-**Backtest result:** 84.6% win rate across 5 years (Aug 2021 – Apr 2026), 1,114 real-money-simulated trades, max drawdown −0.8%. These numbers are from real 1-min Dhan option data, not a formula.
+**Why NF and not BNF?** BankNifty lost weekly expiry Nov 2024 (SEBI). Monthly = DTE 15-22 = gamma dominates theta = IC WR collapsed to 27%. NF kept weekly Tuesday. Every trade naturally DTE ≤ 7.
 
 ---
 
 ## Daily Timeline
 
-### 8:50 AM IST — `health_ping.py` (Pre-market check)
+### 8:50 AM IST — `health_ping.py`
 
-Before anyone touches the market, health_ping checks:
-- Dhan token is valid (not expired)
-- Capital is above minimum threshold
-- `data/signals_ml.csv` was updated today (ML ran last night)
-- No stale lock file from a crashed previous run
+Pre-market check:
+- Dhan token valid (not expired)
+- Capital above minimum
+- `data/signals_ml.csv` updated today (ML ran last night)
+- No stale lock file from crashed previous run
 
-Sends a Telegram: "✅ All clear" or "🚨 ALERT: [specific problem]".
-
-If you don't get this message, don't trust auto_trader.
+Sends Telegram: "✅ All clear" or "🚨 ALERT: [specific problem]". If no message → don't trust auto_trader.
 
 ---
 
-### 9:15 AM IST — `morning_brief.py` (News sentiment)
+### 9:15 AM IST — `morning_brief.py`
 
-Fetches Nifty50-relevant RSS headlines (ET Economy, Google News: RBI/CPI/FII/SEBI) from the last 20 hours. Calls Claude API with the headlines + live Nifty spot + India VIX. Claude returns:
-
+Fetches Nifty50 RSS headlines (ET, Google News: RBI/CPI/FII/SEBI) from last 20 hours. Calls Claude API → returns:
 ```json
 {"direction": "BULLISH|BEARISH|NEUTRAL", "confidence": "HIGH|MEDIUM|LOW", "reason": "one sentence"}
 ```
-
-Writes to `data/news_sentiment.json`. auto_trader reads this as one extra vote at 9:30 AM.
+Writes `data/news_sentiment.json`. auto_trader reads it as one extra vote at 9:30 AM.
 
 ---
 
-### 9:30 AM IST — `auto_trader.py` (The main event)
+### 9:30 AM IST — `auto_trader.py`
 
-This is the core runner. Here's the exact sequence:
+**Step 1: Acquire lock**
+`fcntl` advisory lock — prevents two cron runs overlapping.
 
-**Step 0: Acquire lock**
-`fcntl` advisory lock prevents two cron runs overlapping (e.g. if previous run hung).
+**Step 2: Check credentials**
+Verifies Dhan token live. Dead → Telegram alert, exit.
 
-**Step 1: Check credentials**
-Calls Dhan API to verify token is live. If dead → Telegram alert, exit.
+**Step 3: Check lot size**
+Reads `data/lot_size_overrides.json` (written by lot_expiry_scanner). Warns if `LOT_SIZE` in code doesn't match expected for today's date.
 
-**Step 2: Check lot size**
-Reads `data/lot_size_overrides.json` (written by lot_expiry_scanner). Warns if `LOT_SIZE` constant in code doesn't match the expected lot size for today's date.
+**Step 4: Check exit marker**
+Verifies yesterday's `exit_positions.py` ran clean. Skipped in paper mode.
 
-**Step 3: Check exit marker**
-Verifies yesterday's `exit_positions.py` ran clean (no open carry positions). Skipped in paper mode.
+**Step 5: Refresh data + signal**
+Three subprocesses in sequence:
+1. `data_fetcher.py` — pulls latest OHLCV + macro + options
+2. `signal_engine.py` — rule-based signal → `data/signals.csv`
+3. `ml_engine.py --predict-today` — fast prediction using saved ensemble → `data/signals_ml.csv`
 
-**Step 4: Refresh data + signal**
-Runs three subprocesses in sequence:
-1. `data_fetcher.py` — pulls latest OHLCV + macro + options data
-2. `signal_engine.py` — computes rule-based signal → `data/signals.csv`
-3. `ml_engine.py --predict-today` — fast prediction (< 10 sec) using saved ensemble → `data/signals_ml.csv`
+**Step 6: Holiday check**
+If NSE holiday → Telegram "No trade today (holiday)", exit.
 
-**Step 5: Is it a trading day?**
-Checks `NSE_HOLIDAYS_2026` hardcoded set. If holiday → Telegram "No trade today (holiday)", exit.
+**Step 7: Get today's signal**
+Reads `data/signals_ml.csv`. NONE → exit. CALL or PUT → continue.
 
-**Step 6: Get today's signal**
-Reads `data/signals_ml.csv`. If NONE → exit. If CALL or PUT → continue.
+Signal vote: 4 rule-based indicators + ML ensemble (RF + XGB + LGB + CAT) + news sentiment (morning_brief).
 
-Signal vote breakdown (what auto_trader reads):
-- 4 rule-based indicators (EMA20 cross, trend5, VIX level, NF gap)
-- ML ensemble vote (RF + XGB + LGB + CAT, weighted by holdout accuracy)
-- News sentiment from morning_brief (one extra vote)
-
-**Step 7: VIX regime filter**
-- VIX < 13 → skip (too calm, premium too cheap to bother)
-- VIX > 20 → skip (panic regime, wings may not hold)
-- If skipped → Telegram "VIX out of range", exit
-
-**Step 8: ML confidence filter**
-- ML ensemble confidence < 0.55 → skip ("model not sure enough")
-- Sends Telegram, exits
+**Step 8: Routing decision**
+```python
+_use_bull_put_today = (signal == "PUT")   # PUT days → Bull Put
+# CALL days → IC (or Straddle if capital ≥ ₹2.3L)
+```
+VIX and ML confidence filters are **bypassed in IRON_CONDOR_MODE** — no filter = max P&L per 7-year backtest.
 
 **Step 9: Get capital**
-Calls Dhan `/fundlimit` API → available margin for position sizing.
+Dhan `/fundlimit` API → available margin for sizing.
 
-**Step 10: Get expiry**
-Calls Dhan `/optionchain/expirylist` for Nifty50 (scrip=13). Takes first date >= today (IST). This is always the nearest Tuesday.
+**Step 10: Check straddle auto-upgrade**
+If capital ≥ ₹2,30,000 AND signal == CALL → Short Straddle replaces IC.
 
-**Step 11: Get IC legs**
-Calls Dhan option chain for this expiry. Finds ATM strike (nearest to current spot). Builds 4 legs:
-
-```
-Call signal:  SELL ATM CE, BUY (ATM+150) CE, SELL ATM PE, BUY (ATM-150) PE
-Put signal:   Same structure — IC is symmetric regardless of signal direction
-```
-
-Computes `net_credit = short_CE_ltp + short_PE_ltp − long_CE_ltp − long_PE_ltp`.
-
-Sizes position: queries Dhan `/margincalculator/multi` with all 4 legs × 1 lot → returns actual SPAN+Exposure margin. Then `lots = min(MAX_LOTS=10, floor(capital / api_margin))`. All 4 legs placed at `lots × 65` shares each (equal qty across legs). Fallback to ₹1L constant only if API errors.
-
-**Step 12: Chain signals (informational)**
-Computes max pain, GEX, straddle cost — sent to Telegram for context, doesn't affect trade decision.
-
-**Step 13: Send pre-trade Telegram**
-Shows: signal direction, VIX, confidence, all 4 strike/security IDs, net credit, SL/TP triggers, lot count.
-
-**Step 14: Check no existing position**
-Calls Dhan positions API. If any open Nifty FNO position with `netQty != 0` → abort. Prevents doubling up.
-
-**Step 15: Place 4 orders (MANDATORY ORDER)**
-```
-1. BUY ATM+150 CE  ← long wing first (Dhan margin rule)
-   wait 2 seconds
-2. SELL ATM CE     ← short leg (margin benefit now applies)
-   wait 2 seconds  
-3. BUY ATM-150 PE  ← long wing first
-   wait 2 seconds
-4. SELL ATM PE     ← short leg
-```
-
-**Why this order matters:** Dhan requires the long leg recorded in your portfolio before the short leg qualifies for hedged margin. Reverse the order and Dhan charges full unhedged margin on the short — could be 3–5× more.
-
-Failure handling:
-- BUY fails → log FAILED, Telegram alert, stop
-- SELL fails after BUY placed → 🚨 CRITICAL Telegram "PARTIAL SPREAD — naked long exposure"
-
-**Step 16: Write today_trade.json**
-Writes `data/today_trade.json` with full IC schema: both security IDs, entry LTPs, net credit, SL/TP triggers, lot count, expiry. This file is the shared state — spread_monitor, exit_positions, and trade_journal all read it.
+**Step 11: Get expiry**
+Dhan `/optionchain/expirylist` (scrip=13). First date ≥ today (IST). Always nearest Tuesday.
 
 ---
 
-### 9:30 AM–3:14 PM (every 1 min) — `spread_monitor.py` (Intraday watch)
+**━━ BULL PUT PATH (signal == PUT) ━━**
 
-Cron runs every minute during market hours. Each run:
+**Step 12p: Get Bull Put legs**
+Option chain → ATM PE (short) + ATM-150 PE (long). Queries Dhan `/margincalculator/multi` for actual SPAN margin. `lots = min(10, floor(capital / actual_span))`.
 
-1. Reads `today_trade.json` — gets all 4 security IDs + net_credit + SL/TP thresholds
-2. Fetches live LTP for all 4 legs via Dhan `/marketfeed/ltp`
-3. Computes `current_spread_cost = call_spread_cost + put_spread_cost`
-   - `call_spread_cost = short_CE_ltp − long_CE_ltp`
-   - `put_spread_cost = short_PE_ltp − long_PE_ltp`
-4. SL check: `current_spread_cost >= net_credit × 1.5` → spread cost grew 50% above credit collected → close all 4 legs
-5. TP check: `current_spread_cost <= net_credit × 0.35` → spread cost collapsed to 35% → retain 65% of credit → close all 4 legs
-6. On trigger: places 4 market orders to close (reverse the IC), marks `data/today_trade.json` with exit info
+**Step 13p: Telegram alert**
+Shows: signal, both strikes, net credit, SL/TP triggers, lot count.
 
-No Telegram on every run — only on SL/TP hit or error.
+**Step 14p: Duplicate guard**
+Dhan positions API — if any open NF position → abort.
+
+**Step 15p: Place 2 orders (MANDATORY ORDER)**
+```
+1. BUY ATM-150 PE   ← long wing first (Dhan margin rule)
+   wait 2s
+2. SELL ATM PE      ← short leg (margin benefit now applies)
+```
+
+**Step 16p: Write today_trade.json + P&L safety net**
+Writes `strategy=bull_put_credit`, both SIDs, net_credit, lots.
+Calls `POST /v2/pnlExit` — sets account-level loss threshold mirroring SL level as safety net if spread_monitor misses SL.
 
 ---
 
-### 11:00 AM IST — `midday_conviction.py` (Health check)
+**━━ IC PATH (signal == CALL) ━━**
 
-Fetches live data: current BN/NF spread cost, S&P futures, DXY, India VIX, crude — all via Dhan + yfinance.
+**Step 12i: Get IC legs**
+Option chain → all 4 legs. `net_credit = ce_short_ltp + pe_short_ltp - ce_long_ltp - pe_long_ltp`. SPAN margin from Dhan API. `lots = min(10, floor(capital / actual_span))`.
 
-Computes a 4-factor conviction score:
-- NF spot vs entry (moving for us or against?)
-- S&P 500 futures overnight trend
-- India VIX direction since open
-- Current option premium (how close to SL?)
+**Step 13i: Chain signals (informational)**
+Max pain, GEX, straddle cost — Telegram context only, doesn't affect trade decision.
+
+**Step 14i: Telegram alert**
+Signal, VIX, all 4 strikes, net credit, SL trigger (NO TP — IC holds to EOD), lot count.
+
+**Step 15i: Duplicate guard**
+today_trade.json + Dhan positions API.
+
+**Step 16i: Place 4 orders (MANDATORY ORDER)**
+```
+1. BUY ATM+150 CE   ← long CE wing first (Dhan margin rule)
+   wait 2s
+2. SELL ATM CE      ← short CE
+   wait 2s
+3. BUY ATM-150 PE   ← long PE wing first
+   wait 2s
+4. SELL ATM PE      ← short PE
+```
+Failure: BUY fails → FAILED + Telegram + stop. SELL fails after BUY → 🚨 PARTIAL_IC — naked exposure, manual close needed.
+
+**Step 17i: Write today_trade.json + P&L safety net**
+Writes `strategy=nf_iron_condor`, all 4 SIDs, net_credit, lots.
+Calls `POST /v2/pnlExit` same as Bull Put path.
+
+---
+
+### 9:30 AM–3:10 PM (every 1 min) — `spread_monitor.py`
+
+Each minute:
+1. Reads `today_trade.json` — strategy, SIDs, net_credit
+2. Fetches live LTPs via Dhan `/marketfeed/ltp`
+3. Computes current spread cost
+
+**IC path (SL only — no TP):**
+- `current_cost = (ce_short_ltp - ce_long_ltp) + (pe_short_ltp - pe_long_ltp)`
+- SL: `current_cost >= net_credit × 1.5` → close all 4 legs
+- No TP — holding to EOD adds ₹21L over 5 years vs early TP
+
+**Bull Put path (SL + TP):**
+- `current_cost = short_ltp - long_ltp`
+- SL: `current_cost >= net_credit × 1.5`
+- TP: `current_cost <= net_credit × 0.35` (retain 65% of credit)
+
+**Straddle path (SL only):**
+- `current_cost = ce_ltp + pe_ltp`
+- SL: `current_cost >= net_credit × 1.5`
+
+**Exit sequence (all strategies):**
+Primary: `DELETE /v2/positions` — one Dhan API call closes everything atomically.
+Backup: leg-by-leg orders if DELETE fails.
+
+**Exit leg order (backup path):**
+- IC: BUY back shorts (CE short, PE short) → SELL longs (CE wing, PE wing)
+- Bull Put: BUY back short PE → SELL long PE
+- Straddle: BUY back higher-LTP (ITM/challenged) leg first → lower-LTP leg second
+
+Shorts closed before longs to prevent naked short exposure between orders.
+
+---
+
+### 11:00 AM IST — `midday_conviction.py`
+
+Fetches: current spread cost, S&P futures, DXY, India VIX, crude (via Dhan + yfinance).
 
 Sends plain-English Telegram: "Trade looking good — 3 of 4 signs positive" or "Getting shaky — VIX jumped, S&P weak".
 
-Also writes `data/midday_checkpoints.csv` (one row per day): spot, macro, conviction score, reversal detected. The model_evolver reads this at 11 PM — reversal days get 5× weight in ML training.
+Writes `data/midday_checkpoints.csv` (one row per day). model_evolver reads reversal days at 5× weight.
 
 ---
 
-### 3:15 PM IST — `exit_positions.py` (End-of-day squareoff)
+### 3:15 PM IST — `exit_positions.py`
 
-Fetches all open Nifty NRML positions from Dhan. If any remain (SL/TP didn't fire intraday), closes them with market orders.
+Primary: `DELETE /v2/positions` — one Dhan call closes all open positions atomically. Verifies after 15s.
 
-This is the safety net. If spread_monitor missed a fill, or cron glitched, exit_positions catches it. No position should carry overnight.
+Backup: leg-by-leg market orders (shorts first, then longs) if DELETE fails or positions still showing.
 
-Writes an exit marker file so tomorrow's auto_trader knows today closed clean.
+Retry loop until 3:20 PM hard deadline. After deadline with open positions: 🚨 EMERGENCY Telegram, manual action required.
 
----
-
-### 3:30 PM IST — `trade_journal.py` (P&L log)
-
-Reads `data/today_trade.json` (entry data) + Dhan positions API (exit fill prices).
-
-Computes:
-- Actual P&L: `(net_credit_at_entry − net_cost_at_exit) × lot_size × lots`
-- Exit reason: SL / TP / EOD
-- Duration: entry time → exit time
-
-Appends one row to `data/live_ic_trades.csv` (the live oracle file). Sends EOD Telegram summary.
-
-This CSV is the ground truth for the ML model. Every row = a real trade with a real outcome.
+Writes exit marker file for tomorrow's auto_trader health check.
 
 ---
 
-### 11:00 PM IST — `model_evolver.py` (Brain retraining)
+### 3:30 PM IST — `trade_journal.py`
 
-The nightly ML competition:
+Reads `today_trade.json` + Dhan positions API.
 
-**Data loading:**
-- All historical OHLCV + macro + options data
-- `compute_features()` from ml_engine.py → 60 features (all shifted by 1 day — no lookahead)
+Computes actual P&L: `(net_credit_at_entry − net_cost_at_exit) × lot_size × lots`.
+
+Appends to `data/live_ic_trades.csv`. Sends EOD Telegram.
+
+---
+
+### 11:00 PM IST — `model_evolver.py`
+
+**Data:**
+- All historical OHLCV + macro + options
+- `compute_features()` → 60 features (all shifted 1 day — no lookahead)
 - `data/live_ic_trades.csv` → real outcomes at 10× weight
 - `data/midday_checkpoints.csv` → reversal days at 5× weight
 
-**Feature selection:**
-Random Forest feature importance — keep features with > 1% importance. Discards noise.
+**Feature selection:** RF importance — keep > 1%.
 
-**Optuna HPO — 120 trials:**
-4 models × 30 trials each:
-- Random Forest
-- XGBoost
-- LightGBM
-- CatBoost
+**Optuna HPO — 120 trials:** RF + XGBoost + LightGBM + CatBoost × 30 trials each. Temporal holdout = last 252 trading days. No leakage.
 
-Each trial picks random hyperparameters and evaluates on a 252-day (1 year) temporal holdout. No data leakage — holdout always comes after training.
+**Champion selection:** Best composite (accuracy + recall). Saved `models/champion.pkl` + `models/ensemble/*.pkl`.
 
-**Champion selection:**
-Best composite score = blend of accuracy + recall. Saved as `models/champion.pkl`.
-
-**Ensemble:**
-All 4 best-of-class models saved to `models/ensemble/`. Live predictions use weighted vote from all 4.
-
-**Telegram report:**
-Plain-English summary — which model won, accuracy on holdout, whether live trades are influencing the model, any feature changes.
+**Telegram:** Which model won, holdout accuracy, live trade influence.
 
 ---
 
-### Midnight IST — `autoloop_nf.py` (Autoresearch)
+### Midnight IST — `autoloop_nf.py`
 
-The AI experiment loop:
+1. Reads paper vs live performance, midday reversals, current feature set
+2. Calls Claude API → proposes ONE small change
+3. Writes to `ml_engine_paper.py`
+4. `autoexperiment_nf.py --module ml_engine_paper` → composite score on 252-day holdout
+5. Score ≥ 0.5358 baseline → keep; else revert
+6. 3 consecutive nights outperforming → auto-promote paper → live, commit + push
 
-1. Reads `data/paper_performance.csv` — compares paper model vs live model over last N days
-2. Reads `data/paper_changes.json` — accumulated log of what the paper model tried
-3. Reads `data/midday_checkpoints.csv` — recent reversal patterns
-4. Calls Claude API with all this context + current FEATURE_COLS + current ml_engine code
-5. Claude proposes ONE small, specific change: add a feature, remove a feature, tweak a threshold
-6. Writes the change to `ml_engine_paper.py`
-7. Runs `autoexperiment_nf.py --module ml_engine_paper` — evaluates composite score on 252-day holdout
-8. If score >= 0.5358 (NF baseline): records improvement, accumulates in paper model
-9. If score < 0.5358: reverts change
-10. After 3 nights of consecutive outperformance: auto-promotes paper model → live ml_engine.py, commits to git, pushes via SSH
+Autoresearcher can only touch `ml_engine_paper.py`. Cannot touch live code, cron, Dhan calls.
 
-The autoresearcher can only touch `ml_engine_paper.py` and `data/paper_changes.json`. It cannot touch live code, cron, or Dhan calls. Promotion requires 3 consecutive nights beating the baseline — single-night improvements get discarded.
+---
+
+### 2nd of each month — `regime_watcher.py`
+
+Detects NSE lot size / expiry day changes via Dhan API. On change:
+- Refreshes data
+- Runs 6-month real-options backtest across all strategies
+- Picks best strategy for new regime
+- Auto-patches `LOT_SIZE` in `auto_trader.py`
+- Auto-patches `BULL_PUT_MARGIN_PER_LOT` if Dhan SPAN drifted > 10%
+- Sends Telegram strategy verdict
+
+No human involvement needed.
 
 ---
 
@@ -267,36 +279,30 @@ Live trade → live_ic_trades.csv
                 ↓
            auto_trader (9:30 AM next day)
                 ↓
-           new IC trade
+           new IC or Bull Put trade
 ```
 
 Plus:
 ```
-Midday data → midday_checkpoints.csv
-                   ↓ (5× weight, reversal days)
-              model_evolver
+Midday data → midday_checkpoints.csv → model_evolver (5× weight, reversal days)
+autoloop proposes change → paper model → 3-night streak → live model
+P&L exit (Dhan) + DELETE /v2/positions → safety net if spread_monitor misses SL
 ```
-
-Plus:
-```
-autoloop proposes change → paper model tested → 3-night streak → live model
-```
-
-The system gets smarter every night by learning from its own trades.
 
 ---
 
 ## What Each File Owns
 
-| File | Owns |
-|---|---|
-| `data/today_trade.json` | Shared IC state (written by auto_trader, read by spread_monitor/exit/journal) |
-| `data/live_ic_trades.csv` | Real trade oracle (written by trade_journal, read by model_evolver) |
-| `data/midday_checkpoints.csv` | Midday reversal data (written by midday_conviction, read by model_evolver + autoloop) |
-| `data/signals_ml.csv` | Today's ML prediction (written by ml_engine, read by auto_trader) |
-| `models/champion.pkl` | Best single model (written by model_evolver, read by ml_engine fast path) |
-| `models/ensemble/*.pkl` | 4-model ensemble (written by model_evolver, read by ml_engine fast path) |
-| `data/paper_performance.csv` | Paper vs live comparison (written by autoloop, drives promotion decision) |
+| File | Written by | Read by |
+|---|---|---|
+| `data/today_trade.json` | auto_trader | spread_monitor, exit_positions, trade_journal |
+| `data/live_ic_trades.csv` | trade_journal | model_evolver |
+| `data/midday_checkpoints.csv` | midday_conviction | model_evolver, autoloop |
+| `data/signals_ml.csv` | ml_engine | auto_trader |
+| `models/champion.pkl` | model_evolver | ml_engine fast path |
+| `models/ensemble/*.pkl` | model_evolver | ml_engine fast path |
+| `data/paper_performance.csv` | autoloop | autoloop (promotion decision) |
+| `data/regime_state.json` | regime_watcher | regime_watcher |
 
 ---
 
@@ -305,24 +311,28 @@ The system gets smarter every night by learning from its own trades.
 | Symptom | Likely cause | Check |
 |---|---|---|
 | No 8:50 AM Telegram | health_ping cron not running | `crontab -l`, `logs/health_ping.log` |
-| VIX filter skipped trade | VIX outside 13–20 range | Expected — not a bug |
-| "No positions found" from exit_positions | spread_monitor already closed | Check `data/today_trade.json` for exit_time |
+| "No positions found" from exit_positions | spread_monitor already closed on SL/TP | `data/today_trade.json` → `exit_time` field |
 | model_evolver Telegram missing | Ran after midnight (took > 1h) | `logs/model_evolver.log` |
 | Autoresearch not pushing | SSH key not configured | `ssh -T git@github.com` on VM |
-| PARTIAL SPREAD critical alert | Short leg placed before long filled | Check order logs, manual close needed |
+| PARTIAL_IC critical alert | SELL leg placed but BUY fill delayed | Check Dhan app orders, manual close if needed |
+| P&L exit fires unexpectedly | `profitValue` set below current P&L at time of POST | Check `logs/auto_trader.log` for P&L exit setup line |
+| DELETE /v2/positions non-SUCCESS | AMO window or market closed | Check time — only works 9:15 AM–3:30 PM IST |
 
 ---
 
 ## Key Constants (all in `auto_trader.py`)
 
 ```python
-LOT_SIZE   = 65           # NF lot size since Jan 6 2026
-MAX_LOTS   = 10           # max 10 IC lots (both sides tie up margin)
-PAPER_MODE = False        # LIVE — real orders from Apr 22 2026
-SPREAD_WIDTH     = 150    # pts between short and long leg (ATM ± 3 strikes)
-CREDIT_SL_FRAC   = 0.5    # SL when spread cost = net_credit × 1.5
-CREDIT_TP_FRAC   = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
-ML_CONF_THRESHOLD = 0.55  # skip if ensemble confidence below this
-VIX_MIN_TRADE    = 13.0   # dynamic (analyze_confidence updates nightly)
-VIX_MAX_TRADE    = 20.0   # panic ceiling
+PAPER_MODE         = False      # LIVE — real orders from Apr 22 2026
+IRON_CONDOR_MODE   = True       # primary strategy path
+LOT_SIZE           = 65         # NF lot size from Jan 6 2026
+MAX_LOTS           = 10         # IC max lots
+SPREAD_WIDTH       = 150        # pts between short and long leg (ATM ± 3 strikes)
+CREDIT_SL_FRAC     = 0.5        # SL: spread cost grew 50% above entry credit
+CREDIT_TP_FRAC     = 0.65       # TP: retain 65% (Bull Put only — IC has no TP)
+ML_CONF_THRESHOLD  = 0.55       # informational only (bypassed in IRON_CONDOR_MODE)
+VIX_MIN_TRADE      = 13.0       # informational only (bypassed in IRON_CONDOR_MODE)
+VIX_MAX_TRADE      = 20.0       # informational only (bypassed in IRON_CONDOR_MODE)
+BULL_PUT_MARGIN_PER_LOT = 55_000  # fallback only — actual sizing via Dhan SPAN API
+STRADDLE_MARGIN_PER_LOT = 230_000 # auto-upgrade threshold
 ```

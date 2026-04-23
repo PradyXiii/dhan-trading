@@ -272,7 +272,7 @@ BULL_PUT_MARGIN_PER_LOT  =  55_000  # Fallback for Bull Put 2-leg (actual Dhan S
 # Post-Sep-2025 backtest (7 months, real 1-min data):
 #   Tue DTE=0: 100% WR, ₹4,011/lot gross → IC ✅
 #   Mon DTE=1:  97% WR, ₹1,123/lot gross → IC ✅
-#   Fri DTE=4: Bear Call (CALL days) +₹81/lot net, Bull Put (PUT days) -₹134/lot → Bear Call only ✅
+#   Fri DTE=4: IC 100% WR +₹20.8K (Tue-expiry regime — Bear Call dumped, negative every day)
 # DOW backtest (Sep 2025+, Tue-expiry regime): IC profitable ALL 5 days.
 #   Mon DTE=1: 88.5% WR +₹32.7K  Tue DTE=0: 89.5% WR +₹38.9K
 #   Wed DTE=6: 95.8% WR +₹14.0K  Thu DTE=5: 100% WR +₹15.2K  Fri DTE=4: 100% WR +₹20.8K
@@ -1721,11 +1721,11 @@ def _setup_pnl_exit(net_credit: float, lots: int):
     if DRY_RUN or PAPER_MODE:
         return
     qty          = lots * LOT_SIZE
-    loss_value   = round(net_credit * CREDIT_SL_FRAC * qty, 2)
-    profit_value = round(net_credit * qty * 5, 2)  # 5× theoretical max — won't trigger normally
+    loss_value   = net_credit * CREDIT_SL_FRAC * qty
+    profit_value = net_credit * qty * 5  # 5× theoretical max — won't trigger normally
     payload = {
-        "profitValue":      str(profit_value),
-        "lossValue":        str(loss_value),
+        "profitValue":      f"{profit_value:.2f}",
+        "lossValue":        f"{loss_value:.2f}",
         "productType":      ["INTRADAY", "DELIVERY"],
         "enableKillSwitch": False,
     }
@@ -2527,7 +2527,7 @@ def main():
 
     # Straddle auto-upgrade: if capital ≥ 1 straddle lot margin, switch all days to Short Straddle.
     # Straddle has no wing protection → higher margin (~₹2.3L vs IC ₹93K) but more credit.
-    # Skips IC/Bear Call/Bull Put routing when active. Wed still skipped (DTE 6 = high gamma).
+    # Skips IC/Bull Put routing when active (straddle replaces IC on CALL days only).
     _use_straddle_today = (
         IRON_CONDOR_MODE
         and capital >= STRADDLE_MARGIN_PER_LOT

@@ -285,6 +285,8 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | Bull Put lot sizing used wrong formula (over-sized) | `get_spread_legs()` uses `max_loss_per_lot` as margin proxy. With 150pt spread: formula gives 10 lots when actual Dhan SPAN is ~₹51K/lot → only 2 affordable. | `_fetch_spread_margin_per_lot()` queries Dhan `/v2/margincalculator/multi` for actual SPAN. Lot count overridden after `get_spread_legs()` call: `lots = min(MAX_LOTS, int(capital // margin_1lot))`. Never use formula for lot sizing. |
 | IC on PUT signal days (wrong strategy routing) | Before Apr 2026: `_use_bull_put_today = False` always → IC ran on both CALL and PUT days, wasting the 100% WR Bull Put edge. | Fixed: `_use_bull_put_today = (signal == "PUT")`. IC path guarded with `and not _use_bull_put_today`. Do not revert. |
 | Wrong exit leg order (IC/spread) | Closing long (wing) before short triggers naked short exposure → Dhan demands full unhedged margin mid-exit, can cause rejection or margin call. | Always close shorts first (BUY back), then longs (SELL). IC: CE short → PE short → CE long → PE long. Spread: short → long. Both `_close_ic()` and `_squareoff_all()` now enforce this order. |
+| `pnlExit` value format wrong | `str(round(1500.0, 2))` = `"1500.0"` (one decimal). Dhan API expects `"1500.00"` (two decimals). Wrong format likely causes non-ACTIVE response silently. | Use `f"{value:.2f}"` not `str(round(value, 2))`. Fixed in `_setup_pnl_exit()`. |
+| `DELETE /v2/positions` outside market hours | Returns non-SUCCESS if called during AMO window (after 3:30 PM) or on weekends. spread_monitor stops at 3:10 PM, exit_positions runs at 3:15 PM — both within window. | Only an issue if `exit_positions.py` or `spread_monitor.py` is called manually outside 9:15 AM–3:30 PM IST. Backup leg-by-leg path handles it automatically. |
 
 ---
 
@@ -303,7 +305,7 @@ Auto-upgrades to Short Straddle when capital ≥ ₹2.3L. No human input needed.
 | File | Purpose |
 |---|---|
 | `auto_trader.py` | Morning runner (9:30 AM) — orchestrates all steps, picks credit spread legs, places both orders via Dhan |
-| `spread_monitor.py` | Intraday cron (every 1 min, 9:30 AM–3:29 PM) — watches spread cost, exits both legs on SL/TP |
+| `spread_monitor.py` | Intraday cron (every 1 min, 9:30 AM–3:10 PM) — watches spread cost; primary exit via DELETE /v2/positions, backup leg-by-leg |
 | `signal_engine.py` | Rule-based signal scorer (4 active indicators) → `data/signals.csv` |
 | `ml_engine.py` | Walk-forward training → `data/signals_ml.csv`; fast predict via champion.pkl + ensemble |
 | `model_evolver.py` | Nightly 11 PM — Optuna HPO (RF/XGB/LGB/CAT) → `models/champion.pkl` + ensemble |
@@ -314,7 +316,7 @@ Auto-upgrades to Short Straddle when capital ≥ ₹2.3L. No human input needed.
 | `data_fetcher.py` | Downloads OHLCV + global market data → `data/*.csv` |
 | `health_ping.py` | Pre-market heartbeat (8:50 AM) — token/capital/freshness checks |
 | `midday_conviction.py` | Midday thesis reassessment (11 AM) — branches on spread vs naked schema → Telegram summary |
-| `exit_positions.py` | EOD 3:15 PM — squares off open Nifty F&O positions (long AND short legs for spreads) |
+| `exit_positions.py` | EOD 3:15 PM — primary: DELETE /v2/positions (one call); backup: leg-by-leg shorts-first |
 | `trade_journal.py` | EOD 3:30 PM — logs actual fills; spreads → `live_ic_trades.csv` |
 | `lot_expiry_scanner.py` | Monthly cron — detects Nifty50 lot size / expiry day changes |
 | `regime_watcher.py` | Monthly cron (2nd of month) — detects regime changes, runs backtest, auto-patches LOT_SIZE, sends Telegram strategy verdict |
@@ -413,6 +415,9 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 15p. place_credit_spread()              — BUY long (hedge) first, SELL short
 16p. _write_today_spread_trade()        — today_trade.json: strategy=bull_put_credit
                                           fields: short_sid/long_sid, net_credit, lots
+17p. _setup_pnl_exit(net_credit, lots)  — POST /v2/pnlExit: account-level safety net
+                                          lossValue = net_credit × 0.5 × qty (mirrors SL)
+                                          fires only if spread_monitor misses SL (VM crash etc)
 
 ── IC PATH (IRON_CONDOR_MODE, all CALL signal days) ─────────────────────────
 12i. get_ic_legs(expiry, capital)       — all 4 legs from OC; _fetch_ic_margin_per_lot()
@@ -424,6 +429,7 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
      └── 🚨 PARTIAL_IC* alerts if any leg fails mid-sequence
 17i. _write_today_ic_trade()            — today_trade.json: strategy=nf_iron_condor
                                           fields: ce/pe_short_sid/long_sid, ce/pe_credit, net_credit
+18i. _setup_pnl_exit(net_credit, lots)  — same P&L safety net as Bull Put path above
 ```
 
 ---
