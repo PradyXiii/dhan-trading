@@ -609,6 +609,28 @@ def _write_midday_checkpoint(record: dict) -> None:
             w.writeheader()
             w.writerows(existing)
         _log(f"Midday checkpoint saved → {path.name}")
+        # Wiki raw dump — reversal patterns feed wiki_compiler monthly compile
+        try:
+            import os as _os
+            _wiki_raw = _os.path.join(_HERE, "docs", "wiki", "raw")
+            _os.makedirs(_wiki_raw, exist_ok=True)
+            from datetime import datetime as _dt
+            _month = _dt.now().strftime("%Y-%m")
+            _reversal = str(record.get("reversal_detected", "")).lower() == "true"
+            _codes = record.get("reason_codes", "")
+            if isinstance(_codes, list):
+                _codes = "|".join(_codes)
+            _line = (
+                f"{today_str} | reversal={_reversal} | "
+                f"signal={record.get('signal','')} | "
+                f"conviction={record.get('conviction_score','')} | "
+                f"verdict={record.get('verdict','')} | "
+                f"reason_codes={_codes}\n"
+            )
+            with open(_os.path.join(_wiki_raw, f"{_month}_reversals.txt"), "a") as _f:
+                _f.write(_line)
+        except Exception:
+            pass
     except Exception as e:
         _log(f"Failed to write midday checkpoint: {e}")
 

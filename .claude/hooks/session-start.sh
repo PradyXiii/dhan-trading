@@ -1,5 +1,6 @@
 #!/bin/bash
 # Auto-pull latest CLAUDE.md, rules, and gotchas from repo on every new session.
+# Also injects wiki index into session context for full knowledge map on startup.
 
 PROJ="${CLAUDE_PROJECT_DIR:-.}"
 BRANCH="nifty-strategies"
@@ -14,7 +15,18 @@ if [ -f "$PROJ/data/paper_performance.csv" ]; then
   SCORE=" | last composite: $(tail -1 "$PROJ/data/paper_performance.csv" | cut -d',' -f3 2>/dev/null)"
 fi
 
-MSG="NF IC repo auto-pulled | branch: $BRANCH$SCORE | recent commits: $LOG"
+# Wiki index — inject top-level knowledge map into every session
+WIKI_CTX=""
+if [ -f "$PROJ/docs/wiki/index.md" ]; then
+  # Include index (catalog of all pages) and a one-liner from each article
+  WIKI_CTX=" | WIKI KNOWLEDGE MAP: $(cat "$PROJ/docs/wiki/index.md" | head -40 | tr '\n' ' ' | sed 's/  */ /g')"
+  # Include latest log entry (what was compiled last)
+  if [ -f "$PROJ/docs/wiki/log.md" ]; then
+    LAST_LOG=$(grep "^## \[" "$PROJ/docs/wiki/log.md" | tail -1)
+    WIKI_CTX="$WIKI_CTX | Last wiki compile: $LAST_LOG"
+  fi
+fi
 
+MSG="NF IC repo auto-pulled | branch: $BRANCH$SCORE$WIKI_CTX | recent commits: $LOG"
 printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' \
   "$(echo "$MSG" | sed 's/"/\\"/g' | tr '\n' ' ')"

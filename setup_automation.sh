@@ -147,6 +147,12 @@ LOG_ROTATE_COMMENT="# Weekly log rotation — Sun 2 AM IST, truncate logs > 10 M
 AUTOLOOP_CMD="30 18 * * 1-5 cd $SCRIPT_DIR && python3 autoloop_nf.py >> $LOG_DIR/autoloop_nf.log 2>&1"
 AUTOLOOP_COMMENT="# Autoresearch — Mon–Fri midnight IST, paper-trading AI improvement loop"
 
+# Weekly wiki compile — Monday 6 AM IST (0:30 AM UTC)
+# Compiles raw session discoveries into structured wiki articles via Claude API.
+# Runs after weekend; incorporates the whole week's experiment dumps + evolver reports.
+WIKI_CMD="30 0 * * 1 cd $SCRIPT_DIR && python3 wiki_compiler.py >> $LOG_DIR/wiki_compiler.log 2>&1"
+WIKI_COMMENT="# Weekly wiki compile — Monday 6 AM IST, raw discoveries → structured articles"
+
 # Remove old entries (all scripts) if any
 EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "auto_trader" \
@@ -173,7 +179,9 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "Pre-market health" \
   | grep -v "Autoresearch" \
   | grep -v "Morning news brief" \
-  | grep -v "Weekly log rotation")
+  | grep -v "Weekly log rotation" \
+  | grep -v "wiki_compiler" \
+  | grep -v "Weekly wiki compile")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -201,6 +209,8 @@ $EVOLVER_COMMENT
 $EVOLVER_CMD
 $AUTOLOOP_COMMENT
 $AUTOLOOP_CMD
+$WIKI_COMMENT
+$WIKI_CMD
 $LOG_ROTATE_COMMENT
 $LOG_ROTATE_CMD"
 
@@ -248,6 +258,10 @@ echo "  Autoresearch   : Mon–Fri midnight IST (AI model improvement, paper tra
 echo "  Autoloop log   : $LOG_DIR/autoloop_nf.log"
 echo ""
 echo "  Log rotation   : Sunday 2:00 AM IST weekly (truncates logs > 10 MB)"
+echo ""
+
+echo "  Wiki compiler  : Monday 6:00 AM IST weekly (raw discoveries → wiki articles)"
+echo "  Wiki log       : $LOG_DIR/wiki_compiler.log"
 echo ""
 echo "  To watch the log live:     tail -f $LOG_DIR/auto_trader.log"
 echo "  To test manually now:      python3 auto_trader.py --dry-run"

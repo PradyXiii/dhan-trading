@@ -140,8 +140,9 @@ def _call_claude(system: str, user: str) -> dict | None:
         return None
 
 
-def _lint():
-    """Check for orphan pages, missing cross-links."""
+def _lint(deep: bool = False):
+    """Check for orphan pages, broken links, and (if deep=True) contradictions via Claude."""
+    import re
     print("Linting wiki...")
     issues = []
     all_pages = list(_WIKI.rglob("*.md"))
@@ -149,30 +150,155 @@ def _lint():
 
     for page in all_pages:
         content = page.read_text(encoding="utf-8")
-        # Find [[links]]
-        import re
         links = re.findall(r"\[\[([^\]]+)\]\]", content)
         for link in links:
             link_stem = Path(link).stem
             if link_stem not in all_page_stems:
                 issues.append(f"  {page.relative_to(_WIKI)}: broken link [[{link}]]")
 
-    # Check for pages not linked from index
     index_content = _INDEX.read_text(encoding="utf-8") if _INDEX.exists() else ""
     for page in all_pages:
         if page.name in ("index.md", "log.md"):
             continue
         rel = str(page.relative_to(_WIKI)).replace("\\", "/")
-        stem = page.stem
-        if stem not in index_content and rel not in index_content:
+        if page.stem not in index_content and rel not in index_content:
             issues.append(f"  Orphan page (not in index): {rel}")
 
     if issues:
-        print(f"Found {len(issues)} issues:")
+        print(f"Structural issues ({len(issues)}):")
         for i in issues:
             print(i)
     else:
-        print("No issues found.")
+        print("No structural issues found.")
+
+    # Deep lint: Claude checks for contradictions across pages
+    if deep:
+        print("\nDeep lint: checking for contradictions...")
+        all_content = ""
+        for page in all_pages:
+            if page.name in ("log.md",):
+                continue
+            rel = str(page.relative_to(_WIKI)).replace("\\", "/")
+            all_content += f"\n\n### {rel}\n{page.read_text(encoding='utf-8')[:2000]}"
+
+        system = (
+            "You are auditing a trading system knowledge base for contradictions. "
+            "Find claims that directly contradict each other across different pages. "
+            "A contradiction = two statements that cannot both be true. "
+            "Return a numbered list. If none found, return 'No contradictions found.'"
+        )
+        user = f"Review these wiki pages for contradictions:\n{all_content}"
+        result = _call_claude(system, user)
+        if result:
+            print("Contradiction check result:")
+            print(result)
+        else:
+            # _call_claude returns dict for compile, but here we want raw text
+            print("  (Claude API unavailable for deep lint)")
+
+
+def _query(question: str, save: bool = True):
+    """Answer a question using wiki knowledge + optionally save as new wiki page."""
+    print(f"Querying wiki: {question}")
+    all_content = ""
+    for page in _WIKI.rglob("*.md"):
+        if page.name == "log.md":
+            continue
+        rel = str(page.relative_to(_WIKI)).replace("\\", "/")
+        all_content += f"\n\n### {rel}\n{page.read_text(encoding='utf-8')[:3000]}"
+
+    system = (
+        "You are a knowledge base for an automated Nifty50 options trading system. "
+        "Answer the question using ONLY information from the wiki pages provided. "
+        "If the information is not in the wiki, say so explicitly. "
+        "Be specific: cite which page contains the relevant information. "
+        "Format: direct answer, then 'Source: [[page]]'."
+    )
+    user = f"Wiki pages:\n{all_content}\n\nQuestion: {question}"
+
+    # Use raw text call for query (not JSON)
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        print("ERROR: ANTHROPIC_API_KEY not set")
+        return
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=MODEL, max_tokens=MAX_TOKENS,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": user}],
+        )
+        answer = response.content[0].text.strip()
+        print(f"\nAnswer:\n{answer}\n")
+
+        if save:
+            # Save valuable query results as new wiki pages
+            slug = question.lower()[:40].replace(" ", "_").replace("?", "")
+            slug = "".join(c for c in slug if c.isalnum() or c == "_")
+            page_path = f"queries/{slug}.md"
+            content = (
+                f"# Query: {question}\n\n"
+                f"**Asked:** {_today_ist()}\n\n"
+                f"## Answer\n\n{answer}\n\n"
+                f"## Related pages\n*(add links manually)*\n"
+            )
+            _write_wiki_page(page_path, content)
+            _append_log(f"query | '{question[:60]}' → saved as {page_path}")
+            print(f"  Answer saved to: docs/wiki/{page_path}")
+    except Exception as e:
+        print(f"Query failed: {e}")
+
+
+def _refresh_research_program():
+    """
+    Update research_program_nf.md with recently tried ideas from experiment history.
+    Reads data/experiment_history.json, extracts last 60 experiments, asks Claude
+    to add a 'Recently tried' section marking what's been explored.
+    """
+    import json
+    exp_history = _HERE / "data" / "experiment_history.json"
+    research_prog = _HERE / "research_program_nf.md"
+
+    if not exp_history.exists() or not research_prog.exists():
+        print("  Skipping research program refresh (files not found).")
+        return
+
+    history = json.loads(exp_history.read_text())
+    if not history:
+        return
+
+    recent = history[-60:]
+    kept = [e for e in recent if e["kept"]]
+    discarded = [e for e in recent if not e["kept"]]
+
+    kept_lines = "\n".join(f"  ✅ {e['date']}: {e['description']}" for e in kept[-20:])
+    disc_lines = "\n".join(f"  ❌ {e['date']}: {e['description']}" for e in discarded[-20:])
+
+    current_prog = research_prog.read_text(encoding="utf-8")
+
+    # Check if recently-tried section already exists
+    if "## Recently tried" in current_prog:
+        # Replace the section
+        import re
+        new_section = (
+            f"## Recently tried (auto-updated {_today_ist()}, last {len(recent)} experiments)\n\n"
+            f"### Kept ({len(kept)} experiments improved composite):\n{kept_lines or '  (none yet)'}\n\n"
+            f"### Discarded ({len(discarded)} experiments didn't help):\n{disc_lines or '  (none yet)'}\n"
+        )
+        updated = re.sub(
+            r"## Recently tried.*?(?=\n## |\Z)", new_section, current_prog, flags=re.DOTALL
+        )
+    else:
+        # Append new section
+        updated = current_prog + (
+            f"\n\n---\n\n## Recently tried (auto-updated {_today_ist()}, last {len(recent)} experiments)\n\n"
+            f"### Kept ({len(kept)} experiments improved composite):\n{kept_lines or '  (none yet)'}\n\n"
+            f"### Discarded ({len(discarded)} experiments didn't help):\n{disc_lines or '  (none yet)'}\n"
+        )
+
+    research_prog.write_text(updated, encoding="utf-8")
+    print(f"  research_program_nf.md refreshed: {len(kept)} kept, {len(discarded)} discarded in last {len(recent)} experiments.")
 
 
 def compile_raw_files(dry_run: bool = False):
@@ -242,15 +368,23 @@ def main():
     parser = argparse.ArgumentParser(description="Compile raw discoveries into wiki")
     parser.add_argument("--dry-run",  action="store_true", help="Show what would compile, no API calls")
     parser.add_argument("--lint",     action="store_true", help="Check for broken links and orphan pages")
+    parser.add_argument("--lint-deep",action="store_true", help="--lint + Claude contradiction check")
     parser.add_argument("--rebuild",  action="store_true", help="Recompile from scratch")
+    parser.add_argument("--query",    type=str, default="", help="Answer a question from wiki knowledge")
+    parser.add_argument("--no-save",  action="store_true", help="With --query: don't save answer as page")
     args = parser.parse_args()
 
-    if args.lint:
-        _lint()
+    if args.query:
+        _query(args.query, save=not args.no_save)
+    elif args.lint or args.lint_deep:
+        _lint(deep=args.lint_deep)
     elif args.rebuild:
         rebuild_all()
+        _refresh_research_program()
     else:
         compile_raw_files(dry_run=args.dry_run)
+        if not args.dry_run:
+            _refresh_research_program()
 
 
 if __name__ == "__main__":

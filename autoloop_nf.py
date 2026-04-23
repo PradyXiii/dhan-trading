@@ -62,6 +62,7 @@ _PAPER_FILE      = _HERE / "ml_engine_paper.py"
 _PAPER_PERF_CSV  = _HERE / "data" / "paper_performance.csv"
 _PAPER_CHANGES   = _HERE / "data" / "paper_changes.json"
 _EXP_HISTORY     = _HERE / "data" / "experiment_history.json"  # never reset
+_EXP_TSV         = _HERE / "data" / "experiment_history.tsv"   # grep-able mirror
 
 
 # ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -393,15 +394,27 @@ def _dump_experiment_to_wiki(description: str, kept: bool, score_before: float, 
 def _record_experiment(description: str, kept: bool, score_before: float, score_after: float) -> None:
     """Append every experiment (kept or discarded) to the lifetime history. Never reset."""
     _EXP_HISTORY.parent.mkdir(exist_ok=True)
+    date_str = datetime.now(_IST).strftime("%Y-%m-%d")
     history = json.loads(_EXP_HISTORY.read_text()) if _EXP_HISTORY.exists() else []
     history.append({
-        "date": datetime.now(_IST).strftime("%Y-%m-%d"),
+        "date": date_str,
         "description": description,
         "kept": kept,
         "before": round(score_before, 4),
         "after": round(score_after, 4),
     })
     _EXP_HISTORY.write_text(json.dumps(history, indent=2))
+    # TSV mirror — grep-able: grep KEPT data/experiment_history.tsv | wc -l
+    try:
+        status = "KEPT" if kept else "DISCARDED"
+        delta = round(score_after - score_before, 4)
+        write_header = not _EXP_TSV.exists() or _EXP_TSV.stat().st_size == 0
+        with open(_EXP_TSV, "a", encoding="utf-8") as f:
+            if write_header:
+                f.write("date\tstatus\tbefore\tafter\tdelta\tdescription\n")
+            f.write(f"{date_str}\t{status}\t{score_before:.4f}\t{score_after:.4f}\t{delta:+.4f}\t{description}\n")
+    except Exception:
+        pass
     _dump_experiment_to_wiki(description, kept, score_before, score_after)
 
 
@@ -1270,6 +1283,27 @@ def main():
     kept_paper_count = 0
     kept_immediate_count = 0
 
+    # ── Autoresearch branch (Karpathy pattern) ────────────────────────────────
+    # Isolate nightly experiments on a dedicated branch. Kept commits are merged
+    # back to main_branch at end; zero-improvement sessions leave no trace.
+    _main_branch = _current_branch()
+    # Recover if previous run left an orphaned autoresearch branch
+    if _main_branch.startswith("autoresearch/"):
+        print(f"[Branch] Recovered from orphaned branch {_main_branch} → nifty-strategies")
+        _git("checkout", "nifty-strategies")
+        _git("branch", "-D", _main_branch)
+        _main_branch = "nifty-strategies"
+    _ar_branch = f"autoresearch/{datetime.now(_IST).strftime('%Y-%m-%d')}"
+    if not args.dry_run:
+        rc_br, out_br = _git("checkout", "-b", _ar_branch)
+        if rc_br != 0:
+            print(f"[Branch] Could not create {_ar_branch} (non-fatal): {out_br[:80]}")
+            _ar_branch = _main_branch  # fall back to working on main branch directly
+        else:
+            print(f"[Branch] Experiments isolated on {_ar_branch}")
+    else:
+        _ar_branch = _main_branch  # dry-run: no branch games
+
     # ── Step 7: Experiment loop ───────────────────────────────────────────────
     for i in range(1, n_experiments + 1):
         print(f"\n[Exp {i}/{n_experiments}] Calling Claude...")
@@ -1526,19 +1560,56 @@ def main():
     print(f"  Live score:  {b_live:.4f} → {best_live:.4f}")
     print(f"{'='*60}\n")
 
-    # Push any local commits from this run (paper experiments, promotion, etc.)
-    # so GitHub mirrors the VM. Non-interactive: fails fast if auth isn't set up.
-    if not args.dry_run and (kept_paper_count + kept_immediate_count) > 0:
-        branch = _current_branch()
-        rc, out = _git("push", "origin", branch)
-        if rc == 0:
-            print(f"[Git] Pushed new commits to origin/{branch}.")
-        else:
-            print(f"[Git] Push skipped/failed (not fatal): {out.splitlines()[0] if out else 'no output'}")
-
+    # ── Merge autoresearch branch + push ─────────────────────────────────────
     kept_total = kept_paper_count + kept_immediate_count
+    if not args.dry_run:
+        if _ar_branch != _main_branch:
+            if kept_total > 0:
+                # Merge experiment commits back to main branch
+                _git("checkout", _main_branch)
+                rc_m, out_m = _git("merge", _ar_branch, "--no-ff",
+                                   "-m", f"autoresearch {datetime.now(_IST).strftime('%Y-%m-%d')}: "
+                                         f"{kept_total} improvement(s) kept")
+                if rc_m == 0:
+                    rc_p, out_p = _git("push", "origin", _main_branch)
+                    if rc_p == 0:
+                        print(f"[Git] Merged {_ar_branch} → {_main_branch} and pushed.")
+                    else:
+                        print(f"[Git] Push failed (non-fatal): {out_p.splitlines()[0] if out_p else ''}")
+                    _git("branch", "-d", _ar_branch)
+                else:
+                    print(f"[Git] Merge failed — branch {_ar_branch} retained: {out_m[:80]}")
+            else:
+                # No improvements — delete autoresearch branch cleanly
+                _git("checkout", _main_branch)
+                _git("branch", "-d", _ar_branch)
+                print(f"[Branch] No improvements — deleted {_ar_branch}")
+        elif kept_total > 0:
+            # Fell back to main branch (no autoresearch branch created) — push directly
+            rc, out = _git("push", "origin", _main_branch)
+            if rc == 0:
+                print(f"[Git] Pushed new commits to origin/{_main_branch}.")
+            else:
+                print(f"[Git] Push skipped/failed (not fatal): {out.splitlines()[0] if out else 'no output'}")
     discarded = n_experiments - kept_total
     claude_cost = _get_claude_cost_yesterday()
+
+    # ── Session-end wiki dump (item 4) ────────────────────────────────────────
+    try:
+        _WIKI_RAW.mkdir(parents=True, exist_ok=True)
+        month = datetime.now(_IST).strftime("%Y-%m")
+        session_file = _WIKI_RAW / f"{month}_sessions.txt"
+        today_str = datetime.now(_IST).strftime("%Y-%m-%d %H:%M IST")
+        kept_names = [e["description"] for e in experiment_log if e.get("kept")]
+        with open(session_file, "a", encoding="utf-8") as f:
+            f.write(
+                f"[{today_str}] experiments={n_experiments} kept={kept_total} discarded={discarded} "
+                f"paper={b_paper:.4f}→{best_paper:.4f} live={b_live:.4f}→{best_live:.4f}\n"
+            )
+            if kept_names:
+                f.write(f"  KEPT: {' | '.join(kept_names)}\n")
+    except Exception:
+        pass
 
     # Check updated streak
     should_promote2, streak2, _ = _check_paper_promotion()
@@ -1575,6 +1646,14 @@ def main():
         )
 
     _send(summary_msg)
+
+    # ── Monthly wiki compile (1st of each month) ──────────────────────────────
+    if datetime.now(_IST).day == 1 and not args.dry_run:
+        print("[Wiki] 1st of month — running wiki_compiler.py to compile raw discoveries...")
+        try:
+            subprocess.run([sys.executable, "wiki_compiler.py"], cwd=str(_HERE), timeout=300)
+        except Exception as e:
+            print(f"[Wiki] Compile failed (non-critical): {e}")
 
     # ── Step 9: Run evolver if immediate changes were made ────────────────────
     if kept_immediate_count > 0 and not args.no_evolver:

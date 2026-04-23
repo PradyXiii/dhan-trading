@@ -1138,6 +1138,26 @@ def main():
     except Exception as e:
         print(f"  Telegram report failed: {e}")
 
+    # ── Wiki raw dump ─────────────────────────────────────────────────────────
+    try:
+        from pathlib import Path as _Path
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        _ist = _tz((_td(hours=5, minutes=30)))
+        _wiki_raw = _Path(__file__).parent / "docs" / "wiki" / "raw"
+        _wiki_raw.mkdir(parents=True, exist_ok=True)
+        _month = _dt.now(_ist).strftime("%Y-%m")
+        _today = _dt.now(_ist).strftime("%Y-%m-%d")
+        _top3 = [f[0] for f in (feature_importances[:3] if feature_importances else [])]
+        _line = (
+            f"{_today} | {meta['model_type'].upper()} | acc={meta['accuracy']:.1%} "
+            f"| score={meta['score']:.4f} | signal={today_signal} conf={today_conf:.0%} "
+            f"| top3_features={','.join(_top3)}\n"
+        )
+        with open(_wiki_raw / f"{_month}_evolver.txt", "a", encoding="utf-8") as _f:
+            _f.write(_line)
+    except Exception:
+        pass
+
     print("\n  Model Evolver complete.")
     print("=" * 60)
 
