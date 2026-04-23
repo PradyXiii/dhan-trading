@@ -30,8 +30,8 @@ _INDEX      = _WIKI / "index.md"
 _LOG        = _WIKI / "log.md"
 _IST        = timezone(timedelta(hours=5, minutes=30))
 
-MODEL       = "claude-opus-4-6"
-MAX_TOKENS  = 32768   # Claude Opus 4.6 max output. Full wiki rewrites can be big
+MODEL       = "claude-sonnet-4-6"
+MAX_TOKENS  = 32768   # Claude Sonnet 4.6 supports up to 64K output. Full wiki rewrites can be big
 
 WIKI_PAGES = {
     "strategy/ic_research.md":      "NF IC + Bull Put strategy research, backtest results, discarded strategies",

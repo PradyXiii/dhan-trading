@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 N_EXPERIMENTS    = 5
-MODEL            = "claude-opus-4-6"
+MODEL            = "claude-sonnet-4-6"
 MAX_TOKENS       = 2048
 PNL_GUARD        = 0.90
 PAPER_ADVANTAGE  = 0.015    # paper must beat live by ≥1.5% (combined score)
@@ -616,11 +616,11 @@ def _promote_paper_to_live(streak: int, avg_advantage: float) -> None:
 
 _COST_LOG_DIR = _HERE / "data"
 
-# Claude claude-opus-4-6 pricing (per 1M tokens, USD)
-_PRICE_IN      = 5.00
-_PRICE_OUT     = 25.00
-_PRICE_CACHE_W = 6.25   # cache write
-_PRICE_CACHE_R = 0.50   # cache read
+# Claude claude-sonnet-4-6 pricing (per 1M tokens, USD)
+_PRICE_IN      = 3.00
+_PRICE_OUT     = 15.00
+_PRICE_CACHE_W = 3.75   # cache write
+_PRICE_CACHE_R = 0.30   # cache read
 
 
 def _record_api_usage(usage) -> None:
