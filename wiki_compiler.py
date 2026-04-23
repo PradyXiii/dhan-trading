@@ -209,6 +209,10 @@ def _lint(deep: bool = False):
         if page.name in ("index.md", "log.md"):
             continue
         rel = str(page.relative_to(_WIKI)).replace("\\", "/")
+        # queries/ are auto-generated Q&A artifacts, not curated articles —
+        # don't expect them in the index
+        if rel.startswith("queries/"):
+            continue
         if page.stem not in index_content and rel not in index_content:
             issues.append(f"  Orphan page (not in index): {rel}")
 
