@@ -114,6 +114,9 @@ def save_state(state, dry_run=False):
 #  Dhan — current lot size and expiry day
 # ─────────────────────────────────────────────────────────────────────────────
 
+NF_SYMBOL_VARIANTS = {"NIFTY", "NIFTY50", "NIFTY 50"}
+
+
 def fetch_current_lot_size():
     """
     Fetch current NF lot size from Dhan scrip master.
@@ -131,11 +134,10 @@ def fetch_current_lot_size():
             return None
         reader = csv.DictReader(io.StringIO(r.text))
         for row in reader:
-            sym  = (row.get("SEM_TRADING_SYMBOL", "") or "").upper()
-            name = (row.get("SM_SYMBOL_NAME",     "") or "").upper()
+            sym  = (row.get("SEM_TRADING_SYMBOL", "") or "").upper().strip()
+            name = (row.get("SM_SYMBOL_NAME",     "") or "").upper().strip()
             inst = (row.get("SEM_INSTRUMENT_NAME","") or "").upper()
-            if (("NIFTY" in sym and "BANK" not in sym)
-                    or ("NIFTY" in name and "BANK" not in name)):
+            if (sym in NF_SYMBOL_VARIANTS or name in NF_SYMBOL_VARIANTS):
                 if inst in ("OPTIDX", "FUTIDX"):
                     lot = row.get("SEM_LOT_UNITS") or row.get("SEM_LOT_SIZE") or ""
                     try:
@@ -282,10 +284,11 @@ def pick_best_strategy(results):
     # Sort by WR descending, then P&L descending
     candidates.sort(key=lambda x: (x[1]["wr"], x[1]["total_pnl"]), reverse=True)
 
-    # Prefer the researched hybrid if it's within 5% WR of the top
+    # Prefer the researched hybrid if it's within 10% WR of the top
+    # (Bull Put 100% vs hybrid 93% = 7% gap — hybrid earns more P&L, should win)
     top_wr = candidates[0][1]["wr"]
     for k, v in candidates:
-        if k == PREFER and v["wr"] >= top_wr - 0.05:
+        if k == PREFER and v["wr"] >= top_wr - 0.10:
             return PREFER
     return candidates[0][0]
 
@@ -394,12 +397,12 @@ def check_and_patch_bull_put_margin(dry_run=False):
         return None, False, ""
 
     text = AUTO_TRADER.read_text()
-    m = re.search(r"^BULL_PUT_MARGIN_PER_LOT\s*=\s*(\d+)", text, re.MULTILINE)
+    m = re.search(r"^BULL_PUT_MARGIN_PER_LOT\s*=\s*([\d_]+)", text, re.MULTILINE)
     if not m:
         print("  BULL_PUT_MARGIN_PER_LOT not found in auto_trader.py")
         return live_margin, False, ""
 
-    current_fallback = int(m.group(1))
+    current_fallback = int(m.group(1).replace('_', ''))
     drift_pct = abs(live_margin - current_fallback) / current_fallback
 
     print(f"  Live Bull Put SPAN margin: ₹{live_margin:,.0f}  "
@@ -413,7 +416,7 @@ def check_and_patch_bull_put_margin(dry_run=False):
     # Patch: round up to next 1000 for headroom
     new_fallback = int((live_margin // 1000 + 1) * 1000)
     new_text = re.sub(
-        r"^(BULL_PUT_MARGIN_PER_LOT\s*=\s*)\d+",
+        r"^(BULL_PUT_MARGIN_PER_LOT\s*=\s*)[\d_]+",
         lambda match: f"{match.group(1)}{new_fallback}",
         text, flags=re.MULTILINE,
     )
