@@ -68,10 +68,29 @@ NSE_HOLIDAYS_2026 = {
 
 
 def _is_trading_day() -> bool:
-    today = date.today()
+    today = datetime.now(_IST).date()
     if today.weekday() >= 5:
         return False
     return today not in NSE_HOLIDAYS_2026
+
+
+def _time_to_trade() -> str:
+    """Return human-readable time until next 9:30 AM IST trade window."""
+    now = datetime.now(_IST)
+    target = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    if now >= target:
+        # Past today's window — move to next trading day
+        target += timedelta(days=1)
+        while target.weekday() >= 5 or target.date() in NSE_HOLIDAYS_2026:
+            target += timedelta(days=1)
+    diff = target - now
+    hrs, rem = divmod(int(diff.total_seconds()), 3600)
+    mins = rem // 60
+    if hrs == 0:
+        return f"~{mins} min"
+    if diff.days >= 1:
+        return target.strftime("%a %d %b 9:30 AM IST")
+    return f"~{hrs}h {mins}m"
 
 
 def _check_token() -> tuple:
@@ -122,7 +141,7 @@ def _check_signal() -> tuple:
             # How old is the signal?
             try:
                 sig_date = date.fromisoformat(sig_date_str)
-                days_old = (date.today() - sig_date).days
+                days_old = (datetime.now(_IST).date() - sig_date).days
             except Exception:
                 days_old = 99
 
@@ -166,7 +185,8 @@ def _check_critical_log() -> str | None:
 
 
 def main():
-    today_label = date.today().strftime("%d %b %Y (%A)")
+    today_label = datetime.now(_IST).strftime("%d %b %Y (%A)")
+    eta         = _time_to_trade()
     notify.log(f"Health ping — {today_label}")
 
     if not _is_trading_day():
@@ -211,7 +231,7 @@ def main():
             f"🚨 <b>Pre-Market Alert — {today_label}</b>\n\n"
             f"System issues detected before 9:30 AM trade:\n\n"
             f"{issue_lines}\n\n"
-            f"<b>Fix these before the trade fires in ~25 min.</b>"
+            f"<b>Fix these before the trade fires in {eta}.</b>"
         )
     else:
         # All-clear heartbeat — one concise line
@@ -224,7 +244,7 @@ def main():
             f"💚 <b>System OK — {today_label}</b>\n\n"
             f"Token      ✓  (capital {capital_str})\n"
             f"Signal     {signal_label}  (score {score_label}  ·  {sig_age}  ·  {sig_src})\n\n"
-            f"<i>Auto trader fires in ~25 min at 9:30 AM IST.</i>"
+            f"<i>Auto trader fires in {eta}.</i>"
         )
 
 
