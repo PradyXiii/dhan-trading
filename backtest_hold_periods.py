@@ -408,23 +408,105 @@ def aggregate(trades):
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
+DOW_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4,
+           "MON": 0, "TUE": 1, "WED": 2, "THU": 3, "FRI": 4,
+           "0": 0, "1": 1, "2": 2, "3": 3, "4": 4}
+DOW_NAMES = {0: "Mon(DTE1)", 1: "Tue(DTE0)", 2: "Wed(DTE6)", 3: "Thu(DTE5)", 4: "Fri(DTE4)"}
+
+
+def aggregate_dow(trades):
+    """Stats per day-of-week."""
+    if not trades:
+        return {}
+    df = pd.DataFrame(trades)
+    out = {}
+    for day_num, day_name in DOW_NAMES.items():
+        sub = df[df["dow"] == ["Mon","Tue","Wed","Thu","Fri"][day_num]]
+        if len(sub) == 0:
+            continue
+        wins = sub["win"].sum()
+        out[day_num] = {
+            "day": day_name,
+            "trades": len(sub),
+            "wr_pct": round(100 * wins / len(sub), 1),
+            "avg_pnl": round(sub["net_pnl"].mean(), 0),
+            "total_pnl": round(sub["net_pnl"].sum(), 0),
+        }
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--strategy", default=None, help="single strategy (all if omitted)")
     parser.add_argument("--ml", action="store_true", help="use ML signals")
     parser.add_argument("--start", default=None, help="start date (YYYY-MM-DD)")
+    parser.add_argument("--dow", default=None,
+                        help="filter to specific days e.g. --dow Mon,Tue or --dow Thu,Fri")
+    parser.add_argument("--dow-breakdown", action="store_true",
+                        help="show WR/P&L per day-of-week (hold=0d, all strategies)")
     args = parser.parse_args()
 
-    print("\n" + "="*100)
-    print("MULTI-DAY HOLDING PERIOD BACKTEST — Nifty50 Options")
-    print("="*100)
+    # Parse DOW filter
+    dow_filter = None
+    if args.dow:
+        parts = [p.strip() for p in args.dow.split(",")]
+        dow_filter = set()
+        for p in parts:
+            if p in DOW_MAP:
+                dow_filter.add(DOW_MAP[p])
+            else:
+                print(f"Unknown day '{p}'. Use Mon/Tue/Wed/Thu/Fri.")
+                sys.exit(1)
 
     signals = load_signals(ml=args.ml)
     ohlcv = load_nf_ohlcv()
     vix_df = load_vix()
     opts_daily = load_opts_daily()
 
+    # Filter signals by DOW
+    if dow_filter is not None:
+        signals = signals[signals["date"].dt.weekday.isin(dow_filter)].reset_index(drop=True)
+        dow_label = "+".join(DOW_NAMES[d] for d in sorted(dow_filter))
+    else:
+        dow_label = "All days"
+
     strategies = {args.strategy: STRATEGIES[args.strategy]} if args.strategy else STRATEGIES
+
+    # ── DOW BREAKDOWN MODE ────────────────────────────────────────────────────
+    if args.dow_breakdown:
+        print("\n" + "="*100)
+        print(f"DOW BREAKDOWN — hold=0d, Sep 2025+ regime (Tue expiry)")
+        print(f"{'Strategy':<24} {'Mon(DTE1)':>14} {'Tue(DTE0)':>14} "
+              f"{'Wed(DTE6)':>14} {'Thu(DTE5)':>14} {'Fri(DTE4)':>14}")
+        print(f"{'':24} {'WR%  TotalP&L':>14} {'WR%  TotalP&L':>14} "
+              f"{'WR%  TotalP&L':>14} {'WR%  TotalP&L':>14} {'WR%  TotalP&L':>14}")
+        print("-"*100)
+
+        for strat_key, strat_def in sorted(strategies.items()):
+            trades = run_strategy(strat_key, 0, signals, ohlcv, vix_df, opts_daily, args.start)
+            dow_stats = aggregate_dow(trades)
+
+            row = f"{strat_def['name']:<24}"
+            for day_num in [0, 1, 2, 3, 4]:
+                if day_num in dow_stats:
+                    s = dow_stats[day_num]
+                    pnl_k = s['total_pnl'] / 1000
+                    sign = "+" if pnl_k >= 0 else ""
+                    cell = f"{s['wr_pct']}% {sign}{pnl_k:.1f}K"
+                else:
+                    cell = "—"
+                row += f"{cell:>14}"
+            print(row)
+
+        print("="*100)
+        print("P&L in ₹K (thousands). WR% = win rate. hold=0d = same-day EOD exit.")
+        print("="*100)
+        return
+
+    # ── HOLD PERIOD TABLE MODE ─────────────────────────────────────────────────
+    print("\n" + "="*100)
+    print(f"MULTI-DAY HOLDING PERIOD BACKTEST — Nifty50 Options  [{dow_label}]")
+    print("="*100)
 
     for strat_key, strat_def in sorted(strategies.items()):
         print(f"\n{strat_def['name'].upper()}")
