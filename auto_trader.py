@@ -264,7 +264,8 @@ CREDIT_SPREAD_MODE = True
 SPREAD_WIDTH       = 150    # NF: 50pt strike spacing × 3 = 150pts  (BNF was 300)
 CREDIT_SL_FRAC     = 0.5    # NF IC: SL: spread expands 50% above credit received
 CREDIT_TP_FRAC     = 0.65   # TP when spread cost falls to net_credit × 0.35 (backtest-validated)
-IC_MARGIN_PER_LOT  = 100_000  # Fallback only — live code queries Dhan /margincalculator/multi for actual margin
+IC_MARGIN_PER_LOT        = 100_000  # Fallback only — live code queries Dhan /margincalculator/multi for actual margin
+BULL_PUT_MARGIN_PER_LOT  =  55_000  # Fallback for Bull Put 2-leg (actual Dhan SPAN ≈ ₹50-55K/lot)
 
 # ── Day-of-week filter ────────────────────────────────────────────────────────
 # NF expiry = Tuesday (from Sep 1 2025, NSE circular).
@@ -1678,6 +1679,39 @@ def _fetch_ic_margin_per_lot(ce_short_sid, ce_short_ltp,
     return float(IC_MARGIN_PER_LOT)
 
 
+def _fetch_spread_margin_per_lot(short_sid, short_ltp, long_sid, long_ltp) -> float:
+    """Call Dhan /margincalculator/multi for 1 NF spread lot (SELL short + BUY long).
+    Returns actual SPAN+Exposure margin. Falls back to BULL_PUT_MARGIN_PER_LOT on error."""
+    try:
+        payload = {
+            "dhanClientId":    CLIENT_ID,
+            "includePosition": True,
+            "includeOrders":   True,
+            "scripList": [
+                {"exchangeSegment": "NSE_FNO", "transactionType": "SELL",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(short_sid), "price": float(short_ltp), "triggerPrice": 0},
+                {"exchangeSegment": "NSE_FNO", "transactionType": "BUY",
+                 "quantity": LOT_SIZE, "productType": "MARGIN",
+                 "securityId": str(long_sid), "price": float(long_ltp), "triggerPrice": 0},
+            ],
+        }
+        resp = requests.post("https://api.dhan.co/v2/margincalculator/multi",
+                             headers=HEADERS, json=payload, timeout=10)
+        if resp.status_code == 200:
+            d = resp.json()
+            margin = float(d.get("total_margin") or d.get("totalMargin") or 0)
+            if margin > 5_000:
+                notify.log(f"Bull Put margin/lot from Dhan: ₹{margin:,.0f}")
+                return margin
+            notify.log(f"Margin API returned suspicious value {margin} — using fallback")
+        else:
+            notify.log(f"Margin API {resp.status_code}: {resp.text[:120]} — using fallback")
+    except Exception as e:
+        notify.log(f"Margin API error: {e} — using fallback ₹{BULL_PUT_MARGIN_PER_LOT:,.0f}")
+    return float(BULL_PUT_MARGIN_PER_LOT)
+
+
 def _get_oc_leg(oc: dict, strike: float, opt_type_lc: str):
     """Return (security_id, ltp) for a strike from the OC dict, or (None, 0.0)."""
     for k in [f"{float(strike):.6f}", str(int(strike)), f"{float(strike):.1f}"]:
@@ -2368,8 +2402,8 @@ def main():
         return
 
     score_max = 4
-    _use_bear_call_today = False   # Bear Call dumped — backtest -₹1.25L in 7 months
-    _use_bull_put_today  = False   # Thu/Fri now in IC_SKIP_DAYS; these paths never reached
+    _use_bear_call_today = False          # Bear Call dumped — -₹24.03L over 7 years, 13.5% WR
+    _use_bull_put_today  = (signal == "PUT")  # PUT signal days → Bull Put (2 legs, Dhan-margin-sized lots)
 
     # ── News sentiment (morning_brief.py output, written at 9:15 AM) ────────
     news_vote    = 0    # +1 aligns with signal, -1 opposes
@@ -2658,24 +2692,30 @@ def main():
         return
 
     # ══════════════════════════════════════════════════════════════════════════
-    # BULL PUT PATH  (Thu/Fri PUT days — _use_bull_put_today = True)
+    # BULL PUT PATH  (PUT signal days, all weekdays — _use_bull_put_today = True)
     # NF Bull Put: BUY ATM-150 PE + SELL ATM PE (2 legs, directional credit)
+    # Backtest Sep 2025–Apr 2026: 100% WR, ₹3,794/trade avg (51 trades)
     # ══════════════════════════════════════════════════════════════════════════
     if IRON_CONDOR_MODE and _use_bull_put_today:
         (short_sid, long_sid, short_strike, long_strike,
-         short_ltp, long_ltp, net_credit, lots, spot) = get_spread_legs(
+         short_ltp, long_ltp, net_credit, _, spot) = get_spread_legs(
              signal, expiry, capital)   # signal == "PUT"
 
         if short_sid is None:
             die(f"Could not fetch Bull Put legs for expiry {expiry}.")
 
-        _dow_label = {3: "Thursday", 4: "Friday"}.get(_today_weekday, "")
+        # Dhan margin API gives actual SPAN lot sizing (formula in get_spread_legs over-sizes)
+        margin_1lot = _fetch_spread_margin_per_lot(short_sid, short_ltp, long_sid, long_ltp)
+        lots = min(MAX_LOTS, int(capital // margin_1lot))
+        if lots < 1:
+            die(f"Insufficient capital for 1 Bull Put lot "
+                f"(need ₹{margin_1lot:,.0f}, have ₹{capital:,.0f}).")
         nf_expiry_str = expiry.strftime('%d%b%Y').upper()
         max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
         sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
 
         notify.send(
-            f"🐂  <b>Nifty Bull Put — {_dow_label}</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"🐂  <b>Nifty Bull Put</b>  ·  {today_wd}, {today_label}{sig_line}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Score      {score:+d} / {score_max}{score_desc}\n"
             f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
@@ -2723,11 +2763,11 @@ def main():
         return
 
     # ══════════════════════════════════════════════════════════════════════════
-    # IRON CONDOR PATH  (IRON_CONDOR_MODE = True)
+    # IRON CONDOR PATH  (CALL signal days only — PUT days routed to Bull Put above)
     # NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
-    # Trades every CALL/PUT signal day (Mon+Tue) — direction-neutral, theta-positive
+    # Backtest Sep 2025–Apr 2026: 97.5% WR (67 CALL days out of 118 total)
     # ══════════════════════════════════════════════════════════════════════════
-    if IRON_CONDOR_MODE:
+    if IRON_CONDOR_MODE and not _use_bull_put_today:
         ic = get_ic_legs(expiry, capital)
         if ic is None:
             die(
