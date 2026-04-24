@@ -293,6 +293,13 @@ def _journal_ic(intent: dict, today_label: str):
     exit_time     = intent.get("exit_time", "")
     pnl_inr       = float(intent.get("pnl_inr", 0))
 
+    # Per-leg exit prices written by exit_positions.py after EOD close
+    ce_short_exit = float(intent.get("ce_short_exit", 0))
+    ce_long_exit  = float(intent.get("ce_long_exit",  0))
+    pe_short_exit = float(intent.get("pe_short_exit", 0))
+    pe_long_exit  = float(intent.get("pe_long_exit",  0))
+    has_exits = any([ce_short_exit, ce_long_exit, pe_short_exit, pe_long_exit])
+
     pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
 
     oracle_correct = None
@@ -347,20 +354,50 @@ def _journal_ic(intent: dict, today_label: str):
     emoji    = {"TP": "🟢", "SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
     pnl_sign = "+" if pnl_inr >= 0 else ""
     mode_tag = "[PAPER] " if paper else ""
+    total_credit_inr = int(net_credit * lots * lot_size)
 
     lines = [
         f"📓 <b>{mode_tag}IC Journal · {today_label}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Nifty50 Iron Condor  ·  {signal}  ·  {lots} lot",
-        f"CE  SELL {int(ce_short_strike)} / BUY {int(ce_long_strike)}  → credit ₹{ce_net_credit:.0f}",
-        f"PE  SELL {int(pe_short_strike)} / BUY {int(pe_long_strike)}  → credit ₹{pe_net_credit:.0f}",
-        f"Total credit  ₹{net_credit:.0f} / lot",
+        f"Iron Condor  ·  {lots} lot  ·  {emoji} "
+        + (f"{exit_reason} {exit_time} IST" if exit_reason != "OPEN" else "position still open"),
+        f"Collected upfront: ₹{total_credit_inr:,}  (₹{net_credit:.0f}/share × {lots*lot_size} shares)",
         "",
-        (f"Exit  {emoji} {exit_reason}" + (f"  at {exit_time} IST" if exit_time else ""))
-        if exit_reason != "OPEN" else "Exit  🔓 position still open",
-        "",
-        f"<b>P&amp;L  {pnl_sign}₹{pnl_inr:,.0f}  ({pnl_sign}{pnl_pct:.0f}% of max credit)</b>",
+    ]
+
+    if has_exits:
+        qty = lots * lot_size
+
+        def _leg_pnl(entry, exit_price, is_short):
+            raw = (entry - exit_price) * qty if is_short else (exit_price - entry) * qty
+            return int(raw)
+
+        ce_s_pnl = _leg_pnl(ce_short_entry, ce_short_exit, is_short=True)
+        ce_l_pnl = _leg_pnl(ce_long_entry,  ce_long_exit,  is_short=False)
+        pe_s_pnl = _leg_pnl(pe_short_entry, pe_short_exit, is_short=True)
+        pe_l_pnl = _leg_pnl(pe_long_entry,  pe_long_exit,  is_short=False)
+
+        def _fmt(p):
+            return f"+₹{p:,}" if p >= 0 else f"-₹{abs(p):,}"
+
+        lines += [
+            "<pre>Leg              Entry  Exit    P&amp;L",
+            f"SELL {int(ce_short_strike)} CE   ₹{ce_short_entry:.0f}    ₹{ce_short_exit:.0f}    {_fmt(ce_s_pnl)}",
+            f"BUY  {int(ce_long_strike)} CE   ₹{ce_long_entry:.0f}    ₹{ce_long_exit:.0f}    {_fmt(ce_l_pnl)}",
+            f"SELL {int(pe_short_strike)} PE   ₹{pe_short_entry:.0f}    ₹{pe_short_exit:.0f}    {_fmt(pe_s_pnl)}",
+            f"BUY  {int(pe_long_strike)} PE   ₹{pe_long_entry:.0f}    ₹{pe_long_exit:.0f}    {_fmt(pe_l_pnl)}</pre>",
+            "",
+        ]
+    else:
+        lines += [
+            f"CE  SELL {int(ce_short_strike)} / BUY {int(ce_long_strike)}  → credit ₹{ce_net_credit:.0f}",
+            f"PE  SELL {int(pe_short_strike)} / BUY {int(pe_long_strike)}  → credit ₹{pe_net_credit:.0f}",
+            "",
+        ]
+
+    lines += [
         "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"<b>P&amp;L  {pnl_sign}₹{abs(pnl_inr):,.0f}  ({pnl_sign}{pnl_pct:.0f}% of max credit)</b>",
     ]
     notify.send("\n".join(lines))
 

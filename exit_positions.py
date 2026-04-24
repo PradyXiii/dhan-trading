@@ -503,6 +503,42 @@ def _squareoff_all(positions) -> list:
     return results
 
 
+def _write_exit_to_today_trade(today_trade: dict, positions: list,
+                               exit_time_str: str, total_pnl: float):
+    """
+    Write per-leg exit prices, total P&L, and exit_reason=EOD back to
+    today_trade.json so trade_journal.py can read real exit data 15 min later.
+    Positions list must still have lastTradedPrice (fetched before closing).
+    """
+    if not today_trade or DRY_RUN:
+        return
+    sid_to_ltp = {
+        str(p.get("securityId", p.get("security_id", ""))): float(
+            p.get("lastTradedPrice", p.get("ltp", 0))
+        )
+        for p in positions
+        if p.get("securityId") or p.get("security_id")
+    }
+    updates = {
+        "exit_done":   True,
+        "exit_reason": "EOD",
+        "exit_time":   exit_time_str,
+        "pnl_inr":     round(total_pnl, 2),
+    }
+    if today_trade.get("strategy") == "nf_iron_condor":
+        for leg in ("ce_short", "ce_long", "pe_short", "pe_long"):
+            sid = str(today_trade.get(f"{leg}_sid", ""))
+            if sid and sid in sid_to_ltp:
+                updates[f"{leg}_exit"] = sid_to_ltp[sid]
+    path = os.path.join(DATA_DIR, "today_trade.json")
+    try:
+        with open(path, "w") as f:
+            json.dump({**today_trade, **updates}, f, indent=2)
+        notify.log(f"Exit data → today_trade.json: EOD P&L ₹{total_pnl:,.0f}")
+    except Exception as e:
+        notify.log(f"Could not update today_trade.json with exit data: {e}")
+
+
 def _build_eod_telegram(today_trade, results, exit_time_str):
     mode       = "  [DRY RUN]" if DRY_RUN else ""
     total_pnl  = sum(r["pnl"] for r in results)
@@ -579,6 +615,7 @@ def main():
         return
 
     positions = get_open_positions()
+    _initial_positions = list(positions)  # LTPs captured here; used for exit price journal
     instr_label = "Nifty IC" if _load_today_trade().get("strategy") == "nf_iron_condor" else "Nifty50"
 
     if not positions:
@@ -659,8 +696,10 @@ def main():
     # All closed — build and send summary
     now_ist = datetime.now(_IST)
     exit_time_str = now_ist.strftime("%H:%M")
+    total_pnl_eod = sum(r["pnl"] for r in final_results)
     msg = _build_eod_telegram(today_trade, final_results, exit_time_str)
     notify.send(msg)
+    _write_exit_to_today_trade(today_trade, _initial_positions, exit_time_str, total_pnl_eod)
     _write_exit_marker()
 
 
