@@ -2572,6 +2572,36 @@ def main():
         f"(score {score:+d}) but ML says {signal} — ML wins\n"
     ) if _ml_conflict else ""
 
+    # ── Plain-English helpers for Telegram messages ──────────────────────────
+    if abs(score) == score_max:
+        score_plain = f"all {score_max}/{score_max} checks green ✓"
+    elif abs(score) >= 3:
+        score_plain = f"{abs(score)}/{score_max} checks green ✓"
+    elif abs(score) >= 2:
+        score_plain = f"{abs(score)}/{score_max} checks lean one way"
+    else:
+        score_plain = f"{abs(score)}/{score_max} checks lean — weak signal"
+    if ml_conf >= 0.70:
+        conf_plain = "high confidence"
+    elif ml_conf >= 0.60:
+        conf_plain = "moderate confidence"
+    else:
+        conf_plain = "low confidence"
+    ml_conflict_plain = (
+        f"⚠️  Basic checks lean {'up' if rule_says_call else 'down'} "
+        f"but computer model says {'up' if ml_says_call else 'down'} — going with model\n"
+    ) if _ml_conflict else ""
+    if news_vote == 1:
+        _nd = "positive" if "BULLISH" in news_note else "mixed"
+        news_plain_line = f"📰 Headlines: {_nd} — supports trade ✓\n"
+    elif news_vote == -1:
+        _nd = "negative" if "BEARISH" in news_note else "mixed"
+        news_plain_line = f"📰 Headlines: {_nd} — conflicts with trade ⚠️\n"
+    elif news_note:
+        news_plain_line = "📰 Headlines: neutral — no strong view\n"
+    else:
+        news_plain_line = ""
+
     # ══════════════════════════════════════════════════════════════════════════
     # SHORT STRADDLE PATH  (_use_straddle_today = True — capital auto-upgrade)
     # SELL ATM CE + SELL ATM PE — unhedged, all Mon/Tue/Thu/Fri signal days
@@ -2704,27 +2734,34 @@ def main():
             max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
             sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
 
+            _bp_total_credit = int(net_credit * lots * LOT_SIZE)
+            _bp_sl_loss      = int(net_credit * CREDIT_SL_FRAC * lots * LOT_SIZE)
+            _bp_tp_gain      = int(net_credit * CREDIT_TP_FRAC * lots * LOT_SIZE)
+
             notify.send(
-                f"🐂  <b>Nifty Bull Put</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+                f"🐂  <b>Bull Put placed</b>  ·  {today_wd}, {today_label}{sig_line}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Score      {score:+d} / {score_max}{score_desc}\n"
-                f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
-                f"{ml_conflict_row}"
-                f"{news_row}"
-                f"Capital    {cap_label}\n"
+                f"📊 <b>What the model checked</b>\n"
+                f"Market checklist: {score_plain}\n"
+                f"Computer model: {ml_conf:.0%} confident ({conf_plain})\n"
+                f"Direction: market expected to stay flat or go up\n"
+                f"{ml_conflict_plain}"
+                f"{news_plain_line}"
+                f"Capital: {cap_label}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"SELL  <code>NIFTY {nf_expiry_str} {int(short_strike)} PE</code>  @ ₹{short_ltp:.0f}\n"
-                f"BUY   <code>NIFTY {nf_expiry_str} {int(long_strike)} PE</code>  @ ₹{long_ltp:.0f}\n"
-                f"Net credit  ₹{net_credit:.0f} / share   "
-                f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
-                f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
+                f"💰 <b>The trade</b>\n"
+                f"Collected <b>₹{_bp_total_credit:,}</b> upfront from 2 option contracts\n"
+                f"(₹{net_credit:.0f}/share × {lots*LOT_SIZE:,} shares, {lots} lot{'s' if lots > 1 else ''})\n\n"
+                f"Profit zone: Nifty stays ABOVE ₹{int(short_strike):,} until expiry\n"
+                f"Safety net: ₹{int(long_strike):,} (caps our max loss if market falls hard)\n"
+                f"Nifty now: ₹{spot:,.0f}  ·  Expiry {expiry.strftime('%d %b')} ({int(dte)}d to go)\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"SL   spread cost > ₹{sl_trig:.0f}  (cost grew {CREDIT_SL_FRAC*100:.0f}% above credit)\n"
-                f"TP   spread cost < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  (65% of credit locked in)\n"
-                f"Exit EOD 3:15 PM if neither hit\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
-                f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
+                f"⚡ <b>Risk</b>\n"
+                f"Best case (Nifty stays above ₹{int(short_strike):,}):  +₹{_bp_total_credit:,}\n"
+                f"Take-profit (65% locked in, exit early):          +₹{_bp_tp_gain:,}\n"
+                f"Worst case (stop-loss fires):                      −₹{_bp_sl_loss:,}\n"
+                f"Stop-loss fires if spread cost > ₹{sl_trig:.0f}/share\n\n"
+                f"Take-profit or 3:15 PM exit — whichever comes first"
             )
 
             if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
@@ -2792,14 +2829,15 @@ def main():
         if chain_sig:
             mp      = chain_sig["max_pain_strike"]
             mp_d    = chain_sig["max_pain_dist"]
-            gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
-            mp_dir  = "above" if mp_d > 0 else "below"
-            mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
+            gex_lbl = "Calm — market likely stays in a range" if chain_sig["gex_positive"] else "Active — directional move likely"
+            _mp_gap = abs(int(spot - mp))
+            _mp_rel = "above" if mp > spot else "below"
             chain_line = (
                 f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Max pain   ₹{mp:,.0f}  ({abs(mp_d):.1f}% {mp_dir} spot → {mp_bias})\n"
-                f"Gamma      {gex_lbl}\n"
-                f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
+                f"📌 Option market snapshot\n"
+                f"Pin target (where most options expire worthless): ₹{mp:,.0f}  (₹{_mp_gap:,} {_mp_rel} Nifty now)\n"
+                f"Day type: {gex_lbl}\n"
+                f"Market pricing ±₹{chain_sig['straddle']:.0f}/share swing today"
             )
 
         nf_expiry_str = exp_used.strftime('%d%b%Y').upper()
@@ -2808,29 +2846,36 @@ def main():
         pe_short_sym  = f"NIFTY {nf_expiry_str} {int(ic['pe_short_strike'])} PE"
         pe_long_sym   = f"NIFTY {nf_expiry_str} {int(ic['pe_long_strike'])} PE"
 
+        _ic_total_credit = int(net_credit * lots * LOT_SIZE)
+        _ic_sl_loss      = int(net_credit * CREDIT_SL_FRAC * lots * LOT_SIZE)
+        _ic_sl_trig      = net_credit * (1 + CREDIT_SL_FRAC)
+        _ic_pe_short     = int(ic['pe_short_strike'])
+        _ic_ce_short     = int(ic['ce_short_strike'])
+        _ic_pe_long      = int(ic['pe_long_strike'])
+        _ic_ce_long      = int(ic['ce_long_strike'])
+
         notify.send(
-            f"🦅  <b>Nifty Iron Condor</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+            f"🦅  <b>Iron Condor placed</b>  ·  {today_wd}, {today_label}{sig_line}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Score      {score:+d} / {score_max}{score_desc}\n"
-            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
-            f"{ml_conflict_row}"
-            f"{news_row}"
-            f"Capital    {cap_label}\n"
+            f"📊 <b>What the model checked</b>\n"
+            f"Market checklist: {score_plain}\n"
+            f"Computer model: {ml_conf:.0%} confident ({conf_plain})\n"
+            f"{ml_conflict_plain}"
+            f"{news_plain_line}"
+            f"Capital: {cap_label}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELL  <code>{ce_short_sym}</code>  @ ₹{ic['ce_short_ltp']:.0f}\n"
-            f"BUY   <code>{ce_long_sym}</code>  @ ₹{ic['ce_long_ltp']:.0f}\n"
-            f"SELL  <code>{pe_short_sym}</code>  @ ₹{ic['pe_short_ltp']:.0f}\n"
-            f"BUY   <code>{pe_long_sym}</code>  @ ₹{ic['pe_long_ltp']:.0f}\n"
-            f"Net credit  ₹{net_credit:.0f} / share   "
-            f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
-            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {exp_used.strftime('%d %b')}\n"
+            f"💰 <b>The trade</b>\n"
+            f"Collected <b>₹{_ic_total_credit:,}</b> upfront from 4 option contracts\n"
+            f"(₹{net_credit:.0f}/share × {lots*LOT_SIZE:,} shares, {lots} lot{'s' if lots > 1 else ''})\n\n"
+            f"Profit zone: Nifty stays between ₹{_ic_pe_short:,} and ₹{_ic_ce_short:,}\n"
+            f"Safety wings: ₹{_ic_pe_long:,} (lower cap) · ₹{_ic_ce_long:,} (upper cap)\n"
+            f"Nifty now: ₹{spot:,.0f}  ·  Expiry {exp_used.strftime('%d %b')} ({int(dte)}d to go)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SL   spread cost > ₹{net_credit * (1 + CREDIT_SL_FRAC):.0f}  "
-            f"(cost grew {CREDIT_SL_FRAC*100:.0f}% above credit received)\n"
-            f"Exit EOD 3:15 PM  (no TP — holds for maximum theta decay)\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
-            f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
+            f"⚡ <b>Risk</b>\n"
+            f"Best case (market stays in range):  +₹{_ic_total_credit:,}\n"
+            f"Worst case (stop-loss fires):        −₹{_ic_sl_loss:,}\n"
+            f"Stop-loss fires if spread cost > ₹{_ic_sl_trig:.0f}/share\n\n"
+            f"Exits at 3:15 PM — time passing shrinks option premiums (works in our favour)"
             f"{chain_line}"
         )
 
@@ -2974,14 +3019,15 @@ def main():
         if chain_sig:
             mp      = chain_sig["max_pain_strike"]
             mp_d    = chain_sig["max_pain_dist"]
-            gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
-            mp_dir  = "above" if mp_d > 0 else "below"
-            mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
+            gex_lbl = "Calm — market likely stays in a range" if chain_sig["gex_positive"] else "Active — directional move likely"
+            _mp_gap = abs(int(spot - mp))
+            _mp_rel = "above" if mp > spot else "below"
             chain_line = (
                 f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Max pain   ₹{mp:,.0f}  ({abs(mp_d):.1f}% {mp_dir} spot → {mp_bias})\n"
-                f"Gamma      {gex_lbl}\n"
-                f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
+                f"📌 Option market snapshot\n"
+                f"Pin target (where most options expire worthless): ₹{mp:,.0f}  (₹{_mp_gap:,} {_mp_rel} Nifty now)\n"
+                f"Day type: {gex_lbl}\n"
+                f"Market pricing ±₹{chain_sig['straddle']:.0f}/share swing today"
             )
 
         max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
@@ -3215,14 +3261,15 @@ def main():
     if chain_sig:
         mp      = chain_sig["max_pain_strike"]
         mp_d    = chain_sig["max_pain_dist"]
-        gex_lbl = "Calm (range day likely)" if chain_sig["gex_positive"] else "Active (trend day likely)"
-        mp_dir  = "above" if mp_d > 0 else "below"
-        mp_bias = "PUT bias" if mp_d > 0.5 else ("CALL bias" if mp_d < -0.5 else "neutral")
+        gex_lbl = "Calm — market likely stays in a range" if chain_sig["gex_positive"] else "Active — directional move likely"
+        _mp_gap = abs(int(spot - mp))
+        _mp_rel = "above" if mp > spot else "below"
         chain_line = (
             f"\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Max pain   ₹{mp:,.0f}  ({abs(mp_d):.1f}% {mp_dir} spot → {mp_bias})\n"
-            f"Gamma      {gex_lbl}\n"
-            f"Straddle   ₹{chain_sig['straddle']:.0f}  ({chain_sig['n_strikes']} strikes)"
+            f"📌 Option market snapshot\n"
+            f"Pin target (where most options expire worthless): ₹{mp:,.0f}  (₹{_mp_gap:,} {_mp_rel} Nifty now)\n"
+            f"Day type: {gex_lbl}\n"
+            f"Market pricing ±₹{chain_sig['straddle']:.0f}/share swing today"
         )
 
     stale_line = ""
