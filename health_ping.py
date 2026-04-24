@@ -123,7 +123,7 @@ def _check_token() -> tuple:
 
 def _check_signal() -> tuple:
     """
-    Returns (ok: bool, signal: str, score: int, days_old: int, message: str).
+    Returns (ok, signal, score, ml_conf, days_old, src_filename).
     Reads the latest row from signals_ml.csv (falls back to signals.csv).
     """
     for csv_path in [f"{DATA_DIR}/signals_ml.csv", f"{DATA_DIR}/signals.csv"]:
@@ -135,21 +135,21 @@ def _check_signal() -> tuple:
                 continue
             row = df.iloc[-1]
             sig_date_str = str(row.get("date", ""))
-            signal = str(row.get("signal", "?")).upper()
-            score  = int(row.get("score", 0) if pd.notna(row.get("score", 0)) else 0)
+            signal  = str(row.get("signal", "?")).upper()
+            score   = int(row.get("score", 0) if pd.notna(row.get("score", 0)) else 0)
+            ml_conf = float(row.get("ml_conf", 0) if pd.notna(row.get("ml_conf", 0)) else 0)
 
-            # How old is the signal?
             try:
                 sig_date = date.fromisoformat(sig_date_str)
                 days_old = (datetime.now(_IST).date() - sig_date).days
             except Exception:
                 days_old = 99
 
-            return True, signal, score, days_old, os.path.basename(csv_path)
-        except Exception as e:
+            return True, signal, score, ml_conf, days_old, os.path.basename(csv_path)
+        except Exception:
             continue
 
-    return False, "?", 0, 99, "Both signal CSVs missing — run data_fetcher.py + signal_engine.py"
+    return False, "?", 0, 0.0, 99, "Both signal CSVs missing — run data_fetcher.py + signal_engine.py"
 
 
 def _check_lock() -> str | None:
@@ -195,7 +195,7 @@ def main():
 
     # Run all checks
     token_ok, capital, token_msg  = _check_token()
-    signal_ok, signal, score, days_old, sig_src = _check_signal()
+    signal_ok, signal, score, ml_conf, days_old, sig_src = _check_signal()
     lock_warn    = _check_lock()
     crit_log_msg = _check_critical_log()
 
@@ -239,11 +239,18 @@ def main():
         score_label  = f"{score:+d}" if signal_ok else "?"
         capital_str  = f"₹{capital:,.0f}" if token_ok else "?"
         sig_age      = f"{days_old}d old" if days_old > 0 else "today"
+        conf_str     = f"  ·  ML {ml_conf:.0%}" if signal_ok and ml_conf > 0 else ""
+        # When signal is from yesterday's evolver, warn that 9:30 AM will re-predict
+        stale_note   = (
+            f"\n<i>⚠️ This is last night's model — auto trader re-runs fresh prediction at 9:30 AM "
+            f"with morning data (VIX open, gap) and may pick a different direction.</i>"
+        ) if days_old >= 1 else ""
 
         notify.send(
             f"💚 <b>System OK — {today_label}</b>\n\n"
             f"Token      ✓  (capital {capital_str})\n"
-            f"Signal     {signal_label}  (score {score_label}  ·  {sig_age}  ·  {sig_src})\n\n"
+            f"Signal     {signal_label}  (score {score_label}{conf_str}  ·  {sig_age}  ·  {sig_src})\n"
+            f"{stale_note}\n"
             f"<i>Auto trader fires in {eta}.</i>"
         )
 

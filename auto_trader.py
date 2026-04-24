@@ -857,7 +857,7 @@ def get_todays_signal() -> tuple:
 
     sig_note is empty if today's date matches, or a label like "08 Apr ML" if fallback.
     """
-    today = pd.Timestamp(date.today())
+    today = pd.Timestamp(_ist_today())
 
     # Try ML signals first, fall back to rule-based if unavailable
     for csv_path, label in [
@@ -2376,7 +2376,7 @@ def main():
     # 1b. Holiday check — if Nifty50 has no data for today, NSE is closed
     # (handles Diwali, Republic Day, Holi, etc. without a manual holiday list)
     if not _is_trading_day() and not DRY_RUN:
-        today_label = date.today().strftime("%d %b %Y")
+        today_label = _ist_today().strftime("%d %b %Y")
         notify.send(
             f"📆  <b>Market Holiday</b>\n\n"
             f"{today_label} — NSE is closed today.\n"
@@ -2389,8 +2389,8 @@ def main():
     from datetime import datetime as _dt
     _today_ist     = _dt.now(timezone(timedelta(hours=5, minutes=30))).date()
     _today_weekday = _today_ist.weekday()
-    today_wd       = date.today().strftime("%A")
-    today_label    = date.today().strftime("%d %b %Y")
+    today_wd       = _ist_today().strftime("%A")
+    today_label    = _ist_today().strftime("%d %b %Y")
     if IRON_CONDOR_MODE and _today_weekday in IC_SKIP_DAYS:
         _skip_reason = {
             2: "Wednesday (DTE 6) — all strategies net-negative",
@@ -2455,7 +2455,7 @@ def main():
             ns_gen  = ns.get("generated", "")
             ns_age  = (datetime.now(timezone.utc) -
                        datetime.fromisoformat(ns_gen)).total_seconds() / 3600
-            if ns_date == date.today().isoformat() and ns_age < 6:
+            if ns_date == _ist_today().isoformat() and ns_age < 6:
                 direction  = ns.get("direction", "NEUTRAL")
                 confidence = ns.get("confidence", "LOW")
                 conf_weight = {"HIGH": 1, "MEDIUM": 1, "LOW": 0}.get(confidence, 0)
@@ -2547,7 +2547,7 @@ def main():
 
     # 4. Expiry
     expiry = get_expiry()
-    dte    = max(0.25, (expiry - date.today()).days + 1)
+    dte    = max(0.25, (expiry - _ist_today()).days + 1)
 
     # Shared display helpers (used by both credit spread and naked option paths)
     opt_type  = "CE" if signal == "CALL" else "PE"
@@ -2563,6 +2563,15 @@ def main():
         score_desc = "  ● weak ●"
     sig_line  = f"\n<i>↳ {sig_note}</i>" if sig_note else ""
     news_row  = f"News       {news_note}\n" if news_note else ""
+    # ML-vs-rule conflict: rule score disagrees with ML signal direction
+    # e.g. score=-1 (rules say PUT) but signal=CALL (ML overrides)
+    rule_says_call = score > 0
+    ml_says_call   = (signal == "CALL")
+    _ml_conflict = ml_trained and (rule_says_call != ml_says_call) and score != 0
+    ml_conflict_row = (
+        f"⚠️ ML override  rules say {'CALL' if rule_says_call else 'PUT'} "
+        f"(score {score:+d}) but ML says {signal} — ML wins\n"
+    ) if _ml_conflict else ""
 
     # ══════════════════════════════════════════════════════════════════════════
     # SHORT STRADDLE PATH  (_use_straddle_today = True — capital auto-upgrade)
@@ -2696,6 +2705,7 @@ def main():
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Score      {score:+d} / {score_max}{score_desc}\n"
             f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+            f"{ml_conflict_row}"
             f"{news_row}"
             f"Capital    {cap_label}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2792,6 +2802,7 @@ def main():
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Score      {score:+d} / {score_max}{score_desc}\n"
             f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+            f"{ml_conflict_row}"
             f"{news_row}"
             f"Capital    {cap_label}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
