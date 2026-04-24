@@ -472,7 +472,7 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 9. Telegram: evolver report (plain-language summary)
 ```
 
-Live feedback: the evolver reads `data/live_trades.csv` and injects real outcomes with 10× weight; historical rows matching miss-day patterns get 3× weight boost.
+Live feedback: the evolver reads `data/live_ic_trades.csv` and injects real outcomes with 10× weight; historical rows matching miss-day patterns get 3× weight boost.
 
 ---
 
