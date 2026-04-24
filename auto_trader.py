@@ -1676,10 +1676,12 @@ def _fetch_ic_margin_per_lot(ce_short_sid, ce_short_ltp,
         if resp.status_code == 200:
             d = resp.json()
             margin = float(d.get("total_margin") or d.get("totalMargin") or 0)
-            if margin > 10_000:   # sanity: at least ₹10k for a live IC
+            # 10K–200K: plausible hedged IC margin range. Above 200K = API summed
+            # unhedged individual SELL margins (not applying hedge offset) → use fallback.
+            if 10_000 < margin < 200_000:
                 notify.log(f"IC margin/lot from Dhan: ₹{margin:,.0f}")
                 return margin
-            notify.log(f"Margin API returned suspicious value {margin} — using fallback")
+            notify.log(f"IC margin API returned {margin:,.0f} (out of range) — using fallback ₹{IC_MARGIN_PER_LOT:,.0f}")
         else:
             notify.log(f"Margin API {resp.status_code}: {resp.text[:120]} — using fallback")
     except Exception as e:
@@ -1709,10 +1711,12 @@ def _fetch_spread_margin_per_lot(short_sid, short_ltp, long_sid, long_ltp) -> fl
         if resp.status_code == 200:
             d = resp.json()
             margin = float(d.get("total_margin") or d.get("totalMargin") or 0)
-            if margin > 5_000:
+            # 5K–100K: plausible hedged Bull Put margin. Above 100K = unhedged SELL margin
+            # (API not applying hedge offset from the BUY leg) → use fallback.
+            if 5_000 < margin < 100_000:
                 notify.log(f"Bull Put margin/lot from Dhan: ₹{margin:,.0f}")
                 return margin
-            notify.log(f"Margin API returned suspicious value {margin} — using fallback")
+            notify.log(f"Bull Put margin API returned {margin:,.0f} (out of range) — using fallback ₹{BULL_PUT_MARGIN_PER_LOT:,.0f}")
         else:
             notify.log(f"Margin API {resp.status_code}: {resp.text[:120]} — using fallback")
     except Exception as e:
@@ -2763,6 +2767,13 @@ def main():
     if IRON_CONDOR_MODE and not _use_bull_put_today:
         ic = get_ic_legs(expiry, capital)
         if ic is None:
+            if capital < IC_MARGIN_PER_LOT:
+                notify.send(
+                    f"ℹ️  <b>No trade today — insufficient capital</b>\n\n"
+                    f"IC needs ~₹{IC_MARGIN_PER_LOT:,.0f}/lot but balance is ₹{capital:,.0f}.\n"
+                    f"No position placed. Waiting for capital to rebuild."
+                )
+                return
             die(
                 f"Could not fetch Nifty IC legs for expiry {expiry}.\n"
                 f"All 4 legs (ATM CE/PE + ATM±{SPREAD_WIDTH} CE/PE) must have live prices."
