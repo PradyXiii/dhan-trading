@@ -252,7 +252,7 @@ The docs have the exact answer. Read them first, always.
 3. Add the feature name once to `FEATURE_COLS` — then check: `len(FEATURE_COLS) == len(set(FEATURE_COLS))` (duplicates inflate importance silently)
 4. If feature needs a new data file: `python3 data_fetcher.py` then `python3 data_fetcher.py --backfill` (new CSVs start with 1 row — zero importance until backfilled)
 5. Run `python3 ml_engine.py --analyze` — feature importance must be > 0
-6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.5358** (current NF baseline, post BN→NF migration)
+6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.5521** (current NF baseline as of Apr 2026; autoloop uses live composite dynamically)
 7. Commit + push to `main`
 
 ---
@@ -261,7 +261,7 @@ The docs have the exact answer. Read them first, always.
 
 **Every message to the user must pass this test: would a non-programmer understand it?**
 
-- Numbers need context: "composite score 0.617 — that's 10 points above our 0.515 starting point and above the 0.60 target"
+- Numbers need context: "composite score 0.572 — that's 5 points above our 0.552 baseline"
 - Verdicts not metrics: "the model improved" not "accuracy delta +1.1pp"
 - Error summaries in one sentence: "A variable name conflict in the code caused a text string to end up where a price number was expected" — not the raw Python traceback
 - Status reports in plain terms: "Today's signal is CALL — model says markets will go up" not "model output: P(CALL)=0.62"
