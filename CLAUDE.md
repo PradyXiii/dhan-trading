@@ -343,7 +343,7 @@ Auto-upgrades to Short Straddle when capital ≥ ₹2.3L. No human input needed.
 | `backtest_hold_periods.py` | Strategy research tool — multi-strategy BS-model backtest with regime-report, DOW-breakdown, hold-period analysis |
 | `STRATEGY_RESEARCH.md` | Final strategy research — 7yr backtest results, IC+BullPut verdict, permanently discarded strategies |
 | `replay_today.py` | Post-mortem tool — ensemble replay of today after evolver |
-| `renew_token.py` | Every-5-min token renewer (23h50m interval) |
+| `renew_token.py` | Twice-daily token renewer (7:55 AM + 11 PM IST + @reboot) |
 | `notify.py` | Telegram send/log helper (2 functions) |
 | `autoloop_nf.py` | Daily midnight autoresearch — paper-trades ML changes, auto-promotes after 3 nights of outperformance |
 | `ml_engine_paper.py` | Paper copy of ml_engine.py — autoresearcher tests here first before promoting to live |
@@ -555,7 +555,9 @@ Every NF IC trade is naturally DTE ≤ 7. All 5 weekdays are valid entry days.
 Installed by `setup_automation.sh`:
 
 ```
-*/5 *  * * *    renew_token.py          # every 5 min, all 7 days
+25 2   * * *    renew_token.py          # 7:55 AM IST (pre-trade renewal)
+30 17  * * *    renew_token.py          # 11:00 PM IST (overnight renewal)
+# @reboot renew_token.py               # safety net on VM restart
 35 3   * * 1-5  health_ping.py          # 9:05 AM IST
 45 3   * * 1-5  morning_brief.py        # 9:15 AM IST (news sentiment → data/news_sentiment.json)
 0  4   * * 1-5  auto_trader.py          # 9:30 AM IST
@@ -690,7 +692,7 @@ The autoresearch loop (`autoloop_nf.py`) proposes additions/removals to this lis
 
 ## Dhan API Notes
 
-- **Token**: expires every 24h; auto-renewed by `renew_token.py` every 5 min at T+23h50m. `.env` is rewritten in place.
+- **Token**: expires every 24h; auto-renewed by `renew_token.py` twice daily (7:55 AM + 11 PM IST) + @reboot safety net. `.env` is rewritten in place.
 - **DH-906**: "Market closed" OR "weekend AMO block". Not an account issue.
 - **AMO window**: Mon–Fri after 3:30 PM IST. Weekends reject all `afterMarketOrder: true`.
 - **Super Order**: `/v2/super/orders` — single call for entry + SL + TP.

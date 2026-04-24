@@ -163,7 +163,7 @@ def _close_spread(intent: dict) -> dict:
     short_sid = str(intent["short_sid"])
     long_sid  = str(intent["long_sid"])
     qty       = int(intent["lots"]) * int(intent.get("lot_size", 30))
-    day_tag   = date.today().strftime("%Y%m%d")
+    day_tag   = datetime.now(_IST).date().strftime("%Y%m%d")
 
     base = {
         "dhanClientId":      CLIENT_ID,
@@ -216,7 +216,7 @@ def _close_ic(intent: dict) -> dict:
     Sequence: BUY CE short → BUY PE short → SELL CE long → SELL PE long.
     """
     qty     = int(intent["lots"]) * int(intent.get("lot_size", 65))
-    day_tag = date.today().strftime("%Y%m%d")
+    day_tag = datetime.now(_IST).date().strftime("%Y%m%d")
 
     base = {
         "dhanClientId":      CLIENT_ID,
@@ -270,7 +270,7 @@ def _close_straddle(intent: dict, ce_ltp: float = 0.0, pe_ltp: float = 0.0) -> d
     to stop the bleeding. The winning (lower LTP, nearly OTM) leg closes second.
     """
     qty     = int(intent["lots"]) * int(intent.get("lot_size", 65))
-    day_tag = date.today().strftime("%Y%m%d")
+    day_tag = datetime.now(_IST).date().strftime("%Y%m%d")
 
     base = {
         "dhanClientId":      CLIENT_ID,

@@ -563,7 +563,7 @@ def _journal_straddle(intent: dict, today_label: str):
 
 
 def main():
-    today_label = date.today().strftime("%d %b %Y")
+    today_label = datetime.now(_IST).date().strftime("%d %b %Y")
     notify.log(f"Trade journal — {today_label}")
 
     # 1. Load oracle intent
@@ -594,7 +594,7 @@ def main():
     score          = int(intent.get("signal_score", 0))
     iv             = float(intent.get("iv_at_entry", 0.0))
 
-    lot_size = get_lot_size(date.today())
+    lot_size = get_lot_size(datetime.now(_IST).date())
 
     # 2. Fetch tradebook
     if DRY_RUN:

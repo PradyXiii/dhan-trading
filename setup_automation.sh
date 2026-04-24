@@ -99,6 +99,12 @@ RENEWER_COMMENT="# Token renewer — twice daily 7:55 AM IST (2:25 UTC) + 11:00 
 SCANNER_CMD="30 4 1 * * cd $SCRIPT_DIR && python3 lot_expiry_scanner.py >> $LOG_DIR/scanner.log 2>&1"
 SCANNER_COMMENT="# Nifty50 lot/expiry scanner — runs 1st of month 10 AM IST"
 
+# Monthly regime watcher — 2nd of month at 10:15 AM IST = 4:45 AM UTC
+# Detects strategy regime changes, runs backtest, auto-patches LOT_SIZE, sends Telegram verdict.
+# Runs day after scanner so lot-size overrides are already in place.
+REGIME_CMD="45 4 2 * * cd $SCRIPT_DIR && python3 regime_watcher.py >> $LOG_DIR/regime_watcher.log 2>&1"
+REGIME_COMMENT="# Regime watcher — 2nd of month 10:15 AM IST, detects strategy/lot-size regime changes"
+
 # Nightly model evolver — 11 PM IST = 17:30 UTC, Mon–Fri
 EVOLVER_CMD="30 17 * * 1-5 cd $SCRIPT_DIR && python3 model_evolver.py >> $LOG_DIR/evolver.log 2>&1"
 EVOLVER_COMMENT="# ML Model Evolver — nightly brain training at 11 PM IST"
@@ -181,7 +187,9 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "Morning news brief" \
   | grep -v "Weekly log rotation" \
   | grep -v "wiki_compiler" \
-  | grep -v "Weekly wiki compile")
+  | grep -v "Weekly wiki compile" \
+  | grep -v "regime_watcher" \
+  | grep -v "Regime watcher")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -205,6 +213,8 @@ $CONVICTION_COMMENT
 $CONVICTION_CMD
 $SCANNER_COMMENT
 $SCANNER_CMD
+$REGIME_COMMENT
+$REGIME_CMD
 $EVOLVER_COMMENT
 $EVOLVER_CMD
 $AUTOLOOP_COMMENT

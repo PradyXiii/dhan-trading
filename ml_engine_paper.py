@@ -1459,10 +1459,11 @@ def predict_today():
     Appends/overwrites today's row in signals_ml.csv.
     Called by auto_trader.py each morning.
     """
-    from datetime import date as _date
+    from datetime import date as _date, datetime as _datetime, timezone as _tz, timedelta as _td
     import os as _os
 
-    today_dt  = _date.today()
+    _IST_TZ   = _tz(timedelta(hours=5, minutes=30))
+    today_dt  = _datetime.now(_IST_TZ).date()
     today_ts  = pd.Timestamp(today_dt)
     signals_ml_path = f"{DATA_DIR}/signals_ml.csv"
 

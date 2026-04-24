@@ -83,7 +83,7 @@ def _is_trading_day() -> bool:
     CSV-presence check removed — Dhan historical API never returns today's candle
     pre-market or pre-close, causing real trading days to be skipped.
     """
-    today = date.today()
+    today = datetime.now(_IST).date()
     if today.weekday() >= 5:
         return False
     return today not in NSE_HOLIDAYS_2026
@@ -151,7 +151,7 @@ def _send_exit_telegram(today_trade: dict, sells: list):
     Naked path is fallback — not reachable while auto_trader.py keeps CREDIT_SPREAD_MODE=True.
     """
     strategy = today_trade.get("strategy", "")
-    today_label = date.today().strftime("%d %b %Y")
+    today_label = datetime.now(_IST).date().strftime("%d %b %Y")
 
     # ── NF Iron Condor path ──────────────────────────────────────────────────
     if strategy == "nf_iron_condor":
@@ -570,7 +570,7 @@ def _build_eod_telegram(today_trade, results, exit_time_str):
 
 
 def main():
-    today_label = date.today().strftime("%d %b %Y")
+    today_label = datetime.now(_IST).date().strftime("%d %b %Y")
     notify.log(f"EOD exit check — {today_label}")
 
     # Holiday guard
