@@ -237,12 +237,12 @@ def _score_paper_on_live_trades() -> dict:
     """
     Score the paper model on actual live trade dates vs real market outcomes.
 
-    live_trades.csv records oracle_correct (True/False) + signal (CALL/PUT).
+    live_ic_trades.csv records oracle_correct (True/False) + signal (CALL/PUT).
     We infer the true market direction from those two columns, then ask:
     "What would the paper model have predicted on that date?"
     Returns {'paper_acc': float, 'live_acc': float, 'n_trades': int}.
     """
-    live_csv = _HERE / "data" / "live_trades.csv"
+    live_csv = _HERE / "data" / "live_ic_trades.csv"   # IC trades; live_trades.csv = legacy naked-option only
     empty = {"paper_acc": 0.0, "live_acc": 0.0, "n_trades": 0}
 
     if not live_csv.exists():
