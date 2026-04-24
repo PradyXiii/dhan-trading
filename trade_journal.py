@@ -528,7 +528,7 @@ def _journal_straddle(intent: dict, today_label: str):
     score      = int(intent.get("signal_score", 0))
     ml_conf    = float(intent.get("ml_conf", 0))
 
-    exit_cost   = float(intent.get("exit_cost", 0))
+    exit_cost   = float(intent.get("exit_spread", intent.get("exit_cost", 0)))
     exit_reason = intent.get("exit_reason", "") or "OPEN"
     exit_time   = intent.get("exit_time", "")
     pnl_inr     = float(intent.get("pnl_inr", 0))

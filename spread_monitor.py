@@ -327,9 +327,9 @@ def _update_paper_csv_exit(intent: dict):
 
         exit_cols = [
             "exit_reason", "exit_spread",
-            "exit_short_ltp", "exit_long_ltp",           # 2-leg spread
-            "exit_ce_short_ltp", "exit_ce_long_ltp",     # IC
-            "exit_pe_short_ltp", "exit_pe_long_ltp",     # IC
+            "exit_short_ltp", "exit_long_ltp",   # 2-leg spread
+            "ce_short_exit", "ce_long_exit",      # IC
+            "pe_short_exit", "pe_long_exit",      # IC
             "exit_time", "pnl_inr",
         ]
         for r in rows:
@@ -432,10 +432,10 @@ def main():
             "exit_done":          True,
             "exit_reason":        reason,
             "exit_spread":        round(current_cost, 2),
-            "exit_ce_short_ltp":  round(ce_short_ltp, 2),
-            "exit_ce_long_ltp":   round(ce_long_ltp, 2),
-            "exit_pe_short_ltp":  round(pe_short_ltp, 2),
-            "exit_pe_long_ltp":   round(pe_long_ltp, 2),
+            "ce_short_exit":  round(ce_short_ltp, 2),
+            "ce_long_exit":   round(ce_long_ltp, 2),
+            "pe_short_exit":  round(pe_short_ltp, 2),
+            "pe_long_exit":   round(pe_long_ltp, 2),
             "exit_time":          datetime.now(_IST).strftime("%H:%M"),
             "pnl_inr":            total_pnl,
         })

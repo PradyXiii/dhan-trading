@@ -525,11 +525,30 @@ def _write_exit_to_today_trade(today_trade: dict, positions: list,
         "exit_time":   exit_time_str,
         "pnl_inr":     round(total_pnl, 2),
     }
-    if today_trade.get("strategy") == "nf_iron_condor":
+    strategy = today_trade.get("strategy", "")
+    if strategy == "nf_iron_condor":
         for leg in ("ce_short", "ce_long", "pe_short", "pe_long"):
             sid = str(today_trade.get(f"{leg}_sid", ""))
             if sid and sid in sid_to_ltp:
                 updates[f"{leg}_exit"] = sid_to_ltp[sid]
+    elif strategy in ("bull_put_credit", "bear_call_credit"):
+        short_sid = str(today_trade.get("short_sid", ""))
+        long_sid  = str(today_trade.get("long_sid",  ""))
+        short_ltp = sid_to_ltp.get(short_sid, 0)
+        long_ltp  = sid_to_ltp.get(long_sid,  0)
+        if short_ltp > 0 or long_ltp > 0:
+            updates["exit_short_ltp"] = short_ltp
+            updates["exit_long_ltp"]  = long_ltp
+            updates["exit_spread"]    = round(short_ltp - long_ltp, 2)
+    elif strategy == "nf_short_straddle":
+        ce_sid = str(today_trade.get("ce_sid", ""))
+        pe_sid = str(today_trade.get("pe_sid", ""))
+        ce_ltp = sid_to_ltp.get(ce_sid, 0)
+        pe_ltp = sid_to_ltp.get(pe_sid, 0)
+        if ce_ltp > 0 or pe_ltp > 0:
+            updates["exit_ce_ltp"] = ce_ltp
+            updates["exit_pe_ltp"] = pe_ltp
+            updates["exit_spread"] = round(ce_ltp + pe_ltp, 2)
     path = os.path.join(DATA_DIR, "today_trade.json")
     try:
         with open(path, "w") as f:
