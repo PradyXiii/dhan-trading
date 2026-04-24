@@ -2694,64 +2694,69 @@ def main():
         margin_1lot = _fetch_spread_margin_per_lot(short_sid, short_ltp, long_sid, long_ltp)
         lots = min(MAX_LOTS, int(capital // margin_1lot))
         if lots < 1:
-            die(f"Insufficient capital for 1 Bull Put lot "
-                f"(need ₹{margin_1lot:,.0f}, have ₹{capital:,.0f}).")
-        nf_expiry_str = expiry.strftime('%d%b%Y').upper()
-        max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
-        sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
-
-        notify.send(
-            f"🐂  <b>Nifty Bull Put</b>  ·  {today_wd}, {today_label}{sig_line}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Score      {score:+d} / {score_max}{score_desc}\n"
-            f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
-            f"{ml_conflict_row}"
-            f"{news_row}"
-            f"Capital    {cap_label}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SELL  <code>NIFTY {nf_expiry_str} {int(short_strike)} PE</code>  @ ₹{short_ltp:.0f}\n"
-            f"BUY   <code>NIFTY {nf_expiry_str} {int(long_strike)} PE</code>  @ ₹{long_ltp:.0f}\n"
-            f"Net credit  ₹{net_credit:.0f} / share   "
-            f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
-            f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"SL   spread cost > ₹{sl_trig:.0f}  (cost grew {CREDIT_SL_FRAC*100:.0f}% above credit)\n"
-            f"TP   spread cost < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  (65% of credit locked in)\n"
-            f"Exit EOD 3:15 PM if neither hit\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
-            f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
-        )
-
-        if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
             notify.send(
-                f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
-                f"An open Nifty position already exists.\n"
-                f"Skipping Bull Put to avoid double exposure."
+                f"ℹ️  <b>Bull Put unaffordable — switching to Iron Condor</b>\n\n"
+                f"Bull Put needs ₹{margin_1lot:,.0f}/lot but capital is ₹{capital:,.0f}.\n"
+                f"IC is market-neutral and costs ~₹93K/lot — placing IC instead."
             )
+            _use_bull_put_today = False   # fall through to IC path below
+        if _use_bull_put_today:
+            nf_expiry_str = expiry.strftime('%d%b%Y').upper()
+            max_loss_per_lot = (SPREAD_WIDTH - net_credit) * LOT_SIZE
+            sl_trig = net_credit * (1 + CREDIT_SL_FRAC)
+
+            notify.send(
+                f"🐂  <b>Nifty Bull Put</b>  ·  {today_wd}, {today_label}{sig_line}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Score      {score:+d} / {score_max}{score_desc}\n"
+                f"ML conf    {ml_conf:.0%}{'  ✓' if ml_conf >= ML_CONF_THRESHOLD else ''}\n"
+                f"{ml_conflict_row}"
+                f"{news_row}"
+                f"Capital    {cap_label}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"SELL  <code>NIFTY {nf_expiry_str} {int(short_strike)} PE</code>  @ ₹{short_ltp:.0f}\n"
+                f"BUY   <code>NIFTY {nf_expiry_str} {int(long_strike)} PE</code>  @ ₹{long_ltp:.0f}\n"
+                f"Net credit  ₹{net_credit:.0f} / share   "
+                f"({lots} lot{'s' if lots > 1 else ''}  ·  {lots*LOT_SIZE} shares)\n"
+                f"Spot        ₹{spot:,.0f}   DTE {dte:.1f}   Expiry {expiry.strftime('%d %b')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"SL   spread cost > ₹{sl_trig:.0f}  (cost grew {CREDIT_SL_FRAC*100:.0f}% above credit)\n"
+                f"TP   spread cost < ₹{net_credit * (1 - CREDIT_TP_FRAC):.0f}  (65% of credit locked in)\n"
+                f"Exit EOD 3:15 PM if neither hit\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Max risk   ₹{lots * max_loss_per_lot:,.0f}   "
+                f"Max profit ₹{lots * net_credit * LOT_SIZE:,.0f}"
+            )
+
+            if not DRY_RUN and not PAPER_MODE and _check_no_existing_position():
+                notify.send(
+                    f"⚠️  <b>Duplicate Trade Blocked</b>\n\n"
+                    f"An open Nifty position already exists.\n"
+                    f"Skipping Bull Put to avoid double exposure."
+                )
+                return
+
+            order_result = place_credit_spread(
+                short_sid, long_sid, signal, lots, net_credit,
+                short_strike, long_strike, short_ltp, long_ltp, spot,
+            )
+            if not DRY_RUN:
+                _write_today_spread_trade(
+                    signal=signal,
+                    short_sid=short_sid, long_sid=long_sid,
+                    short_strike=short_strike, long_strike=long_strike,
+                    short_ltp=short_ltp, long_ltp=long_ltp,
+                    net_credit=net_credit, lots=lots, dte=dte, spot=spot,
+                    score=score, expiry=expiry, ml_conf=ml_conf,
+                    order_mode=order_result.get("mode", "CREDIT_SPREAD"),
+                    buy_oid=order_result.get("buy_oid"),
+                    sell_oid=order_result.get("sell_oid"),
+                )
+                _setup_pnl_exit(net_credit, lots)
             return
 
-        order_result = place_credit_spread(
-            short_sid, long_sid, signal, lots, net_credit,
-            short_strike, long_strike, short_ltp, long_ltp, spot,
-        )
-        if not DRY_RUN:
-            _write_today_spread_trade(
-                signal=signal,
-                short_sid=short_sid, long_sid=long_sid,
-                short_strike=short_strike, long_strike=long_strike,
-                short_ltp=short_ltp, long_ltp=long_ltp,
-                net_credit=net_credit, lots=lots, dte=dte, spot=spot,
-                score=score, expiry=expiry, ml_conf=ml_conf,
-                order_mode=order_result.get("mode", "CREDIT_SPREAD"),
-                buy_oid=order_result.get("buy_oid"),
-                sell_oid=order_result.get("sell_oid"),
-            )
-            _setup_pnl_exit(net_credit, lots)
-        return
-
     # ══════════════════════════════════════════════════════════════════════════
-    # IRON CONDOR PATH  (CALL signal days only — PUT days routed to Bull Put above)
+    # IRON CONDOR PATH  (CALL signal days; also PUT days when Bull Put unaffordable)
     # NF IC: SELL ATM CE + BUY ATM+150 CE + SELL ATM PE + BUY ATM-150 PE
     # Backtest Sep 2025–Apr 2026: 97.5% WR (67 CALL days out of 118 total)
     # ══════════════════════════════════════════════════════════════════════════

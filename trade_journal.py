@@ -284,8 +284,8 @@ def _journal_ic(intent: dict, today_label: str):
     ce_long_entry   = float(intent.get("ce_long_entry",   0))
     pe_short_entry  = float(intent.get("pe_short_entry",  0))
     pe_long_entry   = float(intent.get("pe_long_entry",   0))
-    ce_net_credit   = float(intent.get("ce_net_credit",   0))
-    pe_net_credit   = float(intent.get("pe_net_credit",   0))
+    ce_net_credit   = float(intent.get("ce_credit",   0))   # auto_trader writes "ce_credit"
+    pe_net_credit   = float(intent.get("pe_credit",   0))   # auto_trader writes "pe_credit"
     score         = int(intent.get("signal_score", 0))
     ml_conf       = float(intent.get("ml_conf", 0))
 
