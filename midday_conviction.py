@@ -95,6 +95,16 @@ def get_nf_spot() -> float | None:
         return None
 
 
+def _calc_dte(trade: dict) -> int:
+    """DTE from expiry field (live calc). Falls back to stored dte if expiry missing.
+    Avoids showing stale entry-time DTE on expiry day (entry DTE=5 → midday shows 0)."""
+    try:
+        exp = datetime.fromisoformat(trade["expiry"]).date() if trade.get("expiry") else None
+        return max(0, (exp - datetime.now(IST).date()).days) if exp else int(trade.get("dte", 0))
+    except Exception:
+        return int(trade.get("dte", 0))
+
+
 def _get_ltp_from_marketfeed(security_id: str) -> float | None:
     """Fetch current option LTP from Dhan marketfeed/ltp using our security_id.
     This is the most direct route — no strike-key guessing needed."""
@@ -666,11 +676,12 @@ def main():
         pe_short_strike = float(trade.get("pe_short_strike", 0))
         pe_long_strike  = float(trade.get("pe_long_strike",  0))
         net_credit      = float(trade.get("net_credit",      0))
-        ce_net_credit   = float(trade.get("ce_net_credit",   0))
-        pe_net_credit   = float(trade.get("pe_net_credit",   0))
+        ce_net_credit   = float(trade.get("ce_credit",   0))   # auto_trader writes "ce_credit" not "ce_net_credit"
+        pe_net_credit   = float(trade.get("pe_credit",   0))   # auto_trader writes "pe_credit" not "pe_net_credit"
         lots            = int(trade.get("lots",    1))
         lot_size        = int(trade.get("lot_size", 65))
-        dte             = int(trade.get("dte",      0))
+        # Recalculate DTE from expiry — JSON dte is entry-time value (stale on expiry day)
+        dte             = _calc_dte(trade)
         paper           = trade.get("order_mode") == "PAPER"
         mode_tag        = "[PAPER] " if paper else ""
 
@@ -693,10 +704,56 @@ def main():
                     notify.send(closed_msg)
             return
 
-        ce_sl = _get_ltp_from_marketfeed(ce_short_sid) if ce_short_sid else None
-        ce_ll = _get_ltp_from_marketfeed(ce_long_sid)  if ce_long_sid  else None
-        pe_sl = _get_ltp_from_marketfeed(pe_short_sid) if pe_short_sid else None
-        pe_ll = _get_ltp_from_marketfeed(pe_long_sid)  if pe_long_sid  else None
+        # Batch all 4 IC SIDs in one marketfeed call (faster, fewer API hits)
+        ce_sl = ce_ll = pe_sl = pe_ll = None
+        try:
+            sids = [int(s) for s in [ce_short_sid, ce_long_sid, pe_short_sid, pe_long_sid] if s]
+            if sids:
+                _r = requests.post(
+                    "https://api.dhan.co/v2/marketfeed/ltp",
+                    headers=HEADERS, json={"NSE_FNO": sids}, timeout=10,
+                )
+                if _r.status_code == 200:
+                    _fno = (_r.json().get("data") or {}).get("NSE_FNO") or {}
+                    def _pick(sid):
+                        e = _fno.get(int(sid)) or _fno.get(str(sid)) or _fno.get(sid) or {}
+                        v = float(e.get("last_price") or e.get("ltp") or 0)
+                        return v if v > 0 else None
+                    ce_sl = _pick(ce_short_sid) if ce_short_sid else None
+                    ce_ll = _pick(ce_long_sid)  if ce_long_sid  else None
+                    pe_sl = _pick(pe_short_sid) if pe_short_sid else None
+                    pe_ll = _pick(pe_long_sid)  if pe_long_sid  else None
+                    _log(f"IC batch LTP: CE {ce_sl}/{ce_ll}  PE {pe_sl}/{pe_ll}")
+                else:
+                    _log(f"IC batch LTP {_r.status_code}: {_r.text[:80]}")
+        except Exception as _e:
+            _log(f"IC batch LTP failed: {_e}")
+        # Option chain fallback for any missing leg
+        if not all([ce_sl, ce_ll, pe_sl, pe_ll]) and trade.get("expiry"):
+            try:
+                _r2 = requests.post(
+                    "https://api.dhan.co/v2/optionchain",
+                    headers=HEADERS,
+                    json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": trade["expiry"]},
+                    timeout=15,
+                )
+                if _r2.status_code == 200:
+                    _oc_inner = _r2.json().get("data") or {}
+                    if isinstance(_oc_inner, dict) and "oc" not in _oc_inner:
+                        _oc_inner = next(iter(_oc_inner.values()), {})
+                    _oc = _oc_inner.get("oc") or {}
+                    def _from_oc(strike, opt_lc):
+                        key = f"{float(strike):.6f}"
+                        sub = (_oc.get(key) or _oc.get(str(int(strike))) or {}).get(opt_lc) or {}
+                        v = float(sub.get("last_price") or sub.get("ltp") or 0)
+                        return v if v > 0 else None
+                    ce_sl = ce_sl or _from_oc(ce_short_strike, "ce")
+                    ce_ll = ce_ll or _from_oc(ce_long_strike,  "ce")
+                    pe_sl = pe_sl or _from_oc(pe_short_strike, "pe")
+                    pe_ll = pe_ll or _from_oc(pe_long_strike,  "pe")
+                    _log(f"IC OC fallback: CE {ce_sl}/{ce_ll}  PE {pe_sl}/{pe_ll}")
+            except Exception as _e2:
+                _log(f"IC OC fallback failed: {_e2}")
         macro = get_macro()
 
         sl_trigger = net_credit * 1.5    # SL: 50% loss of credit (IC is EOD-only — no TP)
@@ -810,7 +867,7 @@ def main():
         net_credit    = float(trade.get("net_credit", 0))
         lots          = int(trade.get("lots", 1))
         lot_size      = int(trade.get("lot_size", 30))
-        dte           = int(trade.get("dte", 0))
+        dte           = _calc_dte(trade)
         paper         = trade.get("order_mode") == "PAPER"
         mode_tag      = "[PAPER] " if paper else ""
 
@@ -986,7 +1043,7 @@ def main():
         net_credit = float(trade.get("net_credit", 0))
         lots       = int(trade.get("lots", 1))
         lot_size   = int(trade.get("lot_size", 65))
-        dte        = int(trade.get("dte", 0))
+        dte        = _calc_dte(trade)
         paper      = trade.get("order_mode") == "PAPER"
         mode_tag   = "[PAPER] " if paper else ""
 
@@ -1117,7 +1174,7 @@ def main():
     entry_prem  = float(trade.get("oracle_premium", 0))
     sl_price    = float(trade.get("sl_price", 0))
     tp_price    = float(trade.get("tp_price", 0))
-    dte         = int(trade.get("dte", 0))
+    dte         = _calc_dte(trade)
     security_id = str(trade.get("security_id", ""))
     entry_spot  = float(trade.get("spot_at_signal", 0))
 
