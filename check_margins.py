@@ -203,21 +203,6 @@ def build_strategy_legs(strategy: str, atm: float, oc: dict) -> tuple:
         desc = f"SELL CE+{sw} ₹{ce_ltp:.1f}, SELL PE-{sw} ₹{pe_ltp:.1f}"
         return legs, credit, desc
 
-    elif strategy == "bear_call":
-        # SELL ATM CE + BUY ATM+SW CE
-        ce_s_sid, ce_s_ltp = get_leg(oc, atm,      "ce")
-        ce_l_sid, ce_l_ltp = get_leg(oc, atm + sw, "ce")
-        missing = [n for n, s in [("CE ATM", ce_s_sid), (f"CE+{sw}", ce_l_sid)] if not s]
-        if missing:
-            return None, 0, f"missing {missing}"
-        legs = [
-            {"securityId": ce_s_sid, "transactionType": "SELL", "price": ce_s_ltp, "quantity": LOT_SIZE},
-            {"securityId": ce_l_sid, "transactionType": "BUY",  "price": ce_l_ltp, "quantity": LOT_SIZE},
-        ]
-        credit = ce_s_ltp - ce_l_ltp
-        desc = f"SELL ATM CE ₹{ce_s_ltp:.1f}, BUY CE+{sw} ₹{ce_l_ltp:.1f}"
-        return legs, credit, desc
-
     elif strategy == "bull_put":
         # SELL ATM PE + BUY ATM-SW PE
         pe_s_sid, pe_s_ltp = get_leg(oc, atm,      "pe")
@@ -241,7 +226,6 @@ STRATEGY_CONFIGS = {
     "iron_condor":   ("Iron Condor (4-leg)",       MAX_LOTS_IC),
     "short_straddle":("Short Straddle (2-leg)",     MAX_LOTS_STRADDLE),
     "short_strangle":("Short Strangle OTM±150 (2-leg)", MAX_LOTS_STRADDLE),
-    "bear_call":     ("Bear Call Spread (2-leg)",   MAX_LOTS_IC),
     "bull_put":      ("Bull Put Spread (2-leg)",    MAX_LOTS_IC),
 }
 

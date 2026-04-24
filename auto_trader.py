@@ -509,7 +509,7 @@ def _log_paper_spread_trade(short_sid, long_sid, signal, lots, qty,
     row = {
         "date":           _ist_today().isoformat(),
         "signal":         signal,
-        "strategy":       "bear_call_credit" if signal == "CALL" else "bull_put_credit",
+        "strategy":       "bull_put_credit",   # CALL days use IC (not Bear Call — permanently removed Apr 2026)
         "short_sid":      str(short_sid),
         "long_sid":       str(long_sid),
         "short_strike":   int(short_strike),
@@ -737,7 +737,7 @@ def _write_today_spread_trade(signal, short_sid, long_sid, short_strike, long_st
     Read by spread_monitor.py (intraday SL/TP), exit_positions.py (EOD),
     trade_journal.py (EOD journal).
     """
-    strategy = "bear_call_credit" if signal == "CALL" else "bull_put_credit"
+    strategy = "bull_put_credit"   # CALL days use IC path — this func only called for 2-leg spreads
     payload = {
         "date":           _ist_today().isoformat(),
         "strategy":       strategy,
@@ -2396,19 +2396,14 @@ def main():
     today_wd       = _ist_today().strftime("%A")
     today_label    = _ist_today().strftime("%d %b %Y")
     if IRON_CONDOR_MODE and _today_weekday in IC_SKIP_DAYS:
-        _skip_reason = {
-            2: "Wednesday (DTE 6) — all strategies net-negative",
-            3: "Thursday (DTE 5) — IC active Mon+Tue only",
-            4: "Friday (DTE 4) — IC active Mon+Tue only",
-        }.get(_today_weekday, "non-IC day")
+        # IC_SKIP_DAYS = set() — this block never runs in the Tue-expiry regime.
+        # All 5 weekdays are valid. Kept for future use if regime changes.
         notify.send(
             f"⏸  <b>No Trade — {today_wd}</b>\n"
             f"─────────────────────\n"
-            f"{today_label}\n\n"
-            f"{_skip_reason}.\n"
-            f"Capital preserved."
+            f"{today_label}\n\nCapital preserved."
         )
-        notify.log(f"DOW filter: {today_wd} — no trade ({_skip_reason})")
+        notify.log(f"DOW filter: {today_wd} — no trade")
         return
 
     # 3. Read signal
@@ -2580,17 +2575,17 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     # SHORT STRADDLE PATH  (_use_straddle_today = True — capital auto-upgrade)
     # SELL ATM CE + SELL ATM PE — unhedged, all Mon/Tue/Thu/Fri signal days
-    # Triggers when capital ≥ STRADDLE_MARGIN_PER_LOT (≈₹2.3L). Overrides IC/Bear Call/Bull Put.
+    # Triggers when capital ≥ STRADDLE_MARGIN_PER_LOT (≈₹2.3L). Overrides IC/Bull Put.
     # ══════════════════════════════════════════════════════════════════════════
     if IRON_CONDOR_MODE and _use_straddle_today:
         st = get_straddle_legs(expiry, capital)
         if st is None:
-            # Leg fetch failed or margin spiked above capital — fall through to IC/Bear Call/Bull Put.
+            # Leg fetch failed or margin spiked above capital — fall through to IC/Bull Put routing.
             # This can happen on high-IV days when Dhan SPAN > STRADDLE_MARGIN_PER_LOT threshold.
             notify.send(
                 f"⚠️  <b>Straddle downgrade</b>\n\n"
                 f"Capital ₹{capital:,.0f} but straddle legs unavailable or margin too high today.\n"
-                f"Falling back to IC / Bear Call / Bull Put routing."
+                f"Falling back to IC / Bull Put routing."
             )
             notify.log("Straddle legs None — falling back to IC/spread routing")
             _use_straddle_today = False
@@ -2935,8 +2930,8 @@ def main():
         return
 
     # ══════════════════════════════════════════════════════════════════════════
-    # CREDIT SPREAD PATH  (CREDIT_SPREAD_MODE = True)
-    # Bear Call Spread (CALL) or Bull Put Spread (PUT) — theta works FOR us
+    # CREDIT SPREAD PATH  (CREDIT_SPREAD_MODE = True, legacy fallback when IRON_CONDOR_MODE = False)
+    # Bull Put Spread (PUT) — theta works FOR us. Bear Call permanently removed Apr 2026.
     # ══════════════════════════════════════════════════════════════════════════
     if CREDIT_SPREAD_MODE:
         (short_sid, long_sid, short_strike, long_strike,
@@ -2993,7 +2988,7 @@ def main():
         risk_amt   = lots * net_credit * CREDIT_SL_FRAC * LOT_SIZE
         target_amt = lots * net_credit * LOT_SIZE
 
-        strategy_name = "Bear Call Spread" if signal == "CALL" else "Bull Put Spread"
+        strategy_name = "Bull Put Spread"   # legacy CREDIT_SPREAD_MODE; Bear Call removed Apr 2026
         short_sym = f"NIFTY {expiry.strftime('%d%b%Y').upper()} {int(short_strike)} {opt_type}"
         long_sym  = f"NIFTY {expiry.strftime('%d%b%Y').upper()} {int(long_strike)} {opt_type}"
 
