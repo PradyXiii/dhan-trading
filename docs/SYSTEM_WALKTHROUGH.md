@@ -203,6 +203,13 @@ Writes `data/midday_checkpoints.csv` (one row per day). model_evolver reads reve
 
 ### 3:15 PM IST — `exit_positions.py`
 
+**Before closing:** captures live LTPs from Dhan positions API and writes them back to `today_trade.json`. This gives `trade_journal.py` real exit prices for per-leg P&L display.
+
+- IC: writes `ce_short_exit`, `ce_long_exit`, `pe_short_exit`, `pe_long_exit`
+- Bull Put / Bear Call: writes `exit_short_ltp`, `exit_long_ltp`, `exit_spread`
+- Straddle: writes `exit_ce_ltp`, `exit_pe_ltp`, `exit_spread`
+- Also writes `exit_done=True`, `exit_time`, `pnl_inr`
+
 Primary: `DELETE /v2/positions` — one Dhan call closes all open positions atomically. Verifies after 15s.
 
 Backup: leg-by-leg market orders (shorts first, then longs) if DELETE fails or positions still showing.
@@ -215,9 +222,17 @@ Writes exit marker file for tomorrow's auto_trader health check.
 
 ### 3:30 PM IST — `trade_journal.py`
 
-Reads `today_trade.json` + Dhan positions API.
+Reads `today_trade.json` (exit prices written by `exit_positions.py` at 3:15 PM).
 
-Computes actual P&L: `(net_credit_at_entry − net_cost_at_exit) × lot_size × lots`.
+**IC:** Shows per-leg `<pre>` table — each leg's entry price, exit price, and individual P&L:
+```
+SELL 24050 CE  ₹171 → ₹115  +₹3,640
+BUY  24200 CE   ₹98 → ₹ 72   -₹1,690
+SELL 23900 PE  ₹137 → ₹ 95  +₹2,730
+BUY  23750 PE   ₹81 → ₹ 58   -₹1,495
+```
+
+**Bull Put / Straddle:** Summary with entry credit, exit spread cost, net P&L.
 
 Appends to `data/live_ic_trades.csv`. Sends EOD Telegram.
 
@@ -295,7 +310,7 @@ P&L exit (Dhan) + DELETE /v2/positions → safety net if spread_monitor misses S
 
 | File | Written by | Read by |
 |---|---|---|
-| `data/today_trade.json` | auto_trader | spread_monitor, exit_positions, trade_journal |
+| `data/today_trade.json` | auto_trader (entry), exit_positions (exit prices + exit_done) | spread_monitor, exit_positions, trade_journal |
 | `data/live_ic_trades.csv` | trade_journal | model_evolver |
 | `data/midday_checkpoints.csv` | midday_conviction | model_evolver, autoloop |
 | `data/signals_ml.csv` | ml_engine | auto_trader |

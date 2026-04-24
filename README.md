@@ -61,14 +61,16 @@ Every 1 min, 9:30 AM–3:14 PM IST
 
 3:15 PM IST, Mon–Fri
   └── exit_positions.py
+        — Captures live LTPs from Dhan before closing, writes per-leg exit prices to today_trade.json
         — Closes any open Nifty NRML positions not already hit by SL/TP
         — Prevents unintended overnight carry
         — Exit order: shorts (BUY to cover) first, then longs (SELL to close)
 
 3:30 PM IST, Mon–Fri
   └── trade_journal.py
-        — Reads exit data from today_trade.json
-        — Computes P&L, exit reason (SL/TP/EOD)
+        — Reads per-leg exit prices from today_trade.json (written by exit_positions.py)
+        — IC: shows entry → exit → P&L for each leg in Telegram
+        — Computes total P&L, exit reason (SL/TP/EOD)
         — Appends row to data/live_ic_trades.csv
         — Sends EOD journal to Telegram
 
