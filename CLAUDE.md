@@ -129,6 +129,8 @@ OHLCV backtest showed ₹25M profit over years. Real 1-min option backtest on sa
 
 Max drawdown: **-0.8%**. No year below 67% WR.
 
+**Apr 2026 ML upgrade (commit 5d0d23b):** added `nf_kalman_trend` + 3 HMM regime probs (`hmm_bull_prob`, `hmm_neutral_prob`, `hmm_bear_prob`). Re-ran NF IC backtest with new ensemble: 1116 trades, **84.7% WR, ₹1.38Cr net** (+₹21L over baseline). Max DD improved -0.8% → -0.7%. ML directional composite: 0.5643 → 0.7071 (CatBoost champion). Auto-loaded by `ml_engine.py --predict-today` from next morning. Hurst exponent tested but dropped (0.000 importance — too slow-moving with shift(1) gate).
+
 ### NF IC Structure (CALL signal days only)
 ```
 SELL ATM CE  + BUY ATM+150 CE   (Bear Call side: upper wing)
