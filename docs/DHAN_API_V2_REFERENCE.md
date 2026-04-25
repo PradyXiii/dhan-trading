@@ -1,8 +1,174 @@
 # DHAN HQ API v2 — COMPLETE REFERENCE
-*Source: https://dhanhq.co/docs/v2/ | Compiled April 2026*
-*Complete word-for-word content from all official documentation pages*
+*Source: https://dhanhq.co/docs/v2/ + https://github.com/dhan-oss/DhanHQ-py | Compiled April 2026*
+*Updated: 25 Apr 2026 — SDK v2.2.0*
 
 Base URL: `https://api.dhan.co/v2/`
+Auth Base URL: `https://auth.dhan.co`
+
+---
+
+## SDK Version History
+
+| Version | Date | Key changes |
+|---|---|---|
+| **v2.2.0** | **24 Apr 2026** | **200-level full depth WS, `expired_options_data()`, `DhanLogin` auth class, IP management SDK wrapper — breaking vs v2.1.0** |
+| v2.2.0rc1 | 02 Jan 2026 | Pre-release of above |
+| v2.1.0 | 12 Mar 2025 | 20-level depth, modular refactor, `DhanContext` pattern, import paths changed |
+| v2.0.2 | 29 Nov 2024 | websockets v14.1 compat |
+| v2.0.1 | 07 Nov 2024 | `BSE_FNO` + `NSE_FNO` constants added |
+| v2.0.0 | 25 Oct 2024 | Market Quote API, Option Chain, Forever Orders, Order Updates WS |
+
+---
+
+## SDK v2.2.0 — New Features & Breaking Changes
+
+### Install
+
+```bash
+pip install dhanhq          # latest (v2.2.0 — breaking changes vs v2.1.0)
+pip install dhanhq==2.0.2   # last stable pre-breaking-change version
+```
+
+### New Initialization Pattern (v2.1.0+)
+
+**BREAKING:** Old `dhanhq(client_id, access_token)` replaced by `DhanContext` pattern.
+
+```python
+from dhanhq import DhanContext, dhanhq
+
+dhan_context = DhanContext("client_id", "access_token")
+# Optional: DhanContext("client_id", "access_token", disable_ssl=False, pool=None)
+dhan = dhanhq(dhan_context)
+```
+
+**BREAKING:** WebSocket imports changed (v2.1.0+):
+```python
+from dhanhq import MarketFeed    # was: from dhanhq.marketfeed import MarketFeed
+from dhanhq import OrderUpdate   # was: from dhanhq.orderupdate import OrderUpdate
+from dhanhq import FullDepth     # NEW in v2.1.0
+```
+
+### DhanLogin — Authentication Class (v2.2.0)
+
+```python
+from dhanhq import DhanLogin
+
+dhan_login = DhanLogin("YOUR_CLIENT_ID")
+
+# Method 1: OAuth
+consent_id = dhan_login.generate_login_session(app_id, app_secret)
+# user logs in via browser, gets token_id from redirect URL
+access_token = dhan_login.consume_token_id(token_id, app_id, app_secret)
+
+# Method 2: PIN + TOTP
+access_token_data = dhan_login.generate_token(pin, totp)
+
+# Token renewal
+dhan_login.renew_token(access_token)
+
+# Validate token (user profile)
+user_info = dhan_login.user_profile(access_token)
+
+# IP management (see also raw API section below)
+dhan_login.set_ip(access_token, "10.200.10.10", "PRIMARY")     # or "SECONDARY"
+dhan_login.modify_ip(access_token, "10.200.10.11", "PRIMARY")
+ip_list = dhan_login.get_ip(access_token)
+```
+
+### FullDepth WebSocket — 20 & 200 Level (v2.1.0+)
+
+```python
+from dhanhq import DhanContext, FullDepth
+
+dhan_context = DhanContext(client_id, access_token)
+
+instruments = [(1, "1333")]     # (exchange_code_int, security_id_str)
+# Exchange codes: 1=NSE_EQ, 2=NSE_FNO
+depth_level = 200               # 20 or 200; default 20
+
+response = FullDepth(dhan_context, instruments, depth_level)
+response.run_forever()
+
+while True:
+    response.get_data()
+    if response.on_close:
+        break
+```
+
+WebSocket URLs:
+- 20-level:  `wss://depth-api-feed.dhan.co/twentydepth`
+- 200-level: `wss://full-depth-api.dhan.co/`
+
+Subscription JSON:
+```json
+{ "RequestCode": 23, "ExchangeSegment": "NSE_EQ", "SecurityId": "<token>" }
+```
+
+Binary header: 12 bytes (message_length + code + exchange_segment + security_id + row_count).
+Depth packets: price (float64) + quantity (uint32) + order_count (uint32).
+200-level: 1 instrument per connection only.
+
+### expired_options_data() — New SDK Method (v2.2.0)
+
+Wraps existing `/charts/rollingoption` endpoint with typed parameters:
+
+```python
+dhan.expired_options_data(
+    security_id,
+    exchange_segment,
+    instrument_type,    # e.g. 'OPTIDX', 'OPTSTK'
+    expiry_flag,        # 'WEEK' or 'MONTH'
+    expiry_code,        # 0 / 1 / 2 / 3 (0=current, 1=next, etc.)
+    strike,             # 'ATM', 'ATM+1', 'ATM-1', 'ATM+2', ... 'ATM+10' / 'ATM-10'
+    drv_option_type,    # 'CALL' or 'PUT'
+    required_data,      # list from: ['open','high','low','close','iv','volume','strike','oi','spot']
+    from_date,          # 'YYYY-MM-DD'
+    to_date,            # 'YYYY-MM-DD' — max 30 days per call, last 5 years available
+    interval=1          # 1 / 5 / 15 / 25 / 60 (minutes)
+)
+# POST /charts/rollingoption
+```
+
+### Module Map (v2.2.0)
+
+| File | Class | Role |
+|---|---|---|
+| `dhan_context.py` | `DhanContext` | Credential container |
+| `auth.py` | `DhanLogin` | OAuth / PIN+TOTP auth, token renewal, IP management |
+| `dhan_http.py` | `DhanHTTP` | HTTP transport |
+| `dhanhq.py` | `dhanhq` | Main class (inherits all mixins) |
+| `_order.py` | `Order` | Order CRUD |
+| `_super_order.py` | `SuperOrder` | Super Orders |
+| `_forever_order.py` | `ForeverOrder` | Forever / OCO orders |
+| `_portfolio.py` | `Portfolio` | Positions, holdings, convert |
+| `_funds.py` | `Funds` | Fund limits, margin calculator (single-leg only) |
+| `_statement.py` | `Statement` | Trade book, trade history, ledger |
+| `_trader_control.py` | `TraderControl` | Kill switch |
+| `_security.py` | `Security` | eDIS TPIN, security list CSV |
+| `_market_feed.py` | `MarketFeed` (REST) | LTP / OHLC / quote REST snapshots |
+| `_historical_data.py` | `HistoricalData` | Intraday + daily candles + expired options rolling |
+| `_option_chain.py` | `OptionChain` | Option chain, expiry list |
+| `marketfeed.py` | `MarketFeed` (WS) | Live WebSocket market feed |
+| `orderupdate.py` | `OrderUpdate` | Live WebSocket order updates |
+| `fulldepth.py` | `FullDepth` | 20/200-level market depth WebSocket |
+
+### Standard Response Format
+
+```python
+{
+    'status': 'success' | 'failure',
+    'remarks': '' | {'error_code': ..., 'error_type': ..., 'error_message': ...},
+    'data': <json payload> | ''
+}
+```
+HTTP 200–299 → `status='success'`. Anything else → `status='failure'`.
+
+### Codebase Notes
+
+- **`/v2/margincalculator/multi`** (multi-leg spread margin) is NOT in SDK — `auto_trader.py` calls it via raw HTTP. Do NOT replace with `margin_calculator()` (single-leg only).
+- **`availabelBalance`** — Dhan typo in fundlimit response (one 'a' in "availabel"). This is the real field name.
+- **Option chain payload keys** — `UnderlyingScrip`, `UnderlyingSeg`, `Expiry` (all capital first letter). Confirmed from SDK source.
+- **Nifty50 scrip** — `UnderlyingScrip: 13`, `UnderlyingSeg: "IDX_I"`.
 
 ---
 
