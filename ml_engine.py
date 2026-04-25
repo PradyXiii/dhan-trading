@@ -752,7 +752,7 @@ def compute_features(df):
     # H > 0.5 = trending — IC at risk
     try:
         from hurst import compute_Hc as _compute_Hc
-        _nf_close_raw = d["close"].values.astype(float)
+        _nf_close_raw = pd.to_numeric(d["nf_close"], errors="coerce").ffill().bfill().values.astype(float)
         _hurst_vals = []
         for _hi in range(len(_nf_close_raw)):
             if _hi < 62:
