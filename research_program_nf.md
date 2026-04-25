@@ -3,7 +3,7 @@
 **System:** Nifty50 Iron Condor + Bull Put hybrid auto-trader  
 **Live since:** 22 April 2026  
 **Optimization target:** `composite score > current baseline` on 252-day holdout  
-**Current baseline:** ≥ 0.5358 (post BN→NF migration, April 2026)  
+**Current baseline:** ≥ 0.6484 (Apr 2026 post-Kalman/HMM — see commit 5d0d23b)  
 **Promotion gate:** paper beats live by ≥1.5% for 3 consecutive nights  
 
 ---
@@ -28,7 +28,7 @@ A 1-point gain in composite = roughly 1–2 extra winning trades per quarter.
 
 ---
 
-## What the model already has (60 features — DO NOT duplicate)
+## What the model already has (64 features — DO NOT duplicate)
 
 ### Group 1: Rule signals (discrete ±1 outputs)
 `s_ema20`, `s_trend5`, `s_vix`, `s_nf_gap` — rule-based CALL/PUT votes

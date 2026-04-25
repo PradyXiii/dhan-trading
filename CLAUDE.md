@@ -9,7 +9,7 @@ Quick reference for Claude Code. Read this before touching any file.
 | Page | What it contains |
 |---|---|
 | `docs/wiki/strategy/ic_research.md` | 7yr backtest, IC+BullPut verdict, discarded strategies, DOW breakdown |
-| `docs/wiki/features/feature_history.md` | All 60 features, kept/discarded log, reserved names |
+| `docs/wiki/features/feature_history.md` | All 64 features, kept/discarded log, reserved names |
 | `docs/wiki/bugs/known_issues.md` | 15+ session bugs — ML shadows, API format, lot sizing |
 
 Auto-populated by `autoloop_nf.py` after every experiment. Compiled by `wiki_compiler.py`.
@@ -254,7 +254,7 @@ The docs have the exact answer. Read them first, always.
 3. Add the feature name once to `FEATURE_COLS` — then check: `len(FEATURE_COLS) == len(set(FEATURE_COLS))` (duplicates inflate importance silently)
 4. If feature needs a new data file: `python3 data_fetcher.py` then `python3 data_fetcher.py --backfill` (new CSVs start with 1 row — zero importance until backfilled)
 5. Run `python3 ml_engine.py --analyze` — feature importance must be > 0
-6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.5521** (current NF baseline as of Apr 2026; autoloop uses live composite dynamically)
+6. Run `python3 autoexperiment_nf.py` — **keep only if composite >= 0.6484** (Apr 2026 baseline after Kalman + HMM features added; autoloop uses live composite dynamically)
 7. Commit + push to `main`
 
 ---
@@ -474,7 +474,7 @@ RR           = 2.5               # reward:risk (SL=15% → TP=37.5%) — grid-op
 
 ```
 1. Fetch all data sources (Dhan + yfinance + NSE FII + PCR)
-2. compute_features() from ml_engine — 60 features across technicals, macro, flow, options, IV skew, OI surface, ORB, breadth
+2. compute_features() from ml_engine — 64 features across technicals, macro, flow, options, IV skew, OI surface, ORB, breadth
 3. Feature selection via RF importance (keep > 1%)
 4. Optuna HPO: 30 trials × RF + XGB + LGB + CAT = 120 trials (~8-12 min)
 5. Champion = best on 252-day temporal holdout (accuracy + recall blend)
@@ -657,7 +657,7 @@ python3 analyze_confidence.py --write-threshold  # recompute + save dynamic VIX 
 
 ---
 
-## ML Feature Set (ml_engine.py FEATURE_COLS — 60 features)
+## ML Feature Set (ml_engine.py FEATURE_COLS — 64 features as of Apr 2026)
 
 Live count grows over time (autoresearch may add features). Verify any time:
 ```python

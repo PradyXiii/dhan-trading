@@ -17,7 +17,7 @@ Every weekday the system wakes up, reads the market, routes to IC (CALL signal) 
 SELL ATM CE  + BUY ATM+150 CE    ← upper wing
 SELL ATM PE  + BUY ATM-150 PE    ← lower wing
 ```
-Market-neutral theta. Wins if Nifty stays inside the wings — even if the CALL signal is wrong and markets go sideways. Weekly Tuesday expiry (DTE ≤ 7) = fast theta decay. Backtest 2021–2026: 84.6% WR, 1,114 trades, max drawdown −0.8%.
+Market-neutral theta. Wins if Nifty stays inside the wings — even if the CALL signal is wrong and markets go sideways. Weekly Tuesday expiry (DTE ≤ 7) = fast theta decay. Backtest 2021–2026: 84.7% WR, 1,116 trades, max drawdown −0.7% (Apr 2026 ML upgrade: Kalman + HMM features lifted net P&L from ₹1.17Cr → ₹1.38Cr).
 
 **Bull Put Credit Spread (PUT signal days):**
 ```
@@ -242,7 +242,7 @@ Appends to `data/live_ic_trades.csv`. Sends EOD Telegram.
 
 **Data:**
 - All historical OHLCV + macro + options
-- `compute_features()` → 60 features (all shifted 1 day — no lookahead)
+- `compute_features()` → 64 features (all shifted 1 day — no lookahead)
 - `data/live_ic_trades.csv` → real outcomes at 10× weight
 - `data/midday_checkpoints.csv` → reversal days at 5× weight
 
@@ -262,7 +262,7 @@ Appends to `data/live_ic_trades.csv`. Sends EOD Telegram.
 2. Calls Claude API → proposes ONE small change
 3. Writes to `ml_engine_paper.py`
 4. `autoexperiment_nf.py --module ml_engine_paper` → composite score on 252-day holdout
-5. Score ≥ 0.5358 baseline → keep; else revert
+5. Score ≥ 0.6484 baseline (Apr 2026 post-Kalman/HMM) → keep; else revert
 6. 3 consecutive nights outperforming → auto-promote paper → live, commit + push
 
 Autoresearcher can only touch `ml_engine_paper.py`. Cannot touch live code, cron, Dhan calls.

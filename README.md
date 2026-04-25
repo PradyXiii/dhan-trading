@@ -21,8 +21,8 @@ All 5 weekdays are valid entry days. No skip days. Nifty50 has weekly Tuesday ex
 ## What runs and when
 
 ```
-Every 5 minutes (all 7 days)
-  └── renew_token.py         — checks if Dhan token is 23h50m old, renews if so
+Twice daily (7:55 AM + 11 PM IST + @reboot, all 7 days)
+  └── renew_token.py         — refreshes Dhan access token (24h validity)
 
 8:50 AM IST, Mon–Fri
   └── health_ping.py
@@ -121,7 +121,7 @@ Every Sunday, 2:00 AM IST
 | Take-profit | None — holds to EOD 3:15 PM (EOD captures last 35% of theta; TP cost ₹21L/5yr) |
 | Lots | floor(capital / live Dhan margin API), max 10 |
 | Margin/lot | ~₹93,202 (Dhan SPAN+Exposure) |
-| WR (backtest) | 84.6% over 1114 trades, 2021–2026 |
+| WR (backtest) | 84.7% over 1116 trades, 2021–2026 (Apr 2026 ML upgrade: ₹1.38Cr net) |
 
 **Order sequence (mandatory — Dhan margin rule):**
 1. BUY ATM+150 CE (long call wing)
@@ -168,7 +168,7 @@ Every Sunday, 2:00 AM IST
 
 Signal engine and ML model vote CALL vs PUT. CALL → IC (or straddle if capital permits). PUT → Bull Put. No VIX or ML confidence filter — maximum trade frequency = maximum P&L per 7-year backtest.
 
-**60 features** across nine layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE).
+**64 features** across ten layers: rule signals, technicals (RSI, ADX, HV20), global markets (S&P 500, Nikkei, S&P futures), macro (crude oil, DXY, US 10Y yield, USD/INR), volatility regime (VIX level, percentile, HV ratio), options sentiment (PCR, IV skew, OI surface at ATM±3, max pain), flow (FII net cash, bank ETF, top-5 constituent breadth), momentum (NF momentum, 52-week high distance, ORB range), calendar (DOW, DTE), and **market memory** (Kalman-filtered trend + 3-state HMM regime probabilities — Apr 2026 upgrade, lifted ML composite 0.5643 → 0.7071).
 
 **Nightly model competition:** RF, XGBoost, LightGBM, CatBoost compete via Optuna HPO (30 trials each = 120 total). Winner saved as champion.pkl. Full 4-model ensemble saved for live voting.
 
@@ -316,7 +316,7 @@ python3 model_evolver.py --no-data
 
 ## Key design choices
 
-**IC (CALL days) + Bull Put (PUT days)** — 7-year backtest confirmed. IC on CALL days: market-neutral theta, 84.6% WR, wins even if signal is wrong (market sideways). Bull Put on PUT days: 100% WR (51 trades, Sep 2025–Apr 2026) — signal has CALL bias so market often goes UP on PUT signal days; Bull Put profits when market doesn't fall. Bear Call permanently discarded: 13.5% WR, -₹24.03L over 7 years — direction conflict with CALL-biased signal. Full research in `STRATEGY_RESEARCH.md`.
+**IC (CALL days) + Bull Put (PUT days)** — 7-year backtest confirmed. IC on CALL days: market-neutral theta, 84.7% WR (Apr 2026), wins even if signal is wrong (market sideways). Bull Put on PUT days: 100% WR (51 trades, Sep 2025–Apr 2026) — signal has CALL bias so market often goes UP on PUT signal days; Bull Put profits when market doesn't fall. Bear Call permanently discarded: 13.5% WR, -₹24.03L over 7 years — direction conflict with CALL-biased signal (was on CALL days; new `backtest_spreads.py` runs Bear Call on PUT days = 61.9% WR but Bull Put still wins on same days, so verdict holds). Full research in `STRATEGY_RESEARCH.md`.
 
 **EOD-only IC exit** — IC holds to 3:15 PM with no TP. A TP at 65% capture cost ₹21L over 5 years vs EOD hold — last 35% of theta is free money.
 
