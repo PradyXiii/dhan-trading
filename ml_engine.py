@@ -74,6 +74,19 @@ import gc
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 
+# Optional advanced feature libs — imported lazily to avoid hard dependency
+try:
+    from hmmlearn.hmm import GaussianHMM as _GaussianHMM
+    _HMM_OK = True
+except ImportError:
+    _HMM_OK = False
+
+try:
+    from pykalman import KalmanFilter as _KalmanFilter
+    _KALMAN_OK = True
+except ImportError:
+    _KALMAN_OK = False
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import get_dte, PREMIUM_K
 
@@ -734,6 +747,68 @@ def compute_features(df):
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
 
+    # ── Hurst Exponent (market memory / mean-reversion detector) ─────────────
+    # H < 0.5 = mean-reverting (range-bound) — IC-friendly
+    # H > 0.5 = trending — IC at risk
+    try:
+        from hurst import compute_Hc as _compute_Hc
+        _nf_close_raw = d["close"].values.astype(float)
+        _hurst_vals = []
+        for _hi in range(len(_nf_close_raw)):
+            if _hi < 62:
+                _hurst_vals.append(0.5)
+            else:
+                _win = _nf_close_raw[_hi - 62: _hi + 1]
+                try:
+                    _H, _, _ = _compute_Hc(_win, kind="price", simplified=True)
+                    _hurst_vals.append(float(np.clip(_H, 0.0, 1.0)))
+                except Exception:
+                    _hurst_vals.append(0.5)
+        d["hurst_exp_63"] = pd.Series(_hurst_vals, index=d.index).shift(1).fillna(0.5)
+    except ImportError:
+        d["hurst_exp_63"] = 0.5
+
+    # ── HMM Market Regime (hidden state probabilities) ───────────────────────
+    # 3-state Gaussian HMM on [nf_ret1, vix_pct_chg].
+    # States sorted by mean nf_ret: bear / neutral / bull
+    if _HMM_OK:
+        _hmm_obs = np.column_stack([
+            pd.to_numeric(d["nf_ret1"],    errors="coerce").fillna(0).values,
+            pd.to_numeric(d["vix_pct_chg"], errors="coerce").fillna(0).values,
+        ])
+        try:
+            _hmm_model = _GaussianHMM(n_components=3, covariance_type="full",
+                                      n_iter=200, random_state=42)
+            _hmm_model.fit(_hmm_obs)
+            _regime_probs = _hmm_model.predict_proba(_hmm_obs)
+            _state_means  = [_hmm_model.means_[_s][0] for _s in range(3)]
+            _sorted_states = np.argsort(_state_means)
+            _bear_idx, _neutral_idx, _bull_idx = _sorted_states
+            d["hmm_bull_prob"]    = pd.Series(_regime_probs[:, _bull_idx],    index=d.index).shift(1).fillna(0.33)
+            d["hmm_neutral_prob"] = pd.Series(_regime_probs[:, _neutral_idx], index=d.index).shift(1).fillna(0.33)
+            d["hmm_bear_prob"]    = pd.Series(_regime_probs[:, _bear_idx],    index=d.index).shift(1).fillna(0.33)
+        except Exception:
+            d["hmm_bull_prob"] = d["hmm_neutral_prob"] = d["hmm_bear_prob"] = 0.33
+    else:
+        d["hmm_bull_prob"] = d["hmm_neutral_prob"] = d["hmm_bear_prob"] = 0.33
+
+    # ── Kalman-filtered return trend ─────────────────────────────────────────
+    # Noise-reduced version of nf_ret1 — cleaner trend signal
+    if _KALMAN_OK:
+        _kf_obs = pd.to_numeric(d["nf_ret1"], errors="coerce").fillna(0).values.reshape(-1, 1)
+        try:
+            _kf = _KalmanFilter(
+                transition_matrices=[1], observation_matrices=[1],
+                initial_state_mean=0, initial_state_covariance=1,
+                observation_covariance=0.5, transition_covariance=0.01,
+            )
+            _kf_means, _ = _kf.smooth(_kf_obs)
+            d["nf_kalman_trend"] = pd.Series(_kf_means.flatten(), index=d.index).shift(1).fillna(0.0)
+        except Exception:
+            d["nf_kalman_trend"] = 0.0
+    else:
+        d["nf_kalman_trend"] = 0.0
+
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "hv20","nf_gap","vix_pct_chg","vix_hv_ratio","nf_ret20"]
     return d.dropna(subset=req)
@@ -808,6 +883,12 @@ FEATURE_COLS = [
     # Opening range breakout (prior day's 9:15 candle — from nifty50_15m_orb.csv)
     "orb_range_pct",       # prior-day 9:15 candle range as % of spot — vol proxy
     "orb_break_side",      # +1/-1/0 — did prev close break above/below/inside 9:15 range
+    # Market memory / regime features
+    "hurst_exp_63",       # rolling 63-day Hurst: H<0.5=mean-reverting=IC-friendly, H>0.5=trending
+    "hmm_bull_prob",      # HMM 3-state: P(bull regime) fitted on [nf_ret1, vix_pct_chg]
+    "hmm_neutral_prob",   # HMM 3-state: P(neutral regime)
+    "hmm_bear_prob",      # HMM 3-state: P(bear regime)
+    "nf_kalman_trend",    # Kalman-filtered daily return — noise-reduced trend signal
 ]
 
 
