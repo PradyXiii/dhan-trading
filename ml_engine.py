@@ -747,26 +747,9 @@ def compute_features(df):
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
 
-    # ── Hurst Exponent (market memory / mean-reversion detector) ─────────────
-    # H < 0.5 = mean-reverting (range-bound) — IC-friendly
-    # H > 0.5 = trending — IC at risk
-    try:
-        from hurst import compute_Hc as _compute_Hc
-        _nf_close_raw = pd.to_numeric(d["nf_close"], errors="coerce").ffill().bfill().values.astype(float)
-        _hurst_vals = []
-        for _hi in range(len(_nf_close_raw)):
-            if _hi < 62:
-                _hurst_vals.append(0.5)
-            else:
-                _win = _nf_close_raw[_hi - 62: _hi + 1]
-                try:
-                    _H, _, _ = _compute_Hc(_win, kind="price", simplified=True)
-                    _hurst_vals.append(float(np.clip(_H, 0.0, 1.0)))
-                except Exception:
-                    _hurst_vals.append(0.5)
-        d["hurst_exp_63"] = pd.Series(_hurst_vals, index=d.index).shift(1).fillna(0.5)
-    except ImportError:
-        d["hurst_exp_63"] = 0.5
+    # Hurst Exponent (hurst_exp_63) tested Apr 2026: 0.000 importance — dropped.
+    # 63-day rolling + shift(1) made it too slow-moving to add signal. Kept code
+    # commented in git history (commit e425490) in case future regime warrants retest.
 
     # ── HMM Market Regime (hidden state probabilities) ───────────────────────
     # 3-state Gaussian HMM on [nf_ret1, vix_pct_chg].
@@ -884,7 +867,6 @@ FEATURE_COLS = [
     "orb_range_pct",       # prior-day 9:15 candle range as % of spot — vol proxy
     "orb_break_side",      # +1/-1/0 — did prev close break above/below/inside 9:15 range
     # Market memory / regime features
-    "hurst_exp_63",       # rolling 63-day Hurst: H<0.5=mean-reverting=IC-friendly, H>0.5=trending
     "hmm_bull_prob",      # HMM 3-state: P(bull regime) fitted on [nf_ret1, vix_pct_chg]
     "hmm_neutral_prob",   # HMM 3-state: P(neutral regime)
     "hmm_bear_prob",      # HMM 3-state: P(bear regime)
