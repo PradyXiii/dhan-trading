@@ -87,6 +87,12 @@ try:
 except ImportError:
     _KALMAN_OK = False
 
+try:
+    from arch import arch_model as _arch_model
+    _GARCH_OK = True
+except ImportError:
+    _GARCH_OK = False
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from backtest_engine import get_dte, PREMIUM_K
 
@@ -792,6 +798,27 @@ def compute_features(df):
     else:
         d["nf_kalman_trend"] = 0.0
 
+    # ── GARCH(1,1) conditional volatility forecast ───────────────────────────
+    # Fits GARCH(1,1) on full nf_ret1 history once, extracts daily conditional
+    # volatility (in % return terms). High garch_vol = market expects continued
+    # turbulence (bad for IC). Low = calm (good for IC). shift(1) keeps it causal.
+    if _GARCH_OK:
+        try:
+            _ret_pct = pd.to_numeric(d["nf_ret1"], errors="coerce").fillna(0).values * 100.0
+            _am = _arch_model(_ret_pct, mean="Zero", vol="Garch", p=1, q=1, rescale=False)
+            _res = _am.fit(disp="off", show_warning=False)
+            _cond_vol = np.asarray(_res.conditional_volatility)
+            d["garch_vol"]    = pd.Series(_cond_vol, index=d.index).shift(1).fillna(method="ffill").fillna(0.0)
+            _gv_mu  = d["garch_vol"].rolling(60, min_periods=10).mean()
+            _gv_std = d["garch_vol"].rolling(60, min_periods=10).std().replace(0, np.nan)
+            d["garch_vol_z"]  = ((d["garch_vol"] - _gv_mu) / _gv_std).fillna(0.0)
+        except Exception:
+            d["garch_vol"]   = 0.0
+            d["garch_vol_z"] = 0.0
+    else:
+        d["garch_vol"]   = 0.0
+        d["garch_vol_z"] = 0.0
+
     req = ["ema20","rsi14","trend5","vix_dir","sp500_chg","nikkei_chg","spf_gap",
            "hv20","nf_gap","vix_pct_chg","vix_hv_ratio","nf_ret20"]
     return d.dropna(subset=req)
@@ -871,6 +898,9 @@ FEATURE_COLS = [
     "hmm_neutral_prob",   # HMM 3-state: P(neutral regime)
     "hmm_bear_prob",      # HMM 3-state: P(bear regime)
     "nf_kalman_trend",    # Kalman-filtered daily return — noise-reduced trend signal
+    # GARCH conditional volatility forecast
+    "garch_vol",          # GARCH(1,1) 1-day-ahead vol forecast in % return terms
+    "garch_vol_z",        # 60d z-score of garch_vol — vol regime detector (high = turbulent)
 ]
 
 
