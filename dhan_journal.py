@@ -147,13 +147,22 @@ def fetch_trade_history(from_date: str, to_date: str) -> list[dict]:
 
 
 def filter_nf_options(trades: list[dict]) -> list[dict]:
-    """Keep only NSE F&O option fills with NIFTY underlying."""
+    """Keep only NSE F&O option fills with NIFTY (50) underlying.
+
+    Excludes BANKNIFTY (BNF) — its tradingSymbol also contains "NIFTY" but its
+    leg structure does not match the IC / spread / straddle templates used here.
+    """
     out = []
     for t in trades:
         sym = str(t.get("tradingSymbol") or t.get("customSymbol") or "").upper()
         seg = str(t.get("exchangeSegment", "")).upper()
-        if seg == "NSE_FNO" and "NIFTY" in sym:
-            out.append(t)
+        if seg != "NSE_FNO":
+            continue
+        if "BANKNIFTY" in sym or "FINNIFTY" in sym or "MIDCPNIFTY" in sym:
+            continue
+        if "NIFTY" not in sym:
+            continue
+        out.append(t)
     return out
 
 
