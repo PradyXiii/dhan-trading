@@ -28,6 +28,11 @@ from dotenv import load_dotenv
 
 import notify
 from backtest_engine import get_lot_size
+from dhan_journal import (
+    get_positions      as _dhan_get_positions,
+    leg_avgs           as _dhan_leg_avgs,
+    realized_pnl       as _dhan_realized_pnl,
+)
 
 load_dotenv()
 
@@ -284,7 +289,11 @@ def _append_spread_row(row: dict):
 
 
 def _journal_ic(intent: dict, today_label: str):
-    """Journal a Nifty50 Iron Condor trade (4-leg IC schema)."""
+    """Journal a Nifty50 Iron Condor trade (4-leg IC schema).
+
+    Source of truth = Dhan /v2/positions (per-leg realizedProfit, buyAvg, sellAvg).
+    Falls back to today_trade.json values only if Dhan API unreachable.
+    """
     paper         = (intent.get("order_mode") == "PAPER" or intent.get("mode") == "PAPER")
     signal        = intent["signal"]
     lots          = int(intent.get("lots", 1))
@@ -296,24 +305,47 @@ def _journal_ic(intent: dict, today_label: str):
     ce_long_strike  = float(intent.get("ce_long_strike",  0))
     pe_short_strike = float(intent.get("pe_short_strike", 0))
     pe_long_strike  = float(intent.get("pe_long_strike",  0))
-    ce_short_entry  = float(intent.get("ce_short_entry",  0))
-    ce_long_entry   = float(intent.get("ce_long_entry",   0))
-    pe_short_entry  = float(intent.get("pe_short_entry",  0))
-    pe_long_entry   = float(intent.get("pe_long_entry",   0))
-    ce_net_credit   = float(intent.get("ce_credit",   0))   # auto_trader writes "ce_credit"
-    pe_net_credit   = float(intent.get("pe_credit",   0))   # auto_trader writes "pe_credit"
     score         = int(intent.get("signal_score", 0))
     ml_conf       = float(intent.get("ml_conf", 0))
 
-    exit_reason   = intent.get("exit_reason", "") or "OPEN"
-    exit_time     = intent.get("exit_time", "")
-    pnl_inr       = float(intent.get("pnl_inr", 0))
+    # ── Pull realized values from Dhan positions API (single source of truth) ──
+    positions = _dhan_get_positions()
+    ce_short_sid = str(intent.get("ce_short_sid", ""))
+    ce_long_sid  = str(intent.get("ce_long_sid",  ""))
+    pe_short_sid = str(intent.get("pe_short_sid", ""))
+    pe_long_sid  = str(intent.get("pe_long_sid",  ""))
 
-    # Per-leg exit prices written by exit_positions.py after EOD close
-    ce_short_exit = float(intent.get("ce_short_exit", 0))
-    ce_long_exit  = float(intent.get("ce_long_exit",  0))
-    pe_short_exit = float(intent.get("pe_short_exit", 0))
-    pe_long_exit  = float(intent.get("pe_long_exit",  0))
+    ce_short_leg = _dhan_leg_avgs(positions, ce_short_sid) if ce_short_sid else {}
+    ce_long_leg  = _dhan_leg_avgs(positions, ce_long_sid)  if ce_long_sid  else {}
+    pe_short_leg = _dhan_leg_avgs(positions, pe_short_sid) if pe_short_sid else {}
+    pe_long_leg  = _dhan_leg_avgs(positions, pe_long_sid)  if pe_long_sid  else {}
+
+    dhan_has_data = any([ce_short_leg, ce_long_leg, pe_short_leg, pe_long_leg])
+
+    # Entry/exit prices: prefer Dhan averages; fall back to intent values
+    ce_short_entry = ce_short_leg.get("sell_avg") or float(intent.get("ce_short_entry", 0))
+    ce_long_entry  = ce_long_leg.get("buy_avg")   or float(intent.get("ce_long_entry",  0))
+    pe_short_entry = pe_short_leg.get("sell_avg") or float(intent.get("pe_short_entry", 0))
+    pe_long_entry  = pe_long_leg.get("buy_avg")   or float(intent.get("pe_long_entry",  0))
+    ce_short_exit  = ce_short_leg.get("buy_avg")  or float(intent.get("ce_short_exit", 0))
+    ce_long_exit   = ce_long_leg.get("sell_avg")  or float(intent.get("ce_long_exit",  0))
+    pe_short_exit  = pe_short_leg.get("buy_avg")  or float(intent.get("pe_short_exit", 0))
+    pe_long_exit   = pe_long_leg.get("sell_avg")  or float(intent.get("pe_long_exit",  0))
+    ce_net_credit  = float(intent.get("ce_credit", 0))
+    pe_net_credit  = float(intent.get("pe_credit", 0))
+
+    # P&L = sum of realizedProfit across all 4 legs (Dhan-booked, not estimated)
+    if dhan_has_data:
+        pnl_inr = _dhan_realized_pnl(
+            positions, [ce_short_sid, ce_long_sid, pe_short_sid, pe_long_sid]
+        )
+    else:
+        pnl_inr = float(intent.get("pnl_inr", 0))
+
+    # exit_reason from intent (set by spread_monitor on SL/TP, exit_positions on EOD)
+    exit_reason   = intent.get("exit_reason", "") or ("EOD" if dhan_has_data else "OPEN")
+    exit_time     = intent.get("exit_time", "")
+
     has_exits = any([ce_short_exit, ce_long_exit, pe_short_exit, pe_long_exit])
 
     pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
@@ -433,24 +465,31 @@ def _journal_spread(intent: dict, today_label: str):
     dte           = float(intent.get("dte", 0))
     spot          = float(intent.get("spot_at_signal", 0))
     net_credit    = float(intent["net_credit"])
-    short_entry   = float(intent.get("short_entry", 0))
-    long_entry    = float(intent.get("long_entry", 0))
     score         = int(intent.get("signal_score", 0))
     ml_conf       = float(intent.get("ml_conf", 0))
 
-    # Exit fields — written by spread_monitor.py OR exit_positions.py
-    short_exit    = float(intent.get("exit_short_ltp", 0))
-    long_exit     = float(intent.get("exit_long_ltp", 0))
-    exit_spread   = float(intent.get("exit_spread", 0))
-    exit_reason   = intent.get("exit_reason", "")
-    exit_time     = intent.get("exit_time", "")
-    pnl_inr       = float(intent.get("pnl_inr", 0))
+    # ── Pull realized values from Dhan positions API ──
+    positions = _dhan_get_positions()
+    short_sid = str(intent.get("short_sid", ""))
+    long_sid  = str(intent.get("long_sid",  ""))
+    short_leg = _dhan_leg_avgs(positions, short_sid) if short_sid else {}
+    long_leg  = _dhan_leg_avgs(positions, long_sid)  if long_sid  else {}
+    dhan_has_data = bool(short_leg or long_leg)
 
-    # If no exit recorded yet (trade still open at 3:30 PM journal run),
-    # estimate: assume EOD squareoff close at last known spread cost.
-    # Mark exit_reason=OPEN so it's visible in the Telegram report.
-    if not exit_reason:
-        exit_reason = "OPEN"
+    short_entry = short_leg.get("sell_avg") or float(intent.get("short_entry", 0))
+    long_entry  = long_leg.get("buy_avg")   or float(intent.get("long_entry",  0))
+    short_exit  = short_leg.get("buy_avg")  or float(intent.get("exit_short_ltp", 0))
+    long_exit   = long_leg.get("sell_avg")  or float(intent.get("exit_long_ltp", 0))
+    exit_spread = round(short_exit - long_exit, 2) if (short_exit or long_exit) else float(intent.get("exit_spread", 0))
+
+    # P&L = realizedProfit on both legs (Dhan-booked, not estimated)
+    if dhan_has_data:
+        pnl_inr = _dhan_realized_pnl(positions, [short_sid, long_sid])
+    else:
+        pnl_inr = float(intent.get("pnl_inr", 0))
+
+    exit_reason = intent.get("exit_reason", "") or ("EOD" if dhan_has_data else "OPEN")
+    exit_time   = intent.get("exit_time", "")
 
     pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
 
@@ -538,16 +577,31 @@ def _journal_straddle(intent: dict, today_label: str):
     lot_size   = int(intent.get("lot_size", 65))
     dte        = float(intent.get("dte", 0))
     spot       = float(intent.get("spot_at_signal", 0))
-    ce_entry   = float(intent.get("ce_entry", intent.get("ce_ltp", 0)))
-    pe_entry   = float(intent.get("pe_entry", intent.get("pe_ltp", 0)))
-    net_credit = float(intent.get("net_credit", ce_entry + pe_entry))
     score      = int(intent.get("signal_score", 0))
     ml_conf    = float(intent.get("ml_conf", 0))
 
-    exit_cost   = float(intent.get("exit_spread", intent.get("exit_cost", 0)))
-    exit_reason = intent.get("exit_reason", "") or "OPEN"
+    # ── Pull realized values from Dhan positions API ──
+    positions = _dhan_get_positions()
+    ce_sid    = str(intent.get("ce_sid", ""))
+    pe_sid    = str(intent.get("pe_sid", ""))
+    ce_leg    = _dhan_leg_avgs(positions, ce_sid) if ce_sid else {}
+    pe_leg    = _dhan_leg_avgs(positions, pe_sid) if pe_sid else {}
+    dhan_has_data = bool(ce_leg or pe_leg)
+
+    ce_entry  = ce_leg.get("sell_avg") or float(intent.get("ce_entry", intent.get("ce_ltp", 0)))
+    pe_entry  = pe_leg.get("sell_avg") or float(intent.get("pe_entry", intent.get("pe_ltp", 0)))
+    ce_exit   = ce_leg.get("buy_avg")  or 0.0
+    pe_exit   = pe_leg.get("buy_avg")  or 0.0
+    net_credit = float(intent.get("net_credit", ce_entry + pe_entry))
+    exit_cost  = round(ce_exit + pe_exit, 2) if (ce_exit or pe_exit) else float(intent.get("exit_spread", intent.get("exit_cost", 0)))
+
+    if dhan_has_data:
+        pnl_inr = _dhan_realized_pnl(positions, [ce_sid, pe_sid])
+    else:
+        pnl_inr = float(intent.get("pnl_inr", 0))
+
+    exit_reason = intent.get("exit_reason", "") or ("EOD" if dhan_has_data else "OPEN")
     exit_time   = intent.get("exit_time", "")
-    pnl_inr     = float(intent.get("pnl_inr", 0))
 
     pnl_pct = (pnl_inr / (net_credit * lots * lot_size) * 100) if net_credit > 0 else 0
 
