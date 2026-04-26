@@ -643,6 +643,25 @@ def main():
         if today_trade:
             sells = [] if DRY_RUN else _get_today_nf_sells()
             _send_exit_telegram(today_trade, sells)
+            # If spread_monitor never wrote exit data (e.g. EOD reached without
+            # SL/TP, all positions naturally squared by Dhan or closed manually),
+            # mark today_trade as exited so trade_journal can finalize the row.
+            # Do NOT overwrite an existing exit_done=True (preserves SL/TP data).
+            if not DRY_RUN and not today_trade.get("exit_done"):
+                now_ist = datetime.now(_IST)
+                fallback = {
+                    "exit_done":   True,
+                    "exit_reason": "EOD",
+                    "exit_time":   now_ist.strftime("%H:%M"),
+                    "pnl_inr":     0.0,  # unknown — journal can read tradebook for accurate value
+                }
+                path = os.path.join(DATA_DIR, "today_trade.json")
+                try:
+                    with open(path, "w") as f:
+                        json.dump({**today_trade, **fallback}, f, indent=2)
+                    notify.log("Wrote EOD fallback to today_trade.json (no positions found, no prior exit data)")
+                except Exception as e:
+                    notify.log(f"Could not write EOD fallback to today_trade.json: {e}")
         _write_exit_marker()
         return
 

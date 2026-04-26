@@ -256,15 +256,31 @@ def _journal_stats():
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _append_spread_row(row: dict):
-    """Append one row to live_spread_trades.csv."""
+def _upsert_csv_row(csv_path: str, fields: list, row: dict):
+    """
+    Upsert by date: if a row with the same `date` already exists, REPLACE it;
+    otherwise APPEND. Lets us re-run the journal after exit_positions to
+    upgrade an OPEN row to a closed row without creating duplicates.
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
-    file_exists = os.path.exists(SPREAD_CSV)
-    with open(SPREAD_CSV, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SPREAD_FIELDS, extrasaction="ignore")
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    today = row.get("date")
+    rows  = []
+    if os.path.exists(csv_path):
+        with open(csv_path, newline="") as f:
+            rows = list(csv.DictReader(f))
+    # Drop existing same-date row (if any), keep the rest, append the new one
+    rows = [r for r in rows if r.get("date") != today]
+    rows.append(row)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+
+def _append_spread_row(row: dict):
+    """Upsert one row in live_spread_trades.csv (replace by date if exists)."""
+    _upsert_csv_row(SPREAD_CSV, SPREAD_FIELDS, row)
 
 
 def _journal_ic(intent: dict, today_label: str):
@@ -307,8 +323,11 @@ def _journal_ic(intent: dict, today_label: str):
         oracle_correct = True
     elif exit_reason == "SL":
         oracle_correct = False
-    elif exit_reason in ("EOD", "OPEN"):
-        oracle_correct = pnl_inr > 0
+    elif exit_reason == "EOD":
+        # Only label after real EOD squareoff with non-zero P&L data
+        if has_exits or pnl_inr != 0:
+            oracle_correct = pnl_inr > 0
+    # exit_reason == "OPEN" → leave None (undecided; backfill will set later)
 
     row = {
         "date":              datetime.now(_IST).date().isoformat(),
@@ -339,16 +358,10 @@ def _journal_ic(intent: dict, today_label: str):
         "ml_conf":           round(ml_conf, 4),
     }
 
-    os.makedirs(DATA_DIR, exist_ok=True)
     if DRY_RUN:
         notify.log(f"IC journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f} [DRY RUN — CSV not written]")
     else:
-        file_exists = os.path.exists(IC_CSV)
-        with open(IC_CSV, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=IC_FIELDS, extrasaction="ignore")
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
+        _upsert_csv_row(IC_CSV, IC_FIELDS, row)
         notify.log(f"IC journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
 
     emoji    = {"TP": "🟢", "SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
@@ -446,8 +459,11 @@ def _journal_spread(intent: dict, today_label: str):
         oracle_correct = True
     elif exit_reason == "SL":
         oracle_correct = False
-    elif exit_reason in ("EOD", "OPEN"):
-        oracle_correct = pnl_inr > 0
+    elif exit_reason == "EOD":
+        # Only label after real EOD squareoff with exit data captured
+        if exit_spread or short_exit or long_exit or pnl_inr != 0:
+            oracle_correct = pnl_inr > 0
+    # exit_reason == "OPEN" → leave None (undecided; backfill will set later)
 
     row = {
         "date":              datetime.now(_IST).date().isoformat(),
@@ -538,8 +554,11 @@ def _journal_straddle(intent: dict, today_label: str):
     oracle_correct = None
     if exit_reason == "SL":
         oracle_correct = False
-    elif exit_reason in ("EOD", "OPEN"):
-        oracle_correct = pnl_inr > 0
+    elif exit_reason == "EOD":
+        # Only label after real EOD squareoff with exit data captured
+        if exit_cost or pnl_inr != 0:
+            oracle_correct = pnl_inr > 0
+    # exit_reason == "OPEN" → leave None (undecided; backfill will set later)
 
     row = {
         "date":              datetime.now(_IST).date().isoformat(),
@@ -563,16 +582,10 @@ def _journal_straddle(intent: dict, today_label: str):
         "ml_conf":           round(ml_conf, 4),
     }
 
-    os.makedirs(DATA_DIR, exist_ok=True)
     if DRY_RUN:
         notify.log(f"Straddle journal [DRY RUN — CSV not written]: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
     else:
-        file_exists = os.path.exists(STRADDLE_CSV)
-        with open(STRADDLE_CSV, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=STRADDLE_FIELDS, extrasaction="ignore")
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
+        _upsert_csv_row(STRADDLE_CSV, STRADDLE_FIELDS, row)
         notify.log(f"Straddle journal: credit ₹{net_credit:.0f} | {exit_reason} | P&L ₹{pnl_inr:,.0f}")
 
     emoji    = {"SL": "🔴", "EOD": "⏹", "OPEN": "🔓"}.get(exit_reason, "❓")
