@@ -63,7 +63,34 @@ echo "$out" | grep -qE "(Bull Put placed|Iron Condor placed|Straddle placed|No T
   || mark_fail "auto_trader dry-run -- last lines: $(echo "$out" | tail -3)"
 
 echo ""
-echo "================ 7. DATA FILE FRESHNESS ================"
+echo "================ 7. ALL CRON SCRIPTS DRY-RUN ================"
+# Each script checked by exit code. Scripts with --dry-run flag use it;
+# read-only scripts (system_health, health_ping, morning_brief) run direct.
+run_script() {
+  local label="$1"; shift
+  local out
+  out=$("$@" 2>&1)
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then mark_pass "$label"
+  else mark_fail "$label  -->  $(echo "$out" | tail -1)"; fi
+}
+run_script "spread_monitor --dry-run"     python3 spread_monitor.py --dry-run
+run_script "exit_positions --dry-run"     python3 exit_positions.py --dry-run
+run_script "trade_journal --dry-run"      python3 trade_journal.py --dry-run
+run_script "midday_conviction --dry-run"  python3 midday_conviction.py --dry-run
+run_script "weekly_audit --dry-run"       python3 weekly_audit.py --dry-run
+run_script "system_health"                python3 system_health.py
+run_script "health_ping"                  python3 health_ping.py
+run_script "morning_brief"                python3 morning_brief.py
+
+echo ""
+echo "================ 8. TELEGRAM DELIVERY ================"
+python3 -c "import notify; notify.send('🧪 smoke_test.sh ping — $(date +%H:%M)')" 2>/dev/null \
+  && mark_pass "telegram delivers" \
+  || mark_fail "telegram failed — check TELEGRAM_BOT_TOKEN / CHAT_ID in .env"
+
+echo ""
+echo "================ 9. DATA FILE FRESHNESS ================"
 for f in data/nifty50.csv data/india_vix.csv data/signals_ml.csv; do
   if [ -f "$f" ]; then
     age_h=$(( ($(date +%s) - $(stat -c %Y "$f")) / 3600 ))
@@ -73,7 +100,7 @@ for f in data/nifty50.csv data/india_vix.csv data/signals_ml.csv; do
 done
 
 echo ""
-echo "================ 8. CRON SCHEDULE INTACT ================"
+echo "================ 10. CRON SCHEDULE INTACT ================"
 crontab -l 2>/dev/null | grep -q "auto_trader.py" && mark_pass "auto_trader cron exists" \
   || mark_fail "auto_trader cron missing"
 crontab -l 2>/dev/null | grep -q "exit_positions.py" && mark_pass "exit_positions cron exists" \
@@ -82,7 +109,7 @@ crontab -l 2>/dev/null | grep -q "trade_journal.py" && mark_pass "trade_journal 
   || mark_fail "trade_journal cron missing"
 
 echo ""
-echo "================ 9. DISK ================"
+echo "================ 11. DISK ================"
 df -h / | tail -1
 
 echo ""
