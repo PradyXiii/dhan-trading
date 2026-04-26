@@ -38,6 +38,7 @@ IC_BACKFILL = {
         "pnl_inr":            "-250.00",
         # net_credit was 134.55/lot × 65 = ₹8745.75 collected → loss as % of credit
         "pnl_pct_of_credit":  f"{-250.00 / (134.55 * 65) * 100:.2f}",
+        "oracle_correct":     "false",   # IC loss → market broke a wing
     },
     "2026-04-24": {
         "exit_reason":        "EOD",
@@ -45,6 +46,7 @@ IC_BACKFILL = {
         "pnl_inr":            "-350.04",
         # net_credit was 128.55/lot × 65 = ₹8355.75 collected
         "pnl_pct_of_credit":  f"{-350.04 / (128.55 * 65) * 100:.2f}",
+        "oracle_correct":     "false",   # IC loss
     },
 }
 
@@ -58,6 +60,7 @@ SPREAD_BACKFILL = {
         "pnl_inr":            "415.71",
         # net_credit = 66.50/lot × 130 (2 lots × 65) = ₹8645 collected
         "pnl_pct_of_credit":  f"{415.71 / (66.50 * 130) * 100:.2f}",
+        "oracle_correct":     "true",    # Bull Put win on PUT signal day
     },
 }
 
