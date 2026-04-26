@@ -68,11 +68,11 @@ Every 1 min, 9:30 AM–3:14 PM IST
 
 3:30 PM IST, Mon–Fri
   └── trade_journal.py
-        — Reads per-leg exit prices from today_trade.json (written by exit_positions.py)
-        — IC: shows entry → exit → P&L for each leg in Telegram
-        — Computes total P&L, exit reason (SL/TP/EOD)
-        — Appends row to data/live_ic_trades.csv
-        — Sends EOD journal to Telegram
+        — Reads realized P&L per leg from Dhan /v2/positions (single source of truth)
+        — Falls back to today_trade.json metadata only for signal/score/intent
+        — Idempotent upsert by date — re-running the journal updates a row in
+          place instead of appending duplicates
+        — Sends EOD journal to Telegram with entry → exit → P&L per leg
 
 11:00 PM IST, Mon–Fri
   └── model_evolver.py
@@ -88,6 +88,23 @@ Midnight IST, Mon–Fri
         — autoexperiment_nf.py evaluates on last 252 trading days
         — Improvements committed; regressions reverted
         — Paper model accumulates 3-night winning streak before auto-promoting to live
+
+7:00 AM IST, every day
+  └── system_health.py
+        — Daily evolution report: ML composite trend, champion accuracy,
+          live WR + P&L, research velocity (kept vs discarded last 30 days)
+        — Sends concise health Telegram
+
+Saturday 7:30 AM IST
+  └── weekly_audit.py
+        — Walks last week Mon–Fri, fetches Dhan tradebook for each date
+        — Cross-checks live_ic / live_spread / live_straddle CSVs
+        — Auto-recovers any missing or OPEN row via backfill_dhan_history.py
+        — Catches any 3:30 PM journal-cron miss without manual intervention
+
+Twice daily (06:30 + 18:30 IST)
+  └── git pull (autopull.log)
+        — Pulls latest code on VM. Autostash preserves data/ during pull.
 
 1st of every month, 10:00 AM IST
   └── lot_expiry_scanner.py
@@ -204,8 +221,15 @@ fetch_intraday_options.py   Fetch 1-min NF option cache → data/nifty_options_c
 check_margins.py            Live margin checker — all 5 strategies vs account balance
 optimize_params.py          VIX + confidence grid search
 validate_all.py             Pre-deployment end-to-end health check
+dhan_journal.py             Dhan API source-of-truth helpers (positions, tradebook, charges)
+backfill_dhan_history.py    Reconstruct CSV rows from Dhan /v2/trades historical fills
+weekly_audit.py             Saturday gap-detector — auto-recovers missed journal rows
+system_health.py            Daily 7 AM evolution report — composite, WR, P&L, research velocity
+wiki_compiler.py            Compile raw discoveries → docs/wiki/ articles (Karpathy LLM Wiki)
 STRATEGY_RESEARCH.md        Final 7yr backtest research — IC+BullPut verdict, locked Apr 2026
 CLAUDE.md                   Architecture map + standing rules — auto-loaded every session
+docs/wiki/                  Compiled bug/feature/strategy knowledge base
+docs/DHAN_API_V2_REFERENCE.md  Full Dhan API v2 reference (read before any API work)
 setup_automation.sh         One-shot VM setup: deps + all cron jobs
 ```
 
@@ -310,6 +334,23 @@ python3 autoexperiment_nf.py
 # Model
 python3 model_evolver.py
 python3 model_evolver.py --no-data
+
+# Dhan as source of truth
+python3 dhan_journal.py --positions               # current positions + realizedProfit
+python3 dhan_journal.py --history 2026-04-23      # historical fills + charges + leg P&L
+python3 backfill_dhan_history.py --date 2026-04-23           # dry-run, preview row
+python3 backfill_dhan_history.py --date 2026-04-23 --apply   # write CSV via upsert
+python3 backfill_dhan_history.py --range 2026-04-22:2026-04-24 --apply
+
+# Audit + health
+python3 weekly_audit.py --dry-run                 # gap detection, no writes
+python3 weekly_audit.py                           # auto-recover missing rows
+python3 system_health.py                          # daily evolution Telegram
+
+# Wiki
+python3 wiki_compiler.py                          # compile raw discoveries → docs/wiki/
+python3 wiki_compiler.py --dry-run
+python3 wiki_compiler.py --lint                   # detect orphan pages, broken links
 ```
 
 ---
@@ -335,6 +376,10 @@ python3 model_evolver.py --no-data
 **Nightly model competition** — RF, XGBoost, LightGBM, CatBoost compete every night. Live trade outcomes injected at 10× weight. Midday reversal checkpoints injected at 5×. Model corrects its own mistakes over time.
 
 **Autonomous regime detection** — `regime_watcher.py` runs on the 2nd of each month. If lot size or expiry day changed: runs 6-month real-options backtest, picks best strategy, patches `LOT_SIZE` in `auto_trader.py`, patches `BULL_PUT_MARGIN_PER_LOT` if SPAN drifts >10%. No human involvement needed.
+
+**Dhan API as single source of truth** — Every CSV value in `live_*_trades.csv` is traceable to a Dhan `/v2/positions` or `/v2/trades` field. `realizedProfit` (Dhan-booked P&L per leg), `buyAvg` / `sellAvg`, charges (brokerage, STT, sebiTax, exchange transaction, service tax, stamp duty) — all read from Dhan, never estimated. `dhan_journal.py` centralises the helpers; `backfill_dhan_history.py` rebuilds historical rows from `/v2/trades/{from}/{to}/{page}` fills. CLAUDE.md DHAN-FIRST DATA RULE codifies the discipline.
+
+**Self-healing trade ledger** — `weekly_audit.py` runs every Saturday 7:30 AM IST. It walks the previous Mon–Fri, asks Dhan tradebook what trades happened, cross-checks the right CSV (IC / spread / straddle), and auto-runs `backfill_dhan_history.py --apply` for any missing or OPEN row. Catches any 3:30 PM journal-cron miss without manual action. Telegram report on every run.
 
 ---
 

@@ -392,8 +392,13 @@ Auto-upgrades to Short Straddle when capital ≥ ₹2.3L. No human input needed.
 | `data_fetcher.py` | Downloads OHLCV + global market data → `data/*.csv` |
 | `health_ping.py` | Pre-market heartbeat (8:50 AM) — token/capital/freshness checks |
 | `midday_conviction.py` | Midday thesis reassessment (11 AM) — branches on spread vs naked schema → Telegram summary |
-| `exit_positions.py` | EOD 3:15 PM — primary: DELETE /v2/positions (one call); backup: leg-by-leg shorts-first |
-| `trade_journal.py` | EOD 3:30 PM — logs actual fills; spreads → `live_ic_trades.csv` |
+| `exit_positions.py` | EOD 3:15 PM — primary: DELETE /v2/positions (one call); backup: leg-by-leg shorts-first; writes EOD fallback to today_trade.json on early-exit path |
+| `trade_journal.py` | EOD 3:30 PM — reads realized P&L from Dhan `/v2/positions` (single source of truth), idempotent upsert by date |
+| `dhan_journal.py` | Dhan API helper module — `get_positions`, `realized_pnl`, `leg_avgs`, `fetch_trade_history`, `leg_pnl_from_fills`, `trade_pnl_for_date` |
+| `backfill_dhan_history.py` | Reconstruct CSV rows from `/v2/trades/{from}/{to}/{page}` historical fills + charges. Auto-detects strategy. Dry-run by default; `--apply` to write |
+| `weekly_audit.py` | Saturday 7:30 AM safety net — walks last week, cross-checks Dhan tradebook vs CSV, auto-runs backfill on gaps. EXCLUDED_DATES skips known system-bug days |
+| `system_health.py` | Daily 7:00 AM evolution report — composite trend, champion accuracy, live WR + P&L, research velocity |
+| `wiki_compiler.py` | Compiles `docs/wiki/raw/*.txt` discoveries into knowledge-base articles via Claude API (Karpathy LLM Wiki pattern) |
 | `lot_expiry_scanner.py` | Monthly cron — detects Nifty50 lot size / expiry day changes |
 | `regime_watcher.py` | Monthly cron (2nd of month) — detects regime changes, runs backtest, auto-patches LOT_SIZE, sends Telegram strategy verdict |
 | `backtest_hold_periods.py` | Strategy research tool — multi-strategy BS-model backtest with regime-report, DOW-breakdown, hold-period analysis |
