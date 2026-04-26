@@ -317,7 +317,12 @@ def _build_model(model_type, params):
 #  LIVE TRADE FEEDBACK — inject real outcomes + boost miss-day patterns
 # ─────────────────────────────────────────────────────────────────────────────
 
-LIVE_TRADES_PATH    = f"{DATA_DIR}/live_ic_trades.csv"
+LIVE_TRADES_PATHS   = [
+    f"{DATA_DIR}/live_ic_trades.csv",       # IC trades (CALL signal days)
+    f"{DATA_DIR}/live_spread_trades.csv",   # Bull Put / Bear Call (PUT signal days)
+    f"{DATA_DIR}/live_straddle_trades.csv", # Straddle (capital ≥ ₹2.3L)
+]
+LIVE_TRADES_PATH    = LIVE_TRADES_PATHS[0]  # backward-compat alias
 MIDDAY_CHECKPOINTS  = f"{DATA_DIR}/midday_checkpoints.csv"
 LIVE_INJECT_WEIGHT  = 10.0  # live trade rows are 10× more valuable than synthetic labels
 MIDDAY_MISS_WEIGHT  = 5.0   # midday reversal rows: confirmed wrong direction mid-session
@@ -343,14 +348,16 @@ def _load_live_outcomes(df_full, selected_cols):
 
     empty = dict(inject_rows=[], X_hits=None, X_misses=None, n_labeled=0, n_misses=0)
 
-    if not Path(LIVE_TRADES_PATH).exists():
-        return empty
-
-    try:
-        with open(LIVE_TRADES_PATH) as f:
-            rows = list(_csv.DictReader(f))
-    except Exception as e:
-        print(f"  [feedback] Cannot read live_trades.csv: {e}")
+    rows = []
+    for _p in LIVE_TRADES_PATHS:
+        if not Path(_p).exists():
+            continue
+        try:
+            with open(_p) as f:
+                rows.extend(list(_csv.DictReader(f)))
+        except Exception as e:
+            print(f"  [feedback] Cannot read {_p}: {e}")
+    if not rows:
         return empty
 
     labeled = [r for r in rows
