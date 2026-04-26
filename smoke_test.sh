@@ -1,10 +1,10 @@
 #!/bin/bash
-# scripts/smoke_test.sh — full system check before live trading.
+# smoke_test.sh — full system check before live trading.
 # Run after any package cleanup, dependency change, or VM migration.
-# Run from repo root:  bash scripts/smoke_test.sh
+# Run from repo root:  bash smoke_test.sh
 
 set +e
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE" || exit 1
 
 PASS=0
