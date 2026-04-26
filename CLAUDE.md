@@ -232,6 +232,48 @@ The docs have the exact answer. Read them first, always.
 
 ---
 
+## ⚠️ DHAN-FIRST DATA RULE — NEVER ASSUME, ALWAYS LOOK UP
+
+**Every data field in this system must come from a verified source. In order:**
+
+1. **Dhan API doc (`docs/DHAN_API_V2_REFERENCE.md`)** — the response schema is
+   already in there. Find the exact field name. Use it as-is. Examples:
+   - Realized P&L per leg → `realizedProfit` on `GET /v2/positions`
+   - Entry/exit averages → `buyAvg`, `sellAvg` on `GET /v2/positions`
+   - Historical fills → `tradedPrice`, `tradedQuantity` on `GET /v2/trades/{from}/{to}/{page}`
+   - Charges (brokerage, STT, sebiTax, etc.) → explicit fields on `GET /v2/trades/...`
+   - Open positions → `netQty > 0` on `GET /v2/positions`
+   - Option chain spot → `data.last_price` on `POST /v2/optionchain`
+
+2. **If the field is NOT in the doc** — WebSearch Dhan's official API site, GitHub
+   discussions, or check `dhan_journal.py` patterns first. If still unfound,
+   **ASK THE USER** before inventing a fallback.
+
+3. **Building proxy / heuristic / formula** is a last resort and must be
+   explicitly justified in a comment + commented-on commit. Examples of
+   forbidden assumptions: estimating P&L from spot proxies, computing
+   margin from contract size formulas, inferring exit_reason from time of day.
+
+4. **Live trade journal** must read from `dhan_journal.py` helpers
+   (`get_positions`, `realized_pnl`, `leg_avgs`). `today_trade.json` is
+   auxiliary metadata only (signal, score, ML confidence, intent SIDs) —
+   never the source of P&L or fill prices.
+
+5. **Backfill any historical row** via `python3 backfill_dhan_history.py
+   --date YYYY-MM-DD --apply` — never hand-type P&L numbers. The script
+   pulls every fill from `/v2/trades/{from}/{to}/{page}` and reconstructs
+   the row from real BUY/SELL prices and Dhan-reported charges.
+
+**Why this rule exists (April 2026 discovery):**
+Apr 22–24 trades were originally hand-backfilled with proxy P&L numbers
+that diverged from Dhan-booked reality (e.g. Apr 22 hand-typed −₹250 vs
+Dhan-actual +₹98 due to lot-sizing bug). Hand-typed numbers can never be
+audited, never match the broker statement, and silently poison ML
+training labels via `oracle_correct`. Every CSV value in
+`live_*_trades.csv` must be traceable to a specific Dhan API response field.
+
+---
+
 ## ⚠️ BUG FIX RULE — EVERY DEBUG SESSION
 
 **Before writing any bug fix — search first, code second.**
