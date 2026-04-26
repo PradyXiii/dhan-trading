@@ -2,7 +2,7 @@
 
 **Source:** STRATEGY_RESEARCH.md (April 2026)  
 **Data:** 7-year backtest, Sep 2025–Apr 2026 = Tue expiry regime  
-**Last updated:** 2026-04-23  
+**Last updated:** 2026-04-25  
 
 ---
 
@@ -76,6 +76,15 @@ Fri     100%     100%
 ```
 
 **IC works ALL 5 days.** "Wed is bad" was stale Thu-expiry data.
+
+---
+
+## CAT (Classifier Accuracy Tracker) log
+
+| Date | Acc | Score | Signal | Conf | Top 3 Features |
+|---|---|---|---|---|---|
+| 2026-04-24 | 70.6% | 0.7071 | PUT | 69% | nf_ret5, trend5, us10y_chg |
+| 2026-04-25 | 70.6% | 0.7071 | PUT | 69% | nf_ret5, trend5, us10y_chg |
 
 ---
 

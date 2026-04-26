@@ -13,3 +13,5 @@ Parse with: `grep "^## \[" docs/wiki/log.md | tail -10`
 ## [2026-04-24] compile | 2026-04_experiments.txt → 1 pages updated: features/feature_history.md
 
 ## [2026-04-24] compile | 2026-04_sessions.txt → 1 pages updated: features/feature_history.md
+
+## [2026-04-25] compile | 2026-04_evolver.txt → 1 pages updated: strategy/ic_research.md
