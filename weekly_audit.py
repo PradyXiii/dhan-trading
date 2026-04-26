@@ -42,6 +42,14 @@ CSVS = {
     "straddle": _DATA / "live_straddle_trades.csv",
 }
 
+# Dates intentionally excluded from the live ledger (system-bug days that
+# would distort ML training labels — not strategy data points).
+EXCLUDED_DATES = {
+    "2026-04-22",  # IC lot-sizing bug fired 5-lot orders on 2 of 6 legs;
+                   # Dhan booked +₹98 but bug-saved P&L is not strategy signal.
+                   # Trade journal ledger starts from Apr 23.
+}
+
 DRY_RUN = "--dry-run" in sys.argv
 
 
@@ -135,7 +143,11 @@ def main():
     clean        = []   # (date) — already correct
     no_trade_day = []   # (date) — Dhan shows nothing, no row needed
 
+    excluded = []
     for d in days:
+        if d in EXCLUDED_DATES:
+            excluded.append(d)
+            continue
         had_trades, n_fills = _dhan_had_trades(d)
         if not had_trades:
             no_trade_day.append(d)
@@ -175,6 +187,10 @@ def main():
             lines.append(f"   • {d}")
     if no_trade_day:
         lines.append(f"⏭ No trade day: {len(no_trade_day)} day(s)  (Dhan tradebook empty — holiday or skip-signal)")
+    if excluded:
+        lines.append(f"⛔ Excluded by config: {len(excluded)} day(s)  (system-bug days, see EXCLUDED_DATES)")
+        for d in excluded:
+            lines.append(f"   • {d}")
     if recovered:
         lines.append(f"🔧 Recovered missing rows: {len(recovered)}")
         for d in recovered:
