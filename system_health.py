@@ -76,13 +76,25 @@ def _pnl_value(row: dict) -> float:
     return 0.0
 
 
-def _wr_and_pnl(rows: list[dict]) -> tuple[float | None, int, float]:
-    """Win rate %, trade count, total P&L."""
+def _is_closed(row: dict) -> bool:
+    """Trade is closed if exit_reason is set and not OPEN."""
+    er = (row.get("exit_reason") or "").strip().upper()
+    return er not in ("", "OPEN", "PENDING")
+
+
+def _wr_and_pnl(rows: list[dict]) -> tuple[float | None, int, float, int]:
+    """Win rate %, closed trade count, total P&L, open positions count.
+    Only closed trades count toward WR + P&L.
+    """
     if not rows:
-        return None, 0, 0.0
-    pnls = [_pnl_value(r) for r in rows]
+        return None, 0, 0.0, 0
+    closed = [r for r in rows if _is_closed(r)]
+    open_n = len(rows) - len(closed)
+    if not closed:
+        return None, 0, 0.0, open_n
+    pnls = [_pnl_value(r) for r in closed]
     wins = sum(1 for p in pnls if p > 0)
-    return wins / len(pnls) * 100, len(pnls), sum(pnls)
+    return wins / len(pnls) * 100, len(pnls), sum(pnls), open_n
 
 
 def _trend_arrow(today: float | None, baseline: float | None) -> str:
@@ -122,6 +134,12 @@ def build_report() -> str:
     champ_type = champ.get("model_type", "—")
     champ_acc  = champ.get("accuracy")
     champ_n    = champ.get("n_features", "—")
+    # Total features in pipeline (vs champion's selected count)
+    try:
+        from ml_engine import FEATURE_COLS
+        total_features = len(FEATURE_COLS)
+    except Exception:
+        total_features = "—"
 
     # 3. Live trades — pool all 3 CSVs (IC, spreads, straddle)
     all_trades = []
@@ -130,9 +148,9 @@ def build_report() -> str:
     # Sort by date
     all_trades.sort(key=lambda r: r.get("date", ""))
 
-    wr5,  n5,  _       = _wr_and_pnl(all_trades[-5:])
-    wr30, n30, pnl30   = _wr_and_pnl(all_trades[-30:])
-    wr_all, n_all, pnl_all = _wr_and_pnl(all_trades)
+    wr5,  n5,  _,        _      = _wr_and_pnl(all_trades[-5:])
+    wr30, n30, pnl30,    _      = _wr_and_pnl(all_trades[-30:])
+    wr_all, n_all, pnl_all, open_n = _wr_and_pnl(all_trades)
 
     # 4. Recent experiments
     exp_history = _read_json(_DATA / "experiment_history.json", []) or []
@@ -173,12 +191,13 @@ def build_report() -> str:
 <b>Champion Model</b> (predicts tomorrow's signal)
   Type:     {champ_type}
   Accuracy: {_fmt_pct(champ_acc * 100 if champ_acc else None)}
-  Features: {champ_n}
+  Features: {champ_n} selected of {total_features} total
 
-<b>Live Trades</b> (real money outcomes)
-  Last 5:   {_fmt_pct(wr5)}  ({n5} trades)
-  Last 30:  {_fmt_pct(wr30)} ({n30} trades, {_fmt_money(pnl30)})
-  Lifetime: {_fmt_pct(wr_all)} ({n_all} trades, {_fmt_money(pnl_all)})
+<b>Live Trades</b> (closed positions only)
+  Last 5:   {_fmt_pct(wr5)}  ({n5} closed)
+  Last 30:  {_fmt_pct(wr30)} ({n30} closed, {_fmt_money(pnl30)})
+  Lifetime: {_fmt_pct(wr_all)} ({n_all} closed, {_fmt_money(pnl_all)})
+  Open positions: {open_n}
 
 <b>Research (last 30 days)</b>
   Features kept:      {kept_30d}
