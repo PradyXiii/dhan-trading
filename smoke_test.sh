@@ -15,8 +15,9 @@ mark_fail() { FAIL=$((FAIL+1)); printf "  \xe2\x9d\x8c  %s\n" "$1"; }
 echo "================ 1. IMPORT TEST (every .py in repo) ================"
 for f in *.py; do
   mod="${f%.py}"
-  err=$(python3 -c "import $mod" 2>&1)
-  if [ -z "$err" ]; then mark_pass "$mod"
+  err=$(python3 -c "import $mod" 2>&1 >/dev/null)
+  rc=$?
+  if [ "$rc" -eq 0 ]; then mark_pass "$mod"
   else mark_fail "$mod  -->  $(echo "$err" | tail -1)"; fi
 done
 
