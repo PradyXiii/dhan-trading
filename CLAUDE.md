@@ -626,10 +626,70 @@ Installed by `setup_automation.sh`:
 30 18  * * 1-5  autoloop_nf.py          # Mon–Fri midnight IST (autoresearch, after evolver)
 30 4   1 * *    lot_expiry_scanner.py   # 1st of month, 10:00 AM IST
 45 4   2 * *    regime_watcher.py       # 2nd of month, 10:15 AM IST (after scanner)
+0  2   * * 6    weekly_audit.py         # Sat 7:30 AM IST (gap detection + auto-recovery)
+0  1,13 * * *   git pull (autopull.log) # 06:30 + 18:30 IST (latest code on VM)
+30 1   * * *    system_health.py        # 7:00 AM IST (daily evolution report)
 30 20  * * 0    log rotation            # Sunday 2:00 AM IST (trim logs > 10 MB)
 ```
 
 (Times in UTC cron; comments show the IST equivalent.)
+
+---
+
+## Resilience Matrix — every cron + every component, what fails, what recovers
+
+| Cron / Function | Failure mode | Backup / Recovery |
+|---|---|---|
+| `renew_token.py` (7:55 AM, 11 PM) | Dhan auth API down → token expires next day | `@reboot` retry; 1st morning trade fails fast on 401 → manual `.env` edit |
+| `health_ping.py` (9:05 AM) | Data CSVs stale or token bad | Telegram warns; auto_trader.py also re-checks `data_fetcher.py` freshness |
+| `morning_brief.py` (9:15 AM) | Claude API timeout / rate limit | `news_sentiment.json` may be stale; auto_trader.py treats stale sentiment as neutral (no veto) |
+| `auto_trader.py` (9:30 AM) | Order rejection / partial fill / API outage | Telegram alert with `🚨 PARTIAL_IC` / `PARTIAL_STRADDLE`; `today_trade.json` records intent so spread_monitor can pick up; pnlExit safety net at account level |
+| `spread_monitor.py` (every 1 min, 9:30 AM–3:10 PM) | VM crash, rate limit, IC SL miss | `pnlExit` (account-level loss trigger via Dhan `/v2/pnlExit`) fires automatically if losses breach threshold; exit_positions.py at 3:15 PM is hard backstop |
+| `exit_positions.py` (3:15 PM) | DELETE /v2/positions returns ERROR | leg-by-leg fallback path (close shorts first); deadline-breach Telegram if 3:20 PM passes still open; pnlExit covers worst case |
+| `trade_journal.py` (3:30 PM) | Process crash, race condition, today_trade.json incomplete | Idempotent _upsert_csv_row; reads `/v2/positions` directly (Dhan-truth); manual re-run safe; **weekly_audit.py Sat catches any miss** |
+| `model_evolver.py` (11 PM) | Library / data fetch fail; Optuna hang | Next night retry; `champion.pkl` + ensemble from previous night still load fine; `--no-data` flag for offline retry |
+| `autoloop_nf.py` (midnight) | Claude API timeout, paper score regression | Promotion streak resets (3-of-5 wins gate); paper model never auto-deploys without 3 nights confirmed |
+| `lot_expiry_scanner.py` (monthly 1st) | NSE API change | Telegram alert if format unrecognized; LOT_SIZE override file untouched; manual `--show` then edit |
+| `regime_watcher.py` (monthly 2nd) | Backtest crash | No auto-patch; Telegram error; live system continues with current strategy |
+| `weekly_audit.py` (Sat 7:30 AM) | Itself fails | Telegram silence is the warning — if no Saturday "all clean" message, manually run |
+| `system_health.py` (daily 7 AM) | CSV / champion_meta read error | Renders `—` for missing fields; non-blocking |
+| `git pull` cron (twice daily) | Network blip | Autostash preserves local data/; manual pull fixes |
+
+### Function-level fallbacks
+
+| Function | Primary path | Fallback path |
+|---|---|---|
+| `get_capital()` | Dhan `/v2/fundlimit` (`availabelBalance`) | env var `INITIAL_CAPITAL`; if both fail → die with Telegram |
+| `get_expiry()` | Dhan `/v2/optionchain/expirylist` | last-Tuesday calc (warns: "API failed, using fallback expiry") |
+| `_fetch_ic_margin_per_lot()` | Dhan `/v2/margincalculator/multi` | `IC_MARGIN_PER_LOT = 100_000` constant (FALLBACK only) |
+| `_fetch_spread_margin_per_lot()` | Dhan `/v2/margincalculator/multi` | `BULL_PUT_MARGIN_PER_LOT = 55_000`; if Dhan returns ₹220K (unhedged-equivalent) → routes to IC fallback automatically |
+| `ml_engine.py --predict-today` | Load champion.pkl + ensemble, vote | If pickle missing → retrain RF from scratch (slow path, 30s) |
+| Live trade journal P&L | `dhan_journal.realized_pnl()` from `/v2/positions` | `today_trade.json` `pnl_inr` field (auxiliary) |
+| Historical row recovery | `backfill_dhan_history.py --date X --apply` | Manual edit (only if Dhan API unreachable; document in commit) |
+
+### Self-healing flow on any 3:30 PM journal miss
+
+```
+3:30 PM trade_journal.py — fails (crash / race / network)
+   ↓
+[no recovery same day — this is OK]
+   ↓
+3:30 PM next day — runs successfully for new trade
+   ↓
+Saturday 7:30 AM — weekly_audit.py:
+   - Walks last week Mon–Fri
+   - For each day: Dhan tradebook says trades happened?
+     - Yes + CSV row OK → ✅ clean
+     - Yes + CSV row missing/OPEN → run backfill_dhan_history.py
+     - No + no row → ⏭ no-trade day
+   - Telegram report
+```
+
+### What you cannot recover automatically
+
+- **Pre-2 weeks ago trades** — Dhan `/v2/trades/{from}/{to}/{page}` works on any range but pagination and rate-limits make bulk historical recovery slow (>30 days). Use `python3 backfill_dhan_history.py --range FROM:TO` once and let it churn.
+- **Trades placed manually outside the system** — `weekly_audit.py` will see the fills and try to detect strategy from leg fingerprint, but if the legs don't match IC/spread/straddle templates, it flags as `could-not-detect-strategy` and asks for manual classification.
+- **Token expiry mid-day** — `renew_token.py` runs twice daily but if it's down for >24 h, all crons silently fail. `system_health.py` 7 AM will show stale data → manual investigation.
 
 ---
 
