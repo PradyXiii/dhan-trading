@@ -2,7 +2,7 @@
 
 **Source:** STRATEGY_RESEARCH.md (April 2026)  
 **Data:** 7-year backtest, Sep 2025–Apr 2026 = Tue expiry regime  
-**Last updated:** 2026-04-25  
+**Last updated:** 2026-04-26  
 
 ---
 
@@ -27,7 +27,7 @@
 | 2024 | 235 | 86% | ₹25.8L |
 | 2025 | 237 | 86% | ₹25.4L |
 | 2026 (Jan–Apr) | 69 | 67% | ₹7.2L |
-| **5yr total** | **1114** | **84.6%** | **₹1.17Cr** |
+| **5yr total** | **1114** | **84.6%** | **₹1.17Cr → ₹1.38Cr (post Kalman+HMM)** |
 
 Max drawdown: **-0.8%**. No year below 67%.
 
@@ -58,7 +58,8 @@ Backtest Sep 2025–Apr 2026: 100% WR, ₹3,794 avg (51 trades)
 
 | Strategy | WR | P&L (7yr) | Reason discarded |
 |---|---|---|---|
-| Bear Call | 13.5% | -₹24.03L | CALL signal = market going UP → short CE always gets hit. Direction conflict. |
+| Bear Call (old routing) | 13.5% | -₹24.03L | CALL signal = market going UP → short CE always gets hit. Direction conflict. |
+| Bear Call (PUT-day routing) | 61.9% | +₹35.9L | Profitable when properly routed to PUT days, but Bull Put still dominates (65.7% / ₹46.8L). Stays out. |
 | Naked Buy (CALL/PUT) | <50% | -₹40L+ | Theta decay kills premium buyers. Options expire worthless ~70% of time. |
 | Long Straddle | 5–31% | -₹248L | Buying both sides = paying theta every minute. Net negative EV. |
 
@@ -94,9 +95,12 @@ Fri     100%     100%
 - **NF lot size:** 75 before Jan 6 2026, 65 from Jan 6 2026
 - **Weekly Tuesday expiry** = every NF IC trade is naturally DTE ≤ 7
 - **Pre-Sep-2025 DOW stats biased** toward old Thursday-expiry patterns — ignore for current strategy
+- **Bear Call permanently dumped** from live routing. Strategy routing hardcoded: IC (CALL days) + Bull Put (PUT days). Verify auto_trader.py has no Bear Call placement path. (Bear Call ran live Apr 23 2026 via pre-finalization code path — that path must be removed.)
+- **Apr 22 2026 excluded from ledger** — lot-sizing bug gave qty=325 on 2 of 6 IC legs (5 lots instead of 1). Dhan-booked P&L +₹98 not a strategy signal. `EXCLUDED_DATES = {2026-04-22}` in weekly_audit.py.
 
 ---
 
 ## Related pages
 - [[bugs/known_issues]] — IC-specific bugs and gotchas
 - [[features/feature_history]] — ML features that improve IC signal quality
+- [[live/data_integrity]] — Dhan journal, audit, and P&L sourcing rules
