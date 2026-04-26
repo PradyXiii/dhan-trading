@@ -312,6 +312,28 @@ training labels via `oracle_correct`. Every CSV value in
 
 ---
 
+## ⚠️ VM PACKAGE RULE — NEVER `rm -rf` SITE-PACKAGES
+
+**Cron jobs run as system `python3` and use packages in `~/.local/lib/python3.11/site-packages/` — NOT the `dhan-env` virtualenv.** Treat `~/.local` as production. Never assume the venv "has its own copy" and that nuking `~/.local` is safe — it isn't, and crons will silently break tomorrow.
+
+**Three rules learned the hard way (Apr 2026 disk-cleanup session):**
+
+1. **`~/.local` ≠ disposable.** It IS the production package store for cron. `dhan-env` only matters when scripts are run inside an activated venv (none of the crons do this). When in doubt, treat `~/.local` as untouchable.
+
+2. **`rm -rf` on a package leaves orphan pip metadata.** Pip will then say "Requirement already satisfied" but `import` fails with `ModuleNotFoundError`. To recover: `pip install --user --break-system-packages --force-reinstall <pkg>`. To avoid the trap: use `pip uninstall <pkg> -y` (which also drops metadata), never `rm -rf`.
+
+3. **CUDA / PyTorch sneak in via transitive deps.** Some package (likely a tabpfn/HF/transformers install) once pulled in `torch`, `triton`, and a full `nvidia/cu13` stack — together ~4 GB on a CPU-only VM. Run quarterly to catch:
+
+   ```bash
+   pip list 2>/dev/null | grep -iE "torch|nvidia|cuda|triton|tabpfn|hf-xet"
+   ```
+
+   If anything appears, `pip uninstall` it (not `rm -rf`).
+
+**Before any cleanup of `~/.local`, run the full smoke test in the README ("Pre-Live Smoke Test") and confirm every script exits 0.** No cleanup is worth a Monday morning trade failure.
+
+---
+
 ## ⚠️ SECURITY RULE — BEFORE EVERY GIT COMMIT
 
 **Always run `git status` before committing. Never commit:**
@@ -363,6 +385,9 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | Lazy-imported lib not installed → feature shows 0.000 importance | All HMM/Kalman/GARCH features showed 0.000 importance even though code looked correct | The `try: import <lib>` block silently fell to `_LIB_OK=False` because the lib was never installed → fallback returned constant value → constant column = zero variance = zero importance. Always run `pip install --break-system-packages <lib>` on the VM BEFORE running `--analyze`. PEP 668 blocks plain pip on Debian-managed systems; use the flag. |
 | Bear Call appears profitable in NF backtest_spreads.py output | Output: 61.9% WR, ₹35.9L over 5yr — contradicts the "permanently dumped at 13.5%" line above. | Different routing. CLAUDE.md verdict was Bear Call on **CALL signal days** (direction conflict — model says up, you sell calls). The new `backtest_spreads.py` runs Bear Call on **PUT signal days** (model says down, you sell calls = aligned). Even with correct routing, Bull Put on PUT days still wins (65.7% WR, ₹46.8L over 5yr). Verdict holds — Bear Call stays out of live system. |
 | GARCH(1,1) volatility feature added but composite dropped 0.6484 → 0.6449 | `garch_vol` and `garch_vol_z` both showed 0.000 importance after `arch` lib installed and verified working | GARCH conditional vol is highly correlated with `hv20` + `vix_level` already in features → no marginal info. The lib also took 30s+ to fit on full history. Reverted in commit 6a01ca2. Lesson: before adding a vol feature, check it's not redundant with existing realized-vol features. |
+| `rm -rf` site-packages folder broke cron next morning | `pip install <pkg>` says "Requirement already satisfied" but `python3 -c "import <pkg>"` fails with `ModuleNotFoundError`. Cron silently dies. | `rm -rf` deletes files but leaves `.dist-info` metadata → pip is fooled. Recovery: `pip install --user --break-system-packages --force-reinstall <pkg>`. Avoidance: always use `pip uninstall <pkg> -y`, never `rm -rf` on site-packages. |
+| Cleanup of `~/.local` packages assuming `dhan-env` virtualenv had a duplicate | After deletion, every cron-invoked script (`auto_trader.py`, `ml_engine.py`, etc.) crashed with `ModuleNotFoundError: numpy` | Cron runs as system `python3` and resolves imports from `~/.local/lib/python3.11/site-packages/`, NOT from `dhan-env/`. The venv copy is irrelevant unless the cron entry activates the venv (none do). Treat `~/.local` as production. |
+| 4 GB of unused PyTorch + CUDA libraries on a CPU-only VM | `df -h /` showed 63% disk used (12 GB / 20 GB). Largest files: `torch/libtorch_cuda.so` (380 MB), `nvidia/cu13/*` (~2 GB total), `triton` (397 MB). Never imported by any trading script. | Pulled in transitively by some past `pip install` (likely `tabpfn` or `transformers`). Audit quarterly: `pip list 2>/dev/null \| grep -iE "torch\|nvidia\|cuda\|triton\|tabpfn\|hf-xet"`. Uninstall any hits with `pip uninstall <pkg> -y`. |
 
 ---
 

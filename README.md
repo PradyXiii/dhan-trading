@@ -347,6 +347,9 @@ python3 weekly_audit.py --dry-run                 # gap detection, no writes
 python3 weekly_audit.py                           # auto-recover missing rows
 python3 system_health.py                          # daily evolution Telegram
 
+# Pre-Live Smoke Test — run after any package cleanup, dependency change, VM migration
+bash smoke_test.sh                                # imports + Dhan API + ML ensemble + dry-run + cron + disk
+
 # Wiki
 python3 wiki_compiler.py                          # compile raw discoveries → docs/wiki/
 python3 wiki_compiler.py --dry-run
