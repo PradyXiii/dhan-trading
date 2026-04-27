@@ -58,3 +58,7 @@ models/
 # Compiled wiki articles in docs/wiki/*.md ARE committed (knowledge base)
 docs/wiki/raw/*
 !docs/wiki/raw/.gitkeep
+
+# Tech scout data — VM only (scored candidates, experiment queue)
+data/scout_discoveries.json
+data/scout_queue.json

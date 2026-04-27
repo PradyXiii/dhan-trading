@@ -549,6 +549,48 @@ def _scan_repeats(threshold: float = 0.65) -> None:
     print(f"{'='*70}\n")
 
 
+def _load_scout_context() -> str:
+    """Return top unqueued scout find as a prompt hint for Claude."""
+    queue_path = _HERE / "data" / "scout_queue.json"
+    if not queue_path.exists():
+        return ""
+    try:
+        queue = json.loads(queue_path.read_text())
+    except Exception:
+        return ""
+    # Pick first item not yet tried
+    pending = [item for item in queue if not item.get("tried", False)]
+    if not pending:
+        return ""
+    top = pending[0]
+    return (
+        f"\n\n### Tech Scout Tip (from autonomous weekly scan — consider this for your experiment)\n"
+        f"Source: {top.get('source','?')} | Score: {top.get('score','?')}/10\n"
+        f"Find: {top.get('name','')[:80]}\n"
+        f"Why relevant: {top.get('reason','')[:120]}\n"
+        f"Proposed integration: {top.get('integration_idea','')[:150]}\n"
+        f"pip install: {top.get('pip_install','?')}\n"
+        f"You may use this as inspiration for your experiment, or ignore it if you have a better idea.\n"
+    )
+
+
+def _mark_scout_tried(name: str):
+    """Mark top scout queue item as tried after autoloop processes it."""
+    queue_path = _HERE / "data" / "scout_queue.json"
+    if not queue_path.exists():
+        return
+    try:
+        queue = json.loads(queue_path.read_text())
+        for item in queue:
+            if item.get("name") == name and not item.get("tried", False):
+                item["tried"] = True
+                item["tried_at"] = datetime.now(_IST).isoformat()
+                break
+        queue_path.write_text(json.dumps(queue, indent=2, default=str))
+    except Exception:
+        pass
+
+
 def _load_experiment_history(n: int = 200) -> str:
     """Return last n experiments as a prompt-ready string. Window widened from
     40 → 200 (≈3 months at 3 exp/night) so Claude sees full memory before
@@ -945,6 +987,7 @@ def _call_claude(
         + log_str
         + _load_experiment_history()
         + _reversal_summary()
+        + _load_scout_context()
         + "\n\n"
         "### Your task\n"
         "Propose ONE targeted change. Return ONLY a valid JSON object.\n\n"

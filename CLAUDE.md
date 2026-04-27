@@ -424,6 +424,7 @@ Auto-upgrades to Short Straddle when capital ≥ ₹2.3L. No human input needed.
 | `weekly_audit.py` | Saturday 7:30 AM safety net — walks last week, cross-checks Dhan tradebook vs CSV, auto-runs backfill on gaps. EXCLUDED_DATES skips known system-bug days |
 | `system_health.py` | Daily 7:00 AM evolution report — composite trend, champion accuracy, live WR + P&L, research velocity |
 | `wiki_compiler.py` | Compiles `docs/wiki/raw/*.txt` discoveries into knowledge-base articles via Claude API (Karpathy LLM Wiki pattern) |
+| `tech_scout.py` | Weekly autonomous scanner — GitHub/arXiv/HN → Claude scores relevance 1-10 → queues high-scorers for autoloop experiments → Telegram digest |
 | `lot_expiry_scanner.py` | Monthly cron — detects Nifty50 lot size / expiry day changes |
 | `regime_watcher.py` | Monthly cron (2nd of month) — detects regime changes, runs backtest, auto-patches LOT_SIZE, sends Telegram strategy verdict |
 | `backtest_hold_periods.py` | Strategy research tool — multi-strategy BS-model backtest with regime-report, DOW-breakdown, hold-period analysis |
@@ -657,6 +658,7 @@ Installed by `setup_automation.sh`:
 30 4   1 * *    lot_expiry_scanner.py   # 1st of month, 10:00 AM IST
 45 4   2 * *    regime_watcher.py       # 2nd of month, 10:15 AM IST (after scanner)
 0  2   * * 6    weekly_audit.py         # Sat 7:30 AM IST (gap detection + auto-recovery)
+30 18  * * 6    tech_scout.py           # Sunday midnight IST (weekly innovation scan)
 0  1,13 * * *   git pull (autopull.log) # 06:30 + 18:30 IST (latest code on VM)
 30 1   * * *    system_health.py        # 7:00 AM IST (daily evolution report)
 30 20  * * 0    log rotation            # Sunday 2:00 AM IST (trim logs > 10 MB)

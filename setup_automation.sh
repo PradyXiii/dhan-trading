@@ -159,6 +159,12 @@ AUTOLOOP_COMMENT="# Autoresearch — Mon–Fri midnight IST, paper-trading AI im
 WIKI_CMD="30 0 * * 1 cd $SCRIPT_DIR && python3 wiki_compiler.py >> $LOG_DIR/wiki_compiler.log 2>&1"
 WIKI_COMMENT="# Weekly wiki compile — Monday 6 AM IST, raw discoveries → structured articles"
 
+# Weekly tech scout — Sunday midnight IST (18:30 UTC Saturday)
+# Scans GitHub/arXiv/HN for new ML/trading innovations. Scores via Claude API.
+# High scorers queued for autoloop to experiment with. Telegrams weekly digest.
+SCOUT_CMD="30 18 * * 6 cd $SCRIPT_DIR && python3 tech_scout.py >> $LOG_DIR/tech_scout.log 2>&1"
+SCOUT_COMMENT="# Weekly tech scout — Sunday midnight IST, autonomous innovation scan"
+
 # Remove old entries (all scripts) if any
 EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "auto_trader" \
@@ -189,7 +195,9 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "wiki_compiler" \
   | grep -v "Weekly wiki compile" \
   | grep -v "regime_watcher" \
-  | grep -v "Regime watcher")
+  | grep -v "Regime watcher" \
+  | grep -v "tech_scout" \
+  | grep -v "Weekly tech scout")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -221,6 +229,8 @@ $AUTOLOOP_COMMENT
 $AUTOLOOP_CMD
 $WIKI_COMMENT
 $WIKI_CMD
+$SCOUT_COMMENT
+$SCOUT_CMD
 $LOG_ROTATE_COMMENT
 $LOG_ROTATE_CMD"
 
