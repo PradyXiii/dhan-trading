@@ -1522,7 +1522,7 @@ def load_ensemble():
         pass   # Can't parse date → proceed anyway
 
     loaded = []
-    for mtype in ["rf", "xgb", "lgb", "cat", "tabnet"]:
+    for mtype in ["rf", "xgb", "lgb", "cat"]:
         pkl_path = f"{ENSEMBLE_DIR}/{mtype}.pkl"
         if not os.path.exists(pkl_path):
             continue
@@ -1696,8 +1696,8 @@ def predict_today():
 
             # ── Aggregation method ────────────────────────────────────────────
             if stack_meta is not None and len(pcalls) >= 2:
-                # Stacking: LogReg expects fixed model order [rf, xgb, lgb, cat, tabnet]
-                ordered_types = ["rf", "xgb", "lgb", "cat", "tabnet"]
+                # Stacking: LogReg expects fixed model order [rf, xgb, lgb, cat]
+                ordered_types = ["rf", "xgb", "lgb", "cat"]
                 pc_by_type    = dict(zip(types, pcalls))
                 # Fill missing types with 0.5 (neutral) — LogReg saw them at train time
                 meta_input = np.array([[pc_by_type.get(t, 0.5) for t in ordered_types]])
