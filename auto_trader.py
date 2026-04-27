@@ -2503,6 +2503,59 @@ def main():
         notify.log(f"VIX regime filter: VIX={vix_now:.1f} > {VIX_MAX_TRADE} — no trade")
         return
 
+    # ── IC P&L skip-filter (shadow logging by default; gate trades when ENABLED) ─
+    # Loads shadow predictor from models/ic_pnl_predictor.pkl (Phase 1 = log only).
+    # To enable actual skipping: set ENABLE_SKIP_FILTER=1 in .env (after 30 trades validate).
+    _skip_filter_threshold = 0.40   # P(strategy_wins) below this → skip
+    _skip_decision = None
+    try:
+        import joblib as _joblib
+        _ic_pkl  = "models/ic_pnl_predictor.pkl"
+        _ic_meta_path = "models/ic_pnl_predictor_meta.json"
+        if os.path.exists(_ic_pkl) and os.path.exists(_ic_meta_path):
+            with open(_ic_meta_path) as _mf:
+                _ic_meta_loaded = json.load(_mf)
+            _ic_features = _ic_meta_loaded.get("feature_cols", [])
+            _ic_predictor = _joblib.load(_ic_pkl)
+            from ml_engine import get_today_features as _get_today_feats
+            _Xt = _get_today_feats(_ic_features)
+            if _Xt is not None and len(_Xt) > 0:
+                _proba = _ic_predictor.predict_proba(_Xt)[0]
+                _classes = list(_ic_predictor.classes_)
+                _p_win = float(_proba[_classes.index(1)]) if 1 in _classes else 0.5
+                _enabled = os.getenv("ENABLE_SKIP_FILTER", "0") == "1"
+                _skip_decision = {
+                    "p_win": _p_win,
+                    "would_skip": _p_win < _skip_filter_threshold,
+                    "enabled":    _enabled,
+                }
+                # Log to CSV regardless
+                _skip_csv = f"{DATA_DIR}/skip_decisions.csv"
+                _is_new = not os.path.exists(_skip_csv)
+                with open(_skip_csv, "a") as _sf:
+                    if _is_new:
+                        _sf.write("date,signal,ml_conf,p_win,would_skip,enabled,actual_pnl\n")
+                    _sf.write(
+                        f"{_ist_today().isoformat()},{signal},{ml_conf:.4f},"
+                        f"{_p_win:.4f},{_skip_decision['would_skip']},{_enabled},\n"
+                    )
+                notify.log(
+                    f"Skip filter (shadow): P(win)={_p_win:.1%}  "
+                    f"would_skip={_skip_decision['would_skip']}  enabled={_enabled}"
+                )
+                # Actually skip only if user enabled the filter
+                if _enabled and _skip_decision["would_skip"]:
+                    notify.send(
+                        f"⏸  <b>No Trade — Skip Filter Triggered</b>\n\n"
+                        f"IC P&L predictor says: {_p_win:.0%} chance of profit today\n"
+                        f"Below {_skip_filter_threshold:.0%} threshold → skipping.\n\n"
+                        f"This filter activates trades with high win-conviction only."
+                    )
+                    notify.log(f"Skip filter: P(win)={_p_win:.1%} below threshold — no trade")
+                    return
+    except Exception as _e:
+        notify.log(f"Skip filter check failed: {_e}")
+
     # ── ML confidence gate ───────────────────────────────────────────────────
     # IC bypasses ML confidence filter — no-filter gives maximum P&L.
     if not IRON_CONDOR_MODE and ML_CONF_THRESHOLD > 0 and ml_trained and ml_conf < ML_CONF_THRESHOLD:

@@ -1170,6 +1170,101 @@ def check_concept_drift(val_preds, y_val):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  IC P&L PREDICTOR — shadow model, separate from primary direction model
+#  Used as future SKIP FILTER (after 30 trades validate skip accuracy).
+# ─────────────────────────────────────────────────────────────────────────────
+
+IC_PNL_PREDICTOR_PKL  = f"{MODELS_DIR}/ic_pnl_predictor.pkl"
+IC_PNL_PREDICTOR_META = f"{MODELS_DIR}/ic_pnl_predictor_meta.json"
+
+
+def train_ic_pnl_predictor(df_full, selected_cols, sample_weight=None):
+    """
+    Train SECONDARY model with IC P&L labels. Heavy regularization to prevent
+    memorization (depth 3, leaf 50, n_est 100).
+
+    Output: P(strategy_will_profit) per day. Used as a future SKIP FILTER.
+
+    Saves models/ic_pnl_predictor.pkl + meta.json with train + holdout accuracy.
+    Returns dict {n_train, holdout_acc, p_profit_today} for Telegram report.
+    """
+    import joblib
+    import json as _json
+    from sklearn.ensemble import RandomForestClassifier
+    from ml_engine import compute_labels_ic_pnl
+
+    print("\n  [skip-filter] Training IC P&L predictor (shadow, regularized)...")
+
+    df = df_full.copy()
+    labels_df = compute_labels_ic_pnl(df)
+    df = df.merge(labels_df[["date", "label"]], on="date", how="inner")
+    df = df.dropna(subset=selected_cols + ["label"]).reset_index(drop=True)
+
+    if len(df) < HOLDOUT_DAYS + 100:
+        print(f"  [skip-filter] Only {len(df)} rows after merge — skipping training")
+        return {}
+
+    X = df[selected_cols].values.astype(float)
+    y = (df["label"] == "CALL").astype(int).values   # 1 = strategy wins, 0 = loses
+
+    split    = len(X) - HOLDOUT_DAYS
+    X_tr, y_tr = X[:split], y[:split]
+    X_val, y_val = X[split:], y[split:]
+    sw_tr = sample_weight[:split] if sample_weight is not None and len(sample_weight) >= split else None
+
+    # Strong regularization to prevent memorization
+    mdl = RandomForestClassifier(
+        n_estimators=100, max_depth=3, min_samples_leaf=50,
+        max_features="sqrt", class_weight="balanced",
+        random_state=42, n_jobs=-1,
+    )
+    try:
+        mdl.fit(X_tr, y_tr, sample_weight=sw_tr)
+    except Exception:
+        mdl.fit(X_tr, y_tr)
+
+    train_acc   = float((mdl.predict(X_tr) == y_tr).mean())
+    holdout_acc = float((mdl.predict(X_val) == y_val).mean())
+
+    # Refit on full data for production
+    sw_full = sample_weight[:len(X)] if sample_weight is not None else None
+    try:
+        mdl.fit(X, y, sample_weight=sw_full)
+    except Exception:
+        mdl.fit(X, y)
+
+    # Predict probability for today (last row)
+    today_row    = df[selected_cols].iloc[[-1]].values.astype(float)
+    classes      = list(mdl.classes_)
+    profit_idx   = classes.index(1) if 1 in classes else 0
+    p_profit_today = float(mdl.predict_proba(today_row)[0, profit_idx])
+
+    joblib.dump(mdl, IC_PNL_PREDICTOR_PKL)
+    meta = {
+        "model_type":     "rf",
+        "params":         {"n_estimators": 100, "max_depth": 3, "min_samples_leaf": 50},
+        "train_acc":      round(train_acc, 4),
+        "holdout_acc":    round(holdout_acc, 4),
+        "n_train":        int(split),
+        "n_val":          int(len(X) - split),
+        "p_profit_today": round(p_profit_today, 4),
+        "feature_cols":   selected_cols,
+        "trained_at":     datetime.now(_IST).isoformat(),
+    }
+    with open(IC_PNL_PREDICTOR_META, "w") as f:
+        _json.dump(meta, f, indent=2)
+
+    print(f"  [skip-filter] Train acc: {train_acc:.1%}  Holdout: {holdout_acc:.1%}")
+    print(f"  [skip-filter] P(strategy wins today): {p_profit_today:.3f}")
+    print(f"  [skip-filter] Saved: {IC_PNL_PREDICTOR_PKL}")
+    return {
+        "train_acc":      round(train_acc * 100, 1),
+        "holdout_acc":    round(holdout_acc * 100, 1),
+        "p_profit_today": round(p_profit_today * 100, 1),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  STEP 5+6 — CHAMPION SELECTION + FINAL TRAINING
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1390,6 +1485,9 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
             rm = lever_info["regime_models"]
             rm_str = ", ".join(f"{k} ({v['n_rows']}r)" for k, v in rm.items())
             lines.append(f"  - Regime-conditional models: {rm_str}")
+        if lever_info.get("ic_pnl_predictor"):
+            ic = lever_info["ic_pnl_predictor"]
+            lines.append(f"  - IC P&L skip-filter (shadow): holdout {ic.get('holdout_acc')}%, today P(win)={ic.get('p_profit_today')}%")
         if lines:
             lever_section = "\n\nUpgrade pipeline:\n" + "\n".join(lines)
 
@@ -1573,13 +1671,14 @@ def main():
 
     # ── 7b-e. Lever pipeline (stacking, calibration, weight optim, drift) ─────
     lever_info = {
-        "high_vix_n":     high_vix_n,
-        "stack_score":    None,
-        "calib_ok":       False,
-        "ensemble_w":     None,
-        "weight_score":   None,
-        "drift_count":    None,
-        "regime_models":  None,
+        "high_vix_n":        high_vix_n,
+        "stack_score":       None,
+        "calib_ok":          False,
+        "ensemble_w":        None,
+        "weight_score":      None,
+        "drift_count":       None,
+        "regime_models":     None,
+        "ic_pnl_predictor":  None,
     }
     sw_tr = sample_weights[:len(y_tr)]
 
@@ -1617,6 +1716,12 @@ def main():
         lever_info["regime_models"] = regime_meta
     except Exception as e:
         print(f"  [regime] Skipped: {e}")
+
+    try:
+        ic_pnl_meta = train_ic_pnl_predictor(trading, selected_cols, sample_weight=base_weights)
+        lever_info["ic_pnl_predictor"] = ic_pnl_meta
+    except Exception as e:
+        print(f"  [skip-filter] Skipped: {e}")
 
     # ── 8. Predict tomorrow using ensemble vote ───────────────────────────────
     # Always predict from the most recent row in trading_full. If today's data
