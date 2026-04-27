@@ -134,6 +134,13 @@ def build_report() -> str:
     champ_type = champ.get("model_type", "—")
     champ_acc  = champ.get("accuracy")
     champ_n    = champ.get("n_features", "—")
+
+    # Today's actual signal (from today_trade.json written by auto_trader at 9:30 AM)
+    # Fixes a previous bug where the report hardcoded "CALL" whenever a champion existed.
+    today_trade = _read_json(_DATA / "today_trade.json", {}) or {}
+    today_signal = (today_trade.get("signal") or "").upper() if today_trade else ""
+    if today_signal not in ("CALL", "PUT"):
+        today_signal = ""
     # Total features in pipeline (vs champion's selected count)
     try:
         from ml_engine import FEATURE_COLS
@@ -225,8 +232,8 @@ def build_report() -> str:
   Lifetime:     {n_all} trades, won {wr_all:.0f}% → {lifetime_pnl_str}
 
 <b>🤖 What system is doing today</b>
-  Tomorrow's lean:    {champ_type.upper()} model says {('CALL' if champ_acc else 'thinking')}
-  Confidence:         {_fmt_pct(champ_acc * 100 if champ_acc else None)}
+  Today's signal:     {today_signal if today_signal else '(awaiting morning prediction)'}
+  Champion model:     {champ_type.upper()}  (val acc {_fmt_pct(champ_acc * 100 if champ_acc else None)})
   Open positions:     {open_n}
 
 <b>✅ Action you need to take today</b>
