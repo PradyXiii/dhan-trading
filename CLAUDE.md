@@ -376,6 +376,70 @@ The `.gitignore` already blocks most of these automatically, but **always visual
 
 ---
 
+## ⚠️ TIME / DATE TRAPS — MANDATORY READING BEFORE TOUCHING ANY DATA-RELATED CODE
+
+**The VM clock is UTC. The market is IST. Trading data is IST. CSVs are keyed by IST trading days.
+Every naive `datetime.today()` / `date.today()` / `datetime.now()` returns UTC and silently corrupts data
+between midnight UTC (5:30 AM IST) and the next IST midnight.**
+
+**Hard rules — no exceptions:**
+
+1. **Always use IST for any "today's date" comparison.** Pattern:
+    ```python
+    from datetime import datetime, timezone, timedelta
+    _IST_TZ = timezone(timedelta(hours=5, minutes=30))
+    today_ist = datetime.now(_IST_TZ).date()
+    ```
+   Files already fixed (April 2026): `validate_all.py`, `lot_expiry_scanner.py`, `data_fetcher.py`,
+   `auto_trader.py` (`_IST_TZ`), `notify.py` (`_IST`), `system_health.py`, `morning_brief.py`.
+
+2. **Never use `datetime.today()` for `TO_DATE` in any fetcher.** It returns UTC date on the VM, so
+   between 6:30 PM UTC (midnight IST) and 5:30 AM IST the function appears to think yesterday is today.
+   Combined with `_last_csv_date` returning "tomorrow's start", `from_date >= TO_DATE` evaluates True
+   and the fetch silently no-ops — printing "up to date" while the CSV is one day stale.
+
+3. **`_last_csv_date()` returns the NEXT-FETCH-FROM date, not the actual last CSV row date.** It adds
+   `+1 day` (and now skips Sat/Sun → next Monday) so the caller can pass it directly to the API. Never
+   display this value as "last row" in user-facing logs — it's misleading.
+
+4. **Dhan `/v2/charts/historical` rejects ENTIRE chunks when `fromDate` is a Sat/Sun** — DH-905 is
+   returned for the whole range, dropping every trading day inside. `_last_csv_date` advances Sat/Sun
+   to the next Monday before the API call. Don't undo this.
+
+5. **DH-905 is "no data" — NOT a failure.** It's how Dhan signals weekends, holidays, future dates,
+   and pre-publish lag. Treat as silent 0-rows; only HTTP errors (4xx/5xx besides DH-905) are real
+   chunk failures. `data_fetcher` collects failures and Telegram-warns; only raises when EVERY chunk
+   failed (true Dhan outage).
+
+6. **Dhan EOD candle publish lag.** Daily index candles (Nifty50, BankNifty, India VIX via Dhan) are
+   typically available ~30 minutes after 3:30 PM IST close, but can lag up to a few hours on volatile
+   days. yfinance often has the candle earlier — `data_fetcher` deliberately uses Dhan as the source
+   of truth for index OHLCV (per CLAUDE.md DHAN-FIRST DATA RULE), so a fresh-after-close manual run
+   may legitimately return 0 rows. The 9:30 AM IST cron is well past the lag window.
+
+7. **`signals_ml.csv` can show "today" even when `nifty50.csv` does not.** `ml_engine --predict-today`
+   writes today's prediction using **previous trading day's features** as a fallback when today's row
+   isn't in the underlying CSVs yet. This is intentional — auto_trader needs a signal at 9:30 AM
+   even if Dhan's candle isn't published yet. validate_all's row-count and staleness checks must
+   continue to flag the underlying CSV freshness even when signals_ml.csv looks current.
+
+8. **`max_stale` in validate_all is in CALENDAR days, not trading days.** Mon→Fri gap is 3 days, but
+   Fri→Tue gap is also 3 calendar days even though only 1 trading day is missing. If a Mon is a
+   holiday, Fri→Wed = 5 calendar days but only 1 trading day missing. Be lenient on stale-checks
+   that span weekends.
+
+9. **CSV writes must be atomic.** Every CSV/JSON write that other code reads goes through
+   `atomic_io.write_atomic_*` — tmpfile + `os.replace`. Never use `.to_csv(path)` or `open(path, "w")`
+   directly on shared state files. A crash mid-write or a concurrent reader sees a half-truncated
+   file otherwise.
+
+10. **Shift(1) doesn't fix everything.** A backward-looking smoother (HMM `predict_proba`,
+    Kalman `.smooth()`, RTS algorithms) uses observations from t+1..T to estimate state at time t.
+    `.shift(1)` only delays the OUTPUT by one row but doesn't unbias the estimator. Use forward-only
+    filters (`.filter()`, manual forward-pass) for any per-row feature consumed by walk-forward ML.
+
+---
+
 ## Known Gotchas — Session-Discovered Bugs
 
 This table grows every session. Each entry = a bug that was debugged and must never be debugged again.
@@ -416,6 +480,18 @@ This table grows every session. Each entry = a bug that was debugged and must ne
 | `rm -rf` site-packages folder broke cron next morning | `pip install <pkg>` says "Requirement already satisfied" but `python3 -c "import <pkg>"` fails with `ModuleNotFoundError`. Cron silently dies. | `rm -rf` deletes files but leaves `.dist-info` metadata → pip is fooled. Recovery: `pip install --user --break-system-packages --force-reinstall <pkg>`. Avoidance: always use `pip uninstall <pkg> -y`, never `rm -rf` on site-packages. |
 | Cleanup of `~/.local` packages assuming `dhan-env` virtualenv had a duplicate | After deletion, every cron-invoked script (`auto_trader.py`, `ml_engine.py`, etc.) crashed with `ModuleNotFoundError: numpy` | Cron runs as system `python3` and resolves imports from `~/.local/lib/python3.11/site-packages/`, NOT from `dhan-env/`. The venv copy is irrelevant unless the cron entry activates the venv (none do). Treat `~/.local` as production. |
 | 4 GB of unused PyTorch + CUDA libraries on a CPU-only VM | `df -h /` showed 63% disk used (12 GB / 20 GB). Largest files: `torch/libtorch_cuda.so` (380 MB), `nvidia/cu13/*` (~2 GB total), `triton` (397 MB). Never imported by any trading script. | Pulled in transitively by some past `pip install` (likely `tabpfn` or `transformers`). Audit quarterly: `pip list 2>/dev/null \| grep -iE "torch\|nvidia\|cuda\|triton\|tabpfn\|hf-xet"`. Uninstall any hits with `pip uninstall <pkg> -y`. |
+| `data_fetcher` "up to date" but CSV is days stale | After-midnight-IST run on UTC-clocked VM logs `Nifty50: up to date (last row = 2026-04-27)` while `nifty50.csv` actually ends Fri 24 Apr | `TO_DATE = datetime.today()` returns UTC date — yesterday's date until 5:30 AM IST. Combined with `_last_csv_date` advancing Fri+1 → next Mon, `from_date >= TO_DATE` evaluates True and the fetch silently skips. Fix: `TO_DATE = datetime.now(_IST_TZ).strftime("%Y-%m-%d")`. Commit `271e5c1`. |
+| `data_fetcher` drops Mon trading day after Fri last row | `nifty50.csv` stuck on Friday for days even though Mon was a real trading day; "no new trading data (2026-04-25 — weekend/holiday)" log line | Dhan `/v2/charts/historical` returns DH-905 for the ENTIRE chunk if `fromDate` is Sat/Sun, even when trading days exist inside the range. `_last_csv_date` returned `last+1` blindly → Fri+1 = Sat → whole chunk dropped. Fix: advance Sat/Sun → next Monday in `_last_csv_date`. Commit `c278a96`. |
+| `RuntimeError` on first transient Dhan blip aborted entire morning trade | One yfinance/Dhan chunk fails → all-or-nothing raise → `auto_trader.py` morning fetch dies → no trade placed | Original tightening was too aggressive. Now: collect failures, Telegram-warn, only raise when EVERY chunk failed (true outage). Successful chunks are merged; next run's `_last_csv_date` will retry the gap naturally. Commit `d35ad14`. |
+| HMM `predict_proba` returned smoothed posteriors → walk-forward leakage | All nightly HMM features looked correct but composite dropped 0.064 after switching to "forward-only" with `_do_forward_pass` because hmmlearn 0.3.3 removed that private API → exception path → constant 0.33 fallback → zero-variance feature | hmmlearn `predict_proba(X)` is the forward-BACKWARD smoother, not just forward — uses observations from t+1..T even with `.shift(1)`. The `_do_forward_pass` API was removed; use a manual numpy log-alpha forward pass. Commit `f19e493`. |
+| Kalman `.smooth()` (RTS) leaks future into walk-forward | `nf_kalman_trend` computed via `_kf.smooth(X)` then `.shift(1)` — looked safe but RTS smoother conditions on x_{t+1}..x_T at every t, so the shifted value still saw the future | Replace `.smooth()` with `.filter()` (forward-only Kalman). For ANY temporal feature consumed by walk-forward ML: confirm the algorithm uses only x_0..x_t, not future obs. Commit `c997084`. |
+| `champion.pkl` overwritten unconditionally each evolver run → quality random walk | Score went up then down then up nightly; champion was whatever last run produced regardless of quality | Add a score ratchet to `save_champion()`: only overwrite when new score ≥ existing. Cross-day scores aren't apples-to-apples but still prevents random-walk degradation. Backed by `champion_meta.json["score"]`. Commit `f9fc31b`. |
+| Stale leaked-score baseline blocked good champion promotion | After fixing HMM/Kalman/holdout leaks, new clean composite ~0.54 < leaked baseline 0.736; ratchet correctly REFUSED to overwrite. Production stuck on the leaked champion forever. | When fixing leakage that materially drops the score, manually wipe `models/champion_meta.json` (and `champion.pkl`) so the next evolver run sets a fresh apples-to-apples baseline. Don't fight the ratchet. |
+| Live-feedback rows leaked into model_evolver holdout | `_load_live_outcomes` appended live rows at the END of `X_aug`; `_temporal_split` then took the last 252 rows as holdout — which were the freshly-injected, 10×-weighted live rows | Insert injected rows at index `len(X_all) - HOLDOUT_DAYS`, so the last HOLDOUT_DAYS rows of X_aug remain pristine historical data. Commit `c997084`. |
+| `or` fallback in `trade_journal` flipped real Dhan zeros to stale intent | Dhan legitimately reported `buy_avg = 0.0` (one wing didn't fill) → `leg.get("buy_avg") or float(intent.get(...))` evaluated the LHS as falsy and returned the stale intent value → CSV row had a synthetic price that didn't match Dhan's ledger | Replace `value or fallback` with explicit `_pick(value, fallback)` that uses `is None` checks. Genuine 0.0 from Dhan is preserved. Commit `c997084`. |
+| `notify.send` returned True silently when Telegram creds were missing | All alerts looked successful in code, including critical SL-fired alerts. health_ping showed green. Operator never knew alerts weren't being delivered. | Return `False` + write `[CREDS MISSING — alert not sent]` stub to `data/critical_alerts.log` so health_ping can detect Telegram outage. Commit `c997084`. |
+| `system_health` Telegram silently dropped on `<>&` in interpolated content | Daily report message sent with `parse_mode="HTML"`; commit subjects, exception strings, Claude API descriptions can include `<` / `>` / `&` → Telegram returns 400 → message dropped. Daily report doesn't carry critical-marker so the fallback log doesn't even capture it. | `html.escape()` every interpolated value via `_esc()` helper. Commit `c997084`. |
+| `lstrip("json")` strips ANY leading char in {j,s,o,n} | `morning_brief.py` parsed Claude API response with ```` ```json ```` fences using `text.lstrip("json")` — which strips characters individually, not the prefix. JSON like `{"sentiment":"...} ` got mauled into `{"entiment":"..."}` because `s` was stripped. | Use prefix-aware removal: `if inner.startswith("json"): inner = inner[4:].lstrip()`. Commit `c997084`. |
 
 ---
 
