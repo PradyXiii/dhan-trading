@@ -953,15 +953,31 @@ def calibrate_champion(champion_model, X_val, y_val):
     Wrap champion in isotonic calibration using the holdout set.
     Calibrated probabilities → ML_CONF_THRESHOLD filter becomes meaningful.
     Saved as champion_calibrated.pkl.
+
+    sklearn 1.6+ deprecated cv='prefit'. Falls back gracefully via FrozenEstimator
+    or cv=5 (re-fit on val).
     """
     from sklearn.calibration import CalibratedClassifierCV
     import joblib
 
+    # Try modern API: FrozenEstimator (sklearn 1.6+)
+    try:
+        from sklearn.frozen import FrozenEstimator
+        frozen = FrozenEstimator(champion_model)
+        calib  = CalibratedClassifierCV(frozen, cv=5, method="isotonic")
+        calib.fit(X_val, y_val)
+        joblib.dump(calib, CALIB_PKL)
+        print(f"  [calib] Calibrated champion saved (FrozenEstimator): {CALIB_PKL}")
+        return calib
+    except ImportError:
+        pass
+
+    # Try legacy prefit API (sklearn < 1.6)
     try:
         calib = CalibratedClassifierCV(champion_model, cv="prefit", method="isotonic")
         calib.fit(X_val, y_val)
         joblib.dump(calib, CALIB_PKL)
-        print(f"  [calib] Calibrated champion saved: {CALIB_PKL}")
+        print(f"  [calib] Calibrated champion saved (prefit): {CALIB_PKL}")
         return calib
     except Exception as e:
         print(f"  [calib] Calibration failed ({e}) — skipping")
@@ -1239,28 +1255,30 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
             miss_section = f"\n\nMisses: {n_miss} — not enough data yet to identify pattern."
 
     # ── Lever pipeline status (stacking / calibration / weights / drift) ─────
+    # Note: ASCII-only — Telegram had encoding issues with unicode × (multiplication sign)
+    # truncating the message at first occurrence.
     lever_section = ""
     if lever_info:
         lines = []
         if lever_info.get("high_vix_n") is not None:
-            lines.append(f"  • High-fear days penalised: {lever_info['high_vix_n']} rows × {VIX_HIGH_WEIGHT}x")
+            lines.append(f"  - High-fear days penalised: {lever_info['high_vix_n']} rows at {VIX_HIGH_WEIGHT}x weight")
         if lever_info.get("stack_score") is not None:
-            lines.append(f"  • Meta-learner score: {lever_info['stack_score']:.3f}")
+            lines.append(f"  - Meta-learner score: {lever_info['stack_score']:.3f}")
         if lever_info.get("calib_ok"):
-            lines.append(f"  • Confidence calibrated (honest probabilities)")
+            lines.append(f"  - Confidence calibrated (honest probabilities)")
         if lever_info.get("ensemble_w"):
             w = lever_info["ensemble_w"]
             top = sorted(w.items(), key=lambda kv: -kv[1])[:3]
             top_str = ", ".join(f"{k.upper()} {v:.2f}" for k, v in top)
-            lines.append(f"  • Optimal vote weights: {top_str}")
+            lines.append(f"  - Optimal vote weights: {top_str}")
             if lever_info.get("weight_score") is not None:
-                lines.append(f"  • Weighted ensemble score: {lever_info['weight_score']:.3f}")
+                lines.append(f"  - Weighted ensemble score: {lever_info['weight_score']:.3f}")
         if lever_info.get("drift_count") is not None:
             dc = lever_info["drift_count"]
             if dc == 0:
-                lines.append(f"  • Drift check: stable (no regime change in holdout)")
+                lines.append(f"  - Drift check: stable (no regime change in holdout)")
             else:
-                lines.append(f"  • Drift check: {dc} regime-shift point(s) flagged")
+                lines.append(f"  - Drift check: {dc} regime-shift point(s) flagged")
         if lines:
             lever_section = "\n\nUpgrade pipeline:\n" + "\n".join(lines)
 
@@ -1344,7 +1362,7 @@ def main():
     print("\n[3b/6] Base sample weights (magnitude + VIX asymmetric)...")
     base_weights = _compute_base_weights(trading, y_all)
     high_vix_n = int((pd.to_numeric(trading.get("vix_level", pd.Series([])), errors="coerce").fillna(15) > VIX_HIGH_THRESHOLD).sum())
-    print(f"  Magnitude × VIX weighting active — {high_vix_n} high-VIX rows at {VIX_HIGH_WEIGHT}× penalty")
+    print(f"  Magnitude + VIX weighting active - {high_vix_n} high-VIX rows at {VIX_HIGH_WEIGHT}x penalty")
 
     # ── 3c. Live trade feedback — inject real outcomes + boost miss patterns ──
     print("\n[3c/6] Live trade feedback...")
