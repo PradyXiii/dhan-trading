@@ -21,7 +21,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from backtest_spreads import run_spread_backtest, _DATA_CACHE
 
 BNF_STRATEGIES = ["bear_call_credit", "bull_put_credit"]
-NF_STRATEGIES  = ["nf_bear_call_credit", "nf_bull_put_credit"]
+# nf_iron_condor is the live-routed CALL-day strategy and must be optimised
+# alongside the 2-leg credit spreads. Bear Call permanently dumped (-₹24L
+# over 7yr per CLAUDE.md) — keep listed for backtest comparison only.
+NF_STRATEGIES  = ["nf_iron_condor", "nf_bull_put_credit", "nf_bear_call_credit"]
 BASE_ENTRY  = "09:30"
 BASE_EXIT   = "15:15"
 
@@ -222,12 +225,21 @@ def main():
         df = _run(strat, year=args.year, max_dte=args.max_dte, instrument=inst)
         st = _stats(df)
         if st:
-            label = "Bear Call" if "bear" in strat else "Bull Put"
+            if "iron_condor" in strat:
+                label = "Iron Condor"
+                key   = "ic"
+            elif "bear" in strat:
+                label = "Bear Call"
+                key   = "bc"
+            else:
+                label = "Bull Put"
+                key   = "bp"
             print(f"  {label}: {st['n']} trades  WR={st['wr']:.1%}  "
                   f"P&L=₹{st['pnl']/1e5:.2f}L  (₹{st['pnl_yr']/1e5:.2f}L/yr)")
+        else:
+            key = strat.replace("nf_", "")[:5]
         trade_dfs[strat] = df
         if args.save_trades:
-            key  = "bc" if "bear" in strat else "bp"
             path = f"/tmp/{inst.lower()}_{key}_opt.csv"
             df.to_csv(path, index=False)
             print(f"    → saved {len(df)} rows to {path}")
