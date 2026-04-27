@@ -47,10 +47,10 @@ STRADDLE_SCALE_VS_IC   = 2.3       # straddle per-lot avg P&L / IC per-lot (from
 
 # ── Static VIX multipliers — used when real bucket has < 5 trades ────────────
 _VIX_STATIC_MULT = [
-    (0,  13,  1.05, "+5%  calm market"),
-    (13, 18,  1.00, "neutral"),
-    (18, 22,  0.92, "-8%  elevated fear"),
-    (22, 999, 0.88, "-12% high fear"),
+    (0,  13,  1.05, "calm market — boosting estimate by 5%"),
+    (13, 18,  1.00, "normal market"),
+    (18, 22,  0.92, "slightly nervous — cutting estimate by 8%"),
+    (22, 999, 0.88, "very nervous — cutting estimate by 12%"),
 ]
 
 _HISTORICAL_SL_RATE = 0.153   # 84.7% WR backtest → 15.3% SL
@@ -293,24 +293,30 @@ def _vix_regime(df: pd.DataFrame, vdf: pd.DataFrame | None) -> tuple[float, str,
             if n_bkt >= 5 and overall_avg != 0:
                 bkt_avg  = float(bkt_rows["pnl_inr"].mean())
                 mult     = float(np.clip(bkt_avg / overall_avg, 0.7, 1.3))
-                sign     = "+" if mult >= 1.0 else ""
+                pct      = (mult - 1) * 100
+                if pct >= 1:
+                    adj_text = f"boosting estimate by {pct:.0f}% (we earn more in this market)"
+                elif pct <= -1:
+                    adj_text = f"cutting estimate by {abs(pct):.0f}% (we earn less in this market)"
+                else:
+                    adj_text = "no adjustment (this market is normal for us)"
                 return (
                     mult,
-                    f"VIX {vix_now:.1f} ({cur_bkt}) {sign}{(mult-1)*100:.0f}% — from {n_bkt} real trades",
+                    f"Fear gauge at {vix_now:.1f} ({cur_bkt}) — {adj_text} [based on {n_bkt} real trades]",
                     vix_now,
                 )
             else:
                 static_mult, suffix = _static_vix_mult(vix_now)
                 return (
                     static_mult,
-                    f"VIX {vix_now:.1f} — {suffix} (estimated; {n_bkt}/5 trades in this bucket)",
+                    f"Fear gauge at {vix_now:.1f} — {suffix} [estimate, only {n_bkt} of 5 trades at this fear level]",
                     vix_now,
                 )
         except Exception:
             pass
 
     static_mult, suffix = _static_vix_mult(vix_now)
-    return static_mult, f"VIX {vix_now:.1f} — {suffix} (estimated)", vix_now
+    return static_mult, f"Fear gauge at {vix_now:.1f} — {suffix} [estimate]", vix_now
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,9 +329,9 @@ def _strategy_breakdown(df: pd.DataFrame) -> list[dict]:
         return []
     rows = []
     for label, strat_set in (
-        ("IC (CALL days)",      _IC_STRATS),
-        ("Bull Put (PUT days)", _BP_STRATS),
-        ("Short Straddle",      _STRADDLE_STRATS),
+        ("Iron Condor (up-days)",  _IC_STRATS),
+        ("Bull Put (down-days)",   _BP_STRATS),
+        ("Short Straddle",         _STRADDLE_STRATS),
     ):
         sub = df[df["strategy"].isin(strat_set)]
         if len(sub) < 3:
@@ -358,16 +364,21 @@ def _exit_regime_check(df: pd.DataFrame) -> tuple[float | None, bool]:
 # Capital display helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _capital_line(capital: float) -> str:
+def _capital_line(capital: float) -> list[str]:
+    """Returns list of plain-English lines describing capital + lots."""
     lots_now       = max(1, int(capital // IC_MARGIN_PER_LOT))
     next_threshold = (lots_now + 1) * IC_MARGIN_PER_LOT
     needed         = next_threshold - capital
-    straddle_note  = " 🎯 Straddle tier!" if capital >= STRADDLE_MARGIN_PER_LOT else ""
-    return (
-        f"{_fmt_inr(capital)}  ·  {lots_now} lot{'s' if lots_now > 1 else ''}"
-        f"  (next lot at {_fmt_inr(next_threshold)}, need {_fmt_inr(needed)} more)"
-        f"{straddle_note}"
-    )
+    plural         = "s" if lots_now > 1 else ""
+    lines = [
+        f"Account balance: <b>{_fmt_inr(capital)}</b>",
+        f"Trading <b>{lots_now}</b> lot{plural} per trade",
+        f"Next lot kicks in at <b>{_fmt_inr(next_threshold)}</b> "
+        f"(need <b>{_fmt_inr(needed)}</b> more)",
+    ]
+    if capital >= STRADDLE_MARGIN_PER_LOT:
+        lines.append("🎯 <b>You hit Short Straddle tier — bigger strategy active</b>")
+    return lines
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -423,52 +434,64 @@ def run(dry_run: bool = False) -> None:
     fy_cons  = ytd_pnl + p10
 
     lines = [
-        f"📈 <b>Season Forecast</b> · {today.strftime('%d %b %Y')}",
+        f"📈 <b>Year-End Forecast</b> · {today.strftime('%d %b %Y')}",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"Trades: <b>{n_total}</b>  ·  EWMA WR: <b>{wr_pct}%</b>  ·  EWMA avg: <b>{_fmt_inr(ewma_avg)}</b>",
-        f"Capital est: {_capital_line(capital)}",
+        "<b>So far this season:</b>",
+        f"  Trades done: <b>{n_total}</b>",
+        f"  Winning <b>{wr_pct}%</b> of trades",
+        f"  Avg profit per trade: <b>{_fmt_inr(ewma_avg)}</b>",
+        f"  Earned so far: <b>{_fmt_inr(ytd_pnl)}</b>",
+        "",
     ]
+    lines += [f"  {ln}" for ln in _capital_line(capital)]
 
     # Strategy breakdown
     if strat_rows:
-        lines.append("")
+        lines += ["", "<b>Strategy breakdown:</b>"]
         for s in strat_rows:
             lines.append(
-                f"  {s['label']}: <b>{s['n']}</b> trades · "
-                f"WR <b>{s['wr_pct']}%</b> · avg <b>{_fmt_inr(s['ewma_avg'])}</b>"
+                f"  {s['label']}: <b>{s['n']}</b> trades, "
+                f"won <b>{s['wr_pct']}%</b>, avg <b>{_fmt_inr(s['ewma_avg'])}</b>/trade"
             )
 
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"<b>Projections to 31 Mar 2027</b> ({days_left} trades, compounding):",
-        f"  Optimistic  (top 10%):   <b>{_fmt_inr(fy_opt)}</b>",
-        f"  Mid (50th %):            <b>{_fmt_inr(fy_mid)}</b>",
-        f"  Conservative (10th %):  <b>{_fmt_inr(fy_cons)}</b>",
+        f"<b>By 31 Mar 2027</b> ({days_left} trading days left):",
+        f"  Best case  (top 10% chance):    <b>{_fmt_inr(fy_opt)}</b>",
+        f"  Most likely:                    <b>{_fmt_inr(fy_mid)}</b>",
+        f"  Worst case (bottom 10%):        <b>{_fmt_inr(fy_cons)}</b>",
+        "",
+        "  <i>Numbers grow as account grows — more lots per trade = more profit</i>",
     ]
 
     if upgrade_prob >= 0.05:
         lines.append(
-            f"  Straddle upgrade by Mar 27: <b>{upgrade_prob * 100:.0f}%</b> chance"
+            f"  💡 Likely to switch to Short Straddle (bigger strategy) "
+            f"before year end: <b>{upgrade_prob * 100:.0f}%</b> chance"
         )
 
     lines += [
         "",
-        f"Regime: {regime_label}",
         "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"YTD banked: <b>{_fmt_inr(ytd_pnl)}</b>",
+        f"<b>Today's market:</b> {regime_label}",
     ]
 
     if sl_elevated and sl_rate_recent is not None:
-        lines.append(
-            f"⚠️ SL rate elevated: <b>{sl_rate_recent * 100:.0f}%</b> last {_SL_WINDOW} trades "
-            f"vs {_HISTORICAL_SL_RATE * 100:.0f}% historical — possible regime shift"
-        )
+        lines += [
+            "",
+            f"⚠️ <b>Heads up:</b> hitting stop-loss too often lately — "
+            f"<b>{sl_rate_recent * 100:.0f}%</b> of last {_SL_WINDOW} trades "
+            f"(normal is around <b>{_HISTORICAL_SL_RATE * 100:.0f}%</b>). "
+            f"Market may be turning rough.",
+        ]
 
     if n_total < 15:
-        lines.append(
-            f"⚠️ Only {n_total} trades — projections widen as sample grows (stable at ≥20)"
-        )
+        lines += [
+            "",
+            f"⚠️ Only <b>{n_total}</b> trades done — these numbers will get more "
+            f"reliable after 20+ trades.",
+        ]
 
     notify.send("\n".join(lines), silent=dry_run)
 
