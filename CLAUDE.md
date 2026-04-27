@@ -232,6 +232,34 @@ The docs have the exact answer. Read them first, always.
 
 ---
 
+## ⚠️ BROKER LAYER LOCK-IN RULE — DHAN ONLY, NO RANDOM ALTERNATIVES
+
+**The order placement, position management, and broker integration layer is LOCKED to Dhan.
+Never adopt third-party libraries for this layer, regardless of stars, hype, or convenience.**
+
+**Rules:**
+
+1. **Source of truth for any Dhan API call** = `docs/DHAN_API_V2_REFERENCE.md` (local copy of
+   official Dhan v2 docs).
+2. **The ONLY trusted external Dhan reference** = official Dhan repo
+   `https://github.com/dhan-oss/DhanHQ-py`. Use it for code patterns, request/response
+   examples, and SDK usage. No other Dhan helper, wrapper, or fork is acceptable.
+3. **`tech_scout.py` HARD-REJECTS** these categories regardless of score, stars, or marketing:
+   - Order placement / OMS / smart order routing wrappers
+   - Broker SDK wrappers, broker adapters, broker UIs (Zerodha / Upstox / Angel / IB / etc.)
+   - Position management, P&L trackers, portfolio dashboards
+   - Backtest engines (we have our own), trading bots, exchange connectors
+   - Algo trading platforms (`openalgo`, `freqtrade`, `vectorbt`, `backtrader`, etc.)
+4. **`tech_scout.py` ONLY queues** finds that improve: ML reasoning, feature engineering,
+   model architectures, ensembling, regime detection, drift detection, calibration, feature
+   selection, hyperparameter tuning, backtest methodology, statistical inference.
+5. **Why:** External broker libraries have unproven track records, may break silently on Dhan
+   API changes, introduce execution risk, and duplicate work `auto_trader.py` already does
+   correctly against the canonical Dhan docs. The trading-execution layer is settled. Only
+   the intelligence (ML, signal, risk gating) layer is fair game for new ideas.
+
+---
+
 ## ⚠️ DHAN-FIRST DATA RULE — NEVER ASSUME, ALWAYS LOOK UP
 
 **Every data field in this system must come from a verified source. In order:**

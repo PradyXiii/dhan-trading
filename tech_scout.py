@@ -55,8 +55,23 @@ Our system: Nifty50 Iron Condor options auto-trader on NSE India.
 - Strategy: sell weekly spreads, ~84% win rate, ₹1.17Cr over 5 years on backtest
 - Pain points: directional accuracy plateaued ~67%, regime changes, concept drift
 
-Evaluate ONLY if: Python, CPU-compatible, pip-installable, tabular/time-series focus.
-Reject: GPU-only, NLP-only, web scraping, infra tools, non-Python, already standard (pandas/numpy/sklearn).
+ONLY interested in: ML reasoning, feature engineering, model architectures, ensembling,
+regime detection, drift detection, calibration, feature selection, hyperparameter tuning,
+backtest methodology, statistical inference improvements.
+
+HARD REJECT (auto-score 1) — never queue these, regardless of quality:
+- Order placement / execution / OMS / smart order routing wrappers
+- Broker SDK wrappers, broker adapters, broker UIs (Zerodha, Upstox, Dhan, Angel, IB, etc.)
+- Position management, P&L trackers, portfolio dashboards
+- Backtest engines (we have our own), trading bots, exchange connectors
+- Algo trading platforms (openalgo, freqtrade, vectorbt, backtrader, etc.)
+- News scrapers, sentiment dashboards, Telegram/Discord bots
+RATIONALE: Our broker layer is locked to Dhan via `docs/DHAN_API_V2_REFERENCE.md` —
+the ONLY trusted external Dhan reference is `dhan-oss/DhanHQ-py` (official). All
+other broker / order / execution code is forbidden territory regardless of stars.
+
+Reject also: GPU-only, NLP-only, web scraping, infra tools, non-Python,
+already standard (pandas/numpy/sklearn).
 """.strip()
 
 
@@ -242,17 +257,11 @@ def fetch_pypi_new() -> list[dict]:
 
 # ── Claude evaluation ─────────────────────────────────────────────────────────
 
-def _evaluate_batch(candidates: list[dict], dry_run: bool) -> list[dict]:
-    """Score each candidate 1–10 via Claude API. Returns candidates with score/reason added."""
-    if not candidates:
-        return []
-    if not ANTHROPIC_API_KEY:
-        print("  ANTHROPIC_API_KEY not set — skipping Claude scoring, tagging all as score=0")
-        for c in candidates:
-            c.update({"score": 0, "reason": "no api key", "integration_idea": "", "pip_install": "", "risk": ""})
-        return candidates
+_BATCH_SIZE = 8   # tokens-safe; 30 candidates → 4 calls
 
-    # Batch all candidates into one Claude call to save tokens
+
+def _score_one_batch(candidates: list[dict]) -> list[dict]:
+    """Single Claude call for up to _BATCH_SIZE candidates. Returns scored copies."""
     batch_text = "\n\n".join(
         f"--- Candidate {i+1} ---\n"
         f"Source: {c['source']}\n"
@@ -270,65 +279,111 @@ Below are {len(candidates)} tech finds. Score each 1-10 for relevance to our sys
 
 {batch_text}
 
-Return a JSON array (one object per candidate, same order):
+Return a JSON array (one object per candidate, same order, max one short sentence per field):
 [
   {{
     "name": "...",
     "score": 8,
-    "reason": "one sentence why useful or not",
-    "integration_idea": "one sentence how to integrate (empty if score < 7)",
+    "reason": "one short sentence",
+    "integration_idea": "one short sentence (empty if score < 7)",
     "pip_install": "pip package name (empty if not pip-installable)",
-    "risk": "cpu_only_ok / gpu_required / no_python / already_have / irrelevant"
-  }},
-  ...
+    "risk": "cpu_only_ok | gpu_required | no_python | already_have | broker_or_execution | irrelevant"
+  }}
 ]
-JSON only. No commentary outside the array."""
 
+JSON only. No commentary. No code fences. No trailing text. Keep every string under 120 chars."""
+
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key":          ANTHROPIC_API_KEY,
+            "anthropic-version":  "2023-06-01",
+            "content-type":       "application/json",
+        },
+        json={
+            "model":      "claude-sonnet-4-6",
+            "max_tokens": 3000,
+            "messages":   [{"role": "user", "content": prompt}],
+        },
+        timeout=60,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+
+    raw = r.json()["content"][0]["text"].strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw)
+
+    # Try strict parse first
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key":          ANTHROPIC_API_KEY,
-                "anthropic-version":  "2023-06-01",
-                "content-type":       "application/json",
-            },
-            json={
-                "model":      "claude-sonnet-4-6",
-                "max_tokens": 2000,
-                "messages":   [{"role": "user", "content": prompt}],
-            },
-            timeout=60,
-        )
-        if r.status_code != 200:
-            print(f"  Claude API HTTP {r.status_code}: {r.text[:200]}")
-            for c in candidates:
-                c.update({"score": 0, "reason": "api error", "integration_idea": "", "pip_install": "", "risk": ""})
-            return candidates
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Trim to last "]" that closes the array — Claude sometimes appends junk after
+        last = raw.rfind("]")
+        if last != -1:
+            candidate = raw[:last+1]
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+        # Last resort: extract whatever objects parsed cleanly so we don't lose them
+        salvaged = []
+        for m in re.finditer(r"\{[^{}]*\}", raw, re.DOTALL):
+            try:
+                salvaged.append(json.loads(m.group(0)))
+            except Exception:
+                continue
+        if salvaged:
+            return salvaged
+        raise
 
-        raw = r.json()["content"][0]["text"].strip()
-        # Strip code fences
-        if raw.startswith("```"):
-            raw = re.sub(r"^```\w*\n?", "", raw)
-            raw = re.sub(r"\n?```\s*$", "", raw)
-        scored = json.loads(raw)
 
-        # Merge scores back by position
-        for i, item in enumerate(scored):
-            if i < len(candidates):
-                candidates[i].update({
-                    "score":            item.get("score", 0),
-                    "reason":           item.get("reason", ""),
-                    "integration_idea": item.get("integration_idea", ""),
-                    "pip_install":      item.get("pip_install", ""),
-                    "risk":             item.get("risk", ""),
-                })
-        return candidates
-
-    except Exception as e:
-        print(f"  Claude batch scoring error: {e}")
+def _evaluate_batch(candidates: list[dict], dry_run: bool) -> list[dict]:
+    """Score each candidate 1–10 via Claude API. Chunks into _BATCH_SIZE-sized calls."""
+    if not candidates:
+        return []
+    if not ANTHROPIC_API_KEY:
+        print("  ANTHROPIC_API_KEY not set — skipping Claude scoring, tagging all as score=0")
         for c in candidates:
-            c.update({"score": 0, "reason": f"error: {e}", "integration_idea": "", "pip_install": "", "risk": ""})
+            c.update({"score": 0, "reason": "no api key", "integration_idea": "", "pip_install": "", "risk": ""})
         return candidates
+
+    n_chunks = (len(candidates) + _BATCH_SIZE - 1) // _BATCH_SIZE
+    for chunk_i in range(n_chunks):
+        chunk = candidates[chunk_i*_BATCH_SIZE : (chunk_i+1)*_BATCH_SIZE]
+        print(f"  Scoring chunk {chunk_i+1}/{n_chunks} ({len(chunk)} candidates)...")
+        try:
+            scored = _score_one_batch(chunk)
+            # Merge scores back by name match (more robust than position)
+            scored_by_name = {s.get("name", "").lower(): s for s in scored if isinstance(s, dict)}
+            for c in chunk:
+                key = c["name"].lower()
+                # Try exact, then prefix match (Claude sometimes truncates names)
+                hit = scored_by_name.get(key)
+                if not hit:
+                    for sn, sv in scored_by_name.items():
+                        if sn and (sn in key or key.startswith(sn) or sn.startswith(key[:30])):
+                            hit = sv
+                            break
+                if hit:
+                    c.update({
+                        "score":            int(hit.get("score", 0) or 0),
+                        "reason":           str(hit.get("reason", ""))[:200],
+                        "integration_idea": str(hit.get("integration_idea", ""))[:200],
+                        "pip_install":      str(hit.get("pip_install", ""))[:80],
+                        "risk":             str(hit.get("risk", ""))[:40],
+                    })
+                else:
+                    c.update({"score": 0, "reason": "no match in claude response", "integration_idea": "", "pip_install": "", "risk": ""})
+        except Exception as e:
+            print(f"    chunk {chunk_i+1} failed: {e}")
+            for c in chunk:
+                if "score" not in c:
+                    c.update({"score": 0, "reason": f"chunk error: {str(e)[:80]}", "integration_idea": "", "pip_install": "", "risk": ""})
+        time.sleep(1)  # be nice to Claude API
+
+    return candidates
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
