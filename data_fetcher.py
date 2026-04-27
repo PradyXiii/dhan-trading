@@ -7,7 +7,7 @@
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import os
@@ -25,7 +25,12 @@ HEADERS = {
 }
 
 FROM_DATE = "2019-01-01"
-TO_DATE   = datetime.today().strftime("%Y-%m-%d")
+# IST date — VM clock is UTC, so naive datetime.today() returns yesterday's
+# date until 5:30 AM IST. Caused `from_date >= TO_DATE` to evaluate True
+# right after midnight IST → "up to date" log message AND a skipped fetch
+# despite trading data being fresh and available.
+_IST_TZ   = timezone(timedelta(hours=5, minutes=30))
+TO_DATE   = datetime.now(_IST_TZ).strftime("%Y-%m-%d")
 DATA_DIR  = "data"
 
 
