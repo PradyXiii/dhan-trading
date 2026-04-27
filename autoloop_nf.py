@@ -129,13 +129,18 @@ def _ensure_paper_file(commit: bool = True) -> None:
     """
     live_file = _HERE / "ml_engine.py"
 
+    # Treat a corrupt paper_changes.json as "changes exist" rather than "none"
+    # — otherwise the re-sync branch below would shutil.copy(live → paper) and
+    # silently destroy every accumulated paper experiment. Only treat the file
+    # as empty when it is genuinely missing.
     has_accumulated_changes = False
     if _PAPER_CHANGES.exists():
         try:
             changes = json.loads(_PAPER_CHANGES.read_text())
             has_accumulated_changes = bool(changes)
-        except Exception:
-            has_accumulated_changes = False
+        except Exception as _e:
+            print(f"[Paper] paper_changes.json unreadable ({_e}) — preserving paper file (treating as changed).")
+            has_accumulated_changes = True
 
     if not _PAPER_FILE.exists():
         print("[Paper] ml_engine_paper.py not found — creating from live...")
@@ -1317,10 +1322,13 @@ def main():
     if "error" in baseline_bt:
         print(f"  [BT]  baseline failed: {baseline_bt['error']} — auto_trader.py experiments skipped")
         b_bt = 0.0
+        b_pnl_bt = 0.0
     else:
         b_bt = baseline_bt["composite"]
-        print(f"  [BT]  composite: {b_bt:.4f}")
+        b_pnl_bt = baseline_bt.get("pnl_proxy", 0.0)
+        print(f"  [BT]  composite: {b_bt:.4f}  pnl_proxy: {b_pnl_bt:.4f}")
     best_bt = b_bt
+    best_pnl_bt = b_pnl_bt
 
     experiment_log: list[dict] = []
     kept_paper_count = 0
@@ -1330,11 +1338,23 @@ def main():
     # Isolate nightly experiments on a dedicated branch. Kept commits are merged
     # back to main_branch at end; zero-improvement sessions leave no trace.
     _main_branch = _current_branch()
-    # Recover if previous run left an orphaned autoresearch branch
+    # Recover if previous run left an orphaned autoresearch branch.
+    # Force-deleting (-D) used to discard unmerged commits if the previous
+    # session crashed mid-merge. Use safe -d (refuses to delete unmerged
+    # branches), and skip the delete entirely if the checkout failed —
+    # otherwise we would call -D on the branch we are still checked out on.
     if _main_branch.startswith("autoresearch/"):
-        print(f"[Branch] Recovered from orphaned branch {_main_branch} → nifty-strategies")
-        _git("checkout", "nifty-strategies")
-        _git("branch", "-D", _main_branch)
+        orphan = _main_branch
+        print(f"[Branch] Recovered from orphaned branch {orphan} → nifty-strategies")
+        rc_co, out_co = _git("checkout", "nifty-strategies")
+        if rc_co != 0:
+            print(f"[Branch] checkout nifty-strategies failed (rc={rc_co}): {out_co}")
+            print(f"[Branch] keeping {orphan} intact for manual review; aborting recovery.")
+            sys.exit(1)
+        rc_del, out_del = _git("branch", "-d", orphan)
+        if rc_del != 0:
+            print(f"[Branch] branch -d {orphan} refused (likely unmerged commits): {out_del}")
+            print(f"[Branch] keeping {orphan} intact for manual review.")
         _main_branch = "nifty-strategies"
     _ar_branch = f"autoresearch/{datetime.now(_IST).strftime('%Y-%m-%d')}"
     if not args.dry_run:
@@ -1457,7 +1477,12 @@ def main():
             print(f"  Running backtest evaluator...")
             result = _run_backtest_experiment()
             cur_best = best_bt
-            cur_pnl = b_bt
+            # Compare like-with-like: pnl_proxy (win_rate) vs pnl_proxy.
+            # Previously cur_pnl was set to b_bt (the composite, mixing win_rate
+            # and dd_score), and the floor cur_pnl * PNL_GUARD was
+            # 0.9 * (0.7*WR + 0.3*DD) ≈ WR + 0.27 — almost always higher than
+            # the new pnl_proxy, which silently rejected every backtest improvement.
+            cur_pnl = best_pnl_bt
         elif is_paper:
             print(f"  Running paper ML evaluator...")
             result = _run_ml_experiment(module="ml_engine_paper")
@@ -1541,6 +1566,7 @@ def main():
                     )
                 elif is_backtest:
                     best_bt = new_composite
+                    best_pnl_bt = new_pnl   # advance pnl baseline alongside composite
                     kept_immediate_count += 1
                     _send(
                         f"✅ <b>Trade settings improved — live now</b>\n\n"
