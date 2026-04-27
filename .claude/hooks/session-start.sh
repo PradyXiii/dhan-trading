@@ -5,9 +5,16 @@
 PROJ="${CLAUDE_PROJECT_DIR:-.}"
 BRANCH="nifty-strategies"
 
-# Ensure we're on the right branch, then pull
-git -C "$PROJ" checkout "$BRANCH" --quiet 2>/dev/null
-git -C "$PROJ" pull origin "$BRANCH" --quiet 2>/dev/null
+# Refuse to checkout/pull when the working tree has uncommitted changes —
+# previously could overwrite half-edited files when a session opened mid-edit.
+DIRTY=$(git -C "$PROJ" status --porcelain 2>/dev/null)
+if [ -n "$DIRTY" ]; then
+  STATUS_NOTE=" | dirty tree detected — pull SKIPPED ($(echo "$DIRTY" | wc -l) modified files)"
+else
+  git -C "$PROJ" checkout "$BRANCH" --quiet 2>/dev/null
+  git -C "$PROJ" pull origin "$BRANCH" --quiet 2>/dev/null
+  STATUS_NOTE=""
+fi
 
 LOG=$(git -C "$PROJ" log --oneline -3 2>/dev/null || echo "no git log available")
 SCORE=""
@@ -18,15 +25,13 @@ fi
 # Wiki index — inject top-level knowledge map into every session
 WIKI_CTX=""
 if [ -f "$PROJ/docs/wiki/index.md" ]; then
-  # Include index (catalog of all pages) and a one-liner from each article
   WIKI_CTX=" | WIKI KNOWLEDGE MAP: $(cat "$PROJ/docs/wiki/index.md" | head -40 | tr '\n' ' ' | sed 's/  */ /g')"
-  # Include latest log entry (what was compiled last)
   if [ -f "$PROJ/docs/wiki/log.md" ]; then
     LAST_LOG=$(grep "^## \[" "$PROJ/docs/wiki/log.md" | tail -1)
     WIKI_CTX="$WIKI_CTX | Last wiki compile: $LAST_LOG"
   fi
 fi
 
-MSG="NF IC repo auto-pulled | branch: $BRANCH$SCORE$WIKI_CTX | recent commits: $LOG"
+MSG="NF IC repo auto-pulled | branch: $BRANCH$STATUS_NOTE$SCORE$WIKI_CTX | recent commits: $LOG"
 printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}' \
   "$(echo "$MSG" | sed 's/"/\\"/g' | tr '\n' ' ')"

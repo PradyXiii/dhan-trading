@@ -112,13 +112,24 @@ def _check_token() -> tuple:
         return False, 0.0, f"Dhan API returned HTTP {resp.status_code}: {resp.text[:80]}"
 
     d = resp.json()
-    capital = float(
+    # Dhan v2 historically returned "availabelBalance" (typo); newer versions
+    # may switch to the correct "availableBalance". Check both — and use
+    # explicit None checks so a legitimate ₹0 balance is preserved (vs the
+    # `or` chain which flipped 0.0 to the next fallback). Final fallback
+    # logs a warning so silent ₹0 reports are caught.
+    raw = (
         d.get("availabelBalance")
-        or d.get("availableBalance")
-        or d.get("net")
-        or 0
+        if d.get("availabelBalance") is not None
+        else d.get("availableBalance")
+        if d.get("availableBalance") is not None
+        else d.get("net")
     )
-    return True, capital, "OK"
+    if raw is None:
+        return False, 0.0, (
+            f"Dhan fundlimit response missing balance keys "
+            f"(availabelBalance / availableBalance / net): {list(d)[:6]}"
+        )
+    return True, float(raw), "OK"
 
 
 def _check_signal() -> tuple:

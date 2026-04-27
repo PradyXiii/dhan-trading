@@ -71,9 +71,15 @@ def compute_optimal_threshold(proba, y_val, vix_vals) -> dict:
         if n < 20:
             continue
         acc = accuracy_score(y_val[mask], (proba[mask] >= 0.5).astype(int))
-        bucket_report.append((t, acc, n))
-        if acc >= MIN_ACC_TO_TRADE:
-            # This threshold is profitable — is it lower than our current best?
+        # Statistical-significance gate: a one-sided binomial test against the
+        # 50% null. We require P(acc | random) < 0.05 — protects against
+        # picking a noisy bucket where 13/20 ≈ 65% looks great but is within
+        # one-tail noise. With n>=20, MIN_ACC_TO_TRADE=0.52 alone is too lax.
+        from scipy.stats import binomtest
+        wins = int(round(acc * n))
+        p_value = binomtest(wins, n, p=0.5, alternative="greater").pvalue
+        bucket_report.append((t, acc, n, p_value))
+        if acc >= MIN_ACC_TO_TRADE and p_value < 0.05:
             if t < best_threshold:
                 best_threshold = t
                 best_acc       = acc
@@ -143,8 +149,8 @@ def main():
         result["module"]     = args.module
 
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(THRESHOLD_FILE, "w") as f:
-            json.dump(result, f, indent=2)
+        from atomic_io import write_atomic_json
+        write_atomic_json(THRESHOLD_FILE, result)
 
         print(f"\n══ 4. Dynamic VIX Threshold ══")
         print(f"  New VIX_MIN_TRADE = {result['vix_min_trade']:.1f}")

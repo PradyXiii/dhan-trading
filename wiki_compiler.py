@@ -64,7 +64,8 @@ def _read_wiki_page(rel_path: str) -> str:
 def _write_wiki_page(rel_path: str, content: str):
     p = _WIKI / rel_path
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    from atomic_io import write_atomic_text
+    write_atomic_text(str(p), content)
 
 
 def _append_log(entry: str):
@@ -342,7 +343,8 @@ def _refresh_research_program():
             f"### Discarded ({len(discarded)} experiments didn't help):\n{disc_lines or '  (none yet)'}\n"
         )
 
-    research_prog.write_text(updated, encoding="utf-8")
+    from atomic_io import write_atomic_text
+    write_atomic_text(str(research_prog), updated)
     print(f"  research_program_nf.md refreshed: {len(kept)} kept, {len(discarded)} discarded in last {len(recent)} experiments.")
 
 

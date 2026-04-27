@@ -205,14 +205,15 @@ Output the full updated {doc_path.name} now:"""
         print(f"  {doc_path.name}: no changes needed")
         return False
 
+    from atomic_io import write_atomic_text
     if DRY_RUN:
         print(f"  {doc_path.name}: would update ({len(current)} → {len(updated)} chars)")
         diff_path = doc_path.with_suffix(doc_path.suffix + ".proposed")
-        diff_path.write_text(updated)
+        write_atomic_text(str(diff_path), updated)
         print(f"  Diff at: {diff_path}")
         return False
 
-    doc_path.write_text(updated)
+    write_atomic_text(str(doc_path), updated)
     print(f"  {doc_path.name}: updated ({len(current)} → {len(updated)} chars)")
     return True
 
@@ -220,10 +221,16 @@ Output the full updated {doc_path.name} now:"""
 def main():
     print(f"=== auto_doc_sync — {datetime.now(_IST).strftime('%Y-%m-%d %H:%M IST')} ===")
 
-    # Pre-flight: scan repo for stray creds (excluding .env which is .gitignored)
+    # Pre-flight: scan repo for stray creds (excluding .env which is .gitignored).
+    # ABORT on any hit — previously only WARNED and proceeded to commit + push.
+    # If real credentials had leaked into a tracked file, the run would have
+    # pushed them to the remote.
     rc, out = _run("git ls-files | xargs grep -lE 'DHAN_ACCESS_TOKEN|TELEGRAM_BOT_TOKEN|sk-ant-' 2>/dev/null")
     if out.strip():
-        print(f"  WARNING: credentials may exist in tracked files: {out[:300]}")
+        print(f"  ❌ ABORT: credentials present in tracked files: {out[:300]}")
+        print(f"  Remove them from the listed files (use git filter-branch / BFG) "
+              f"and re-run. auto_doc_sync will NOT push while creds are tracked.")
+        sys.exit(1)
 
     context = {
         "commits":     get_recent_commits(10),

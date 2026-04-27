@@ -93,12 +93,17 @@ def load_state():
     try:
         with open(REGIME_STATE) as f:
             s = json.load(f)
-        # Ensure all keys exist (forward-compat)
         defaults = _default_state()
         for k, v in defaults.items():
             s.setdefault(k, v)
         return s
-    except Exception:
+    except (json.JSONDecodeError, OSError) as e:
+        # Previously a bare except silently swallowed every error and reverted
+        # to defaults — including transient corruption that could be repaired
+        # by re-reading. Now log + re-raise on unexpected exceptions; only
+        # known recoverable errors fall back.
+        print(f"  [regime] state file unreadable ({e}) — using defaults; "
+              f"investigate {REGIME_STATE} before next run.")
         return _default_state()
 
 
@@ -106,8 +111,8 @@ def save_state(state, dry_run=False):
     if dry_run:
         return
     DATA_DIR.mkdir(exist_ok=True)
-    with open(REGIME_STATE, "w") as f:
-        json.dump(state, f, indent=2, default=str)
+    from atomic_io import write_atomic_json
+    write_atomic_json(str(REGIME_STATE), state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,19 +194,24 @@ def fetch_expiry_weekday():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def refresh_data():
-    """Run data_fetcher.py and signal_engine.py to get fresh signals."""
+    """Run data_fetcher.py and signal_engine.py to get fresh signals.
+    ABORTS on first failure — previously logged WARNING and continued, leaving
+    the rest of the regime backtest to run on stale signals.csv → false
+    routing recommendations on month-old data.
+    """
     print("  Refreshing market data...")
     for cmd in ["python3 data_fetcher.py", "python3 signal_engine.py"]:
         try:
             result = subprocess.run(
-                cmd.split(), capture_output=True, text=True, timeout=120,
+                cmd.split(), capture_output=True, text=True, timeout=180,
             )
             if result.returncode != 0:
-                print(f"  WARNING: {cmd} exited {result.returncode}: {result.stderr[:200]}")
-            else:
-                print(f"  {cmd} ✓")
+                raise RuntimeError(
+                    f"{cmd} exited {result.returncode}: {result.stderr[:300]}"
+                )
+            print(f"  {cmd} ✓")
         except Exception as e:
-            print(f"  {cmd} failed: {e}")
+            raise RuntimeError(f"refresh_data ABORT — {cmd} failed: {e}") from e
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,17 +275,20 @@ def run_backtest(regime_start_date=None):
 
 def pick_best_strategy(results):
     """
-    Pick best strategy: highest WR% among those with positive total P&L and ≥10 trades.
-    Excludes permanently discarded strategies.
+    Pick best strategy: highest WR% among those with positive total P&L and
+    enough trades for the WR estimate to be statistically meaningful.
+    Floor raised from 10 → 30 — tiny samples flip routing on a few unlucky
+    weeks. With 30+ trades the 95% CI on WR is ±9pp, manageable.
     Returns strategy_key or None.
     """
-    DISCARD = {"nf_bear_call_credit"}   # 13.5% WR — permanently dumped
-    PREFER  = "nf_hybrid_ic_bullput"    # tie-break: prefer the researched hybrid
+    DISCARD     = {"nf_bear_call_credit"}     # 13.5% WR — permanently dumped
+    PREFER      = "nf_hybrid_ic_bullput"      # tie-break: prefer researched hybrid
+    MIN_TRADES  = 30
 
     candidates = [
         (k, v) for k, v in results.items()
         if k not in DISCARD
-        and v["trades"] >= 10
+        and v["trades"] >= MIN_TRADES
         and v["total_pnl"] > 0
     ]
     if not candidates:
@@ -427,7 +440,8 @@ def check_and_patch_bull_put_margin(dry_run=False):
         return live_margin, True, msg
 
     try:
-        AUTO_TRADER.write_text(new_text)
+        from atomic_io import write_atomic_text
+        write_atomic_text(str(AUTO_TRADER), new_text)
         print(f"  Patched auto_trader.py: {msg}")
         return live_margin, True, msg
     except Exception as e:
@@ -472,7 +486,8 @@ def patch_lot_size(new_lot, dry_run=False):
         return old_lot, True
 
     try:
-        AUTO_TRADER.write_text(new_text)
+        from atomic_io import write_atomic_text
+        write_atomic_text(str(AUTO_TRADER), new_text)
         print(f"  Patched auto_trader.py: LOT_SIZE {old_lot} → {new_lot}")
         return old_lot, True
     except Exception as e:

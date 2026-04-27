@@ -134,7 +134,17 @@ def calc_margin(legs: list) -> float:
         )
         if resp.status_code == 200:
             d = resp.json()
-            m = float(d.get("total_margin") or d.get("totalMargin") or 0)
+            # Dhan v2 wraps margin under either top-level keys OR a nested
+            # "data" object (varies by SDK / endpoint version). Check both;
+            # previously the nested form silently returned 0.
+            inner = d.get("data") if isinstance(d.get("data"), dict) else d
+            m = float(
+                inner.get("total_margin")
+                or inner.get("totalMargin")
+                or d.get("total_margin")
+                or d.get("totalMargin")
+                or 0
+            )
             return m
         else:
             print(f"  margin API {resp.status_code}: {resp.text[:120]}")

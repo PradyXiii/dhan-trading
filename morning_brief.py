@@ -207,11 +207,31 @@ Reply with ONLY this JSON (one line, no markdown):
         )
         text = msg.content[0].text.strip()
         if "```" in text:
-            text = text.split("```")[1].strip().lstrip("json").strip()
+            inner = text.split("```")[1].strip()
+            # `lstrip("json")` strips ANY leading char in {j,s,o,n} individually
+            # — corrupting valid JSON whose first key starts with one of those
+            # letters ("j..."→ "..."). Use prefix-aware removal instead.
+            for prefix in ("json", "JSON"):
+                if inner.startswith(prefix):
+                    inner = inner[len(prefix):].lstrip()
+                    break
+            text = inner
         result = json.loads(text)
+        # Validate canonical tokens. "BULL"/"bullish"/etc silently fall to
+        # NEUTRAL with the previous .get() default — wasted Claude API call.
+        VALID_DIR  = {"BULLISH", "BEARISH", "NEUTRAL"}
+        VALID_CONF = {"HIGH", "MEDIUM", "LOW"}
+        direction  = str(result.get("direction", "NEUTRAL")).upper().strip()
+        confidence = str(result.get("confidence", "LOW")).upper().strip()
+        if direction not in VALID_DIR:
+            return {"direction": "NEUTRAL", "confidence": "LOW",
+                    "reason": f"Invalid direction token from API: {result.get('direction')!r}",
+                    "error": True}
+        if confidence not in VALID_CONF:
+            confidence = "LOW"
         return {
-            "direction":  result.get("direction", "NEUTRAL"),
-            "confidence": result.get("confidence", "LOW"),
+            "direction":  direction,
+            "confidence": confidence,
             "reason":     result.get("reason", ""),
         }
     except Exception as e:
@@ -264,8 +284,8 @@ def run() -> dict:
         "headlines":   headlines[:5],
     }
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(output, f, indent=2)
+    from atomic_io import write_atomic_json
+    write_atomic_json(OUTPUT_FILE, output)
 
     emoji = "📈" if output["direction"] == "BULLISH" else (
             "📉" if output["direction"] == "BEARISH" else "➡️")
@@ -310,8 +330,8 @@ def _write_premarket_snapshot():
 
     out_path = f"{DATA_DIR}/intraday_premarket.json"
     try:
-        with open(out_path, "w") as f:
-            json.dump(snapshot, f, indent=2)
+        from atomic_io import write_atomic_json
+        write_atomic_json(out_path, snapshot)
         print(f"  Premarket snapshot → {out_path}")
     except Exception as e:
         print(f"  Premarket snapshot write failed: {e}")

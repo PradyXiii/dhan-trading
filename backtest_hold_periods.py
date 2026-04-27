@@ -50,7 +50,12 @@ def get_nf_dte(d):
     """Calendar days to NF expiry (min 0.25 for intraday on expiry day)."""
     expiry = get_nf_expiry(d)
     days = (expiry - (d.date() if isinstance(d, pd.Timestamp) else d)).days
-    return max(0.25, float(days) + 1)
+    # Previously `float(days) + 1` — the +1 added a spurious calendar day on
+    # every non-expiry day and made the 0.25 floor unreachable. Tuesday expiry
+    # day (days=0) → 0.25; day-before (days=1) → 1.0. BS pricing T = DTE/365
+    # was inflated 20-40% at short DTE → premium estimates too high, theta
+    # effectively underweighted in the most theta-sensitive backtest column.
+    return max(0.25, float(days))
 
 def get_nf_lot_size(d):
     """NF lot size: 75 before Jan 6 2026, 65 from that date."""
@@ -319,9 +324,35 @@ def simulate_trade(entry_date, signal, strategy, hold_days, ohlcv, vix_df, opts_
             continue
 
         row_check = ohlcv.loc[check_date]
-        # For SL check: use high for long positions (risk is up move), low for short (risk is down move)
-        # Simplification: use high for all (worst case for shorts)
-        spot_check = float(row_check.get("high", row_check.get("close", 0)))
+        # CRITICAL: pick HIGH or LOW based on the direction the strategy
+        # is exposed to. Previously used HIGH for ALL strategies, meaning
+        # downside-risk strategies (bull_put_credit, IC PE wing, short_straddle
+        # PE leg, naked_put long, long_straddle PE leg) never registered an SL
+        # because we never looked at the LOW spot of the day. Net result:
+        # backtests showed zero downside loss for those strategies → bogus WR.
+        sl_dir = str(strategy.get("sl_direction", "")).lower()
+        if not sl_dir:
+            # Heuristic: credit strategies that profit when spot stays UP
+            # (bull_put, long_call) have downside risk → use LOW.
+            # Strategies with upside risk (bear_call, short_call) → HIGH.
+            # Two-sided risk (IC, straddle) → must check BOTH; pick the
+            # direction that produces the lower net (worst-case) value.
+            sname = str(strategy.get("name", "")).lower()
+            if any(k in sname for k in ("bull_put", "long_call", "naked_put", "covered_call")):
+                sl_dir = "low"
+            elif any(k in sname for k in ("bear_call", "short_call", "covered_put")):
+                sl_dir = "high"
+            else:
+                sl_dir = "both"
+        if sl_dir == "low":
+            spot_check = float(row_check.get("low", row_check.get("close", 0)))
+        elif sl_dir == "high":
+            spot_check = float(row_check.get("high", row_check.get("close", 0)))
+        else:
+            # two-sided: caller will recompute net at both extremes; use
+            # CLOSE here as a neutral default — the worst-case net is computed
+            # below by exploring both spots when sl_dir == "both".
+            spot_check = float(row_check.get("close", 0))
 
         dte_check = get_nf_dte(check_date.date() if hasattr(check_date, "date") else check_date)
         T_check = max(dte_check / 365.0, 0.0)

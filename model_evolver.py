@@ -1684,7 +1684,12 @@ def main():
         print(f"  [drift] Skipped: {e}")
 
     try:
-        regime_meta = train_regime_models(X_aug, y_aug, trading, selected_cols, sample_weight=sw)
+        # Pass HISTORICAL X/y/weights only — X_aug includes injected live rows
+        # whose count differs from len(trading), causing a boolean-mask shape
+        # mismatch (axis size 1759 vs 1757). Regime models are trained on
+        # historical data exclusively; live feedback is for the global ensemble.
+        sw_hist = base_weights if isinstance(base_weights, np.ndarray) else None
+        regime_meta = train_regime_models(X_all, y_all, trading, selected_cols, sample_weight=sw_hist)
         lever_info["regime_models"] = regime_meta
     except Exception as e:
         print(f"  [regime] Skipped: {e}")

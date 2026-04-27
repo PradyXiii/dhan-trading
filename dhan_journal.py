@@ -135,13 +135,28 @@ def fetch_trade_history(from_date: str, to_date: str) -> list[dict]:
             print(f"[dhan_journal] history page {page} HTTP {r.status_code}: {r.text[:120]}")
             break
         data = r.json()
-        trades = data if isinstance(data, list) else data.get("data", [])
+        # Dhan can wrap the list in {"data": null, ...} — None is NOT empty
+        # in Python, but `or []` would silently truncate just like an empty
+        # page. Distinguish: None / missing → no data → break;
+        # explicit empty list → end of pagination → break;
+        # non-empty list → keep paginating.
+        if isinstance(data, list):
+            trades = data
+        else:
+            trades = data.get("data")
+            if trades is None:
+                trades = []
         if not trades:
             break
         all_trades.extend(trades)
         page += 1
-        time.sleep(0.4)  # 2 req/s pacing for Data API rate limit (10 req/s ceiling)
-        if page > 50:    # safety cap (50 pages × ~50 trades = 2500 fills)
+        time.sleep(0.4)
+        if page > 50:
+            # Hit safety cap — log loudly so operator knows pagination was
+            # truncated. With 50 pages × ~50 trades = 2500 fills, hitting
+            # this means a multi-month range. Re-run with smaller window.
+            print(f"[dhan_journal] WARN: hit page>50 safety cap. {len(all_trades)} fills "
+                  f"returned but more may exist on Dhan. Re-run with narrower from/to.")
             break
     return all_trades
 
@@ -204,9 +219,25 @@ def leg_pnl_from_fills(fills: list[dict]) -> dict:
     net_pnl   = round(gross_pnl - charges, 2)
 
     def _latest_time(fs, key="exchangeTime"):
-        times = [f.get(key) or f.get("updateTime") or f.get("createTime") or "" for f in fs]
-        times = [t for t in times if t and t != "NA"]
-        return max(times) if times else ""
+        # String max() over mixed ISO formats picks the wrong fill — e.g.
+        # "2026-04-22 09:30:00" > "2026-04-22T15:15:00" lexically because
+        # ' ' < 'T' in ASCII. Parse to datetime and pick the latest.
+        from datetime import datetime as _dt
+        candidates = []
+        for f in fs:
+            raw = f.get(key) or f.get("updateTime") or f.get("createTime") or ""
+            if not raw or raw == "NA":
+                continue
+            for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f"):
+                try:
+                    candidates.append((_dt.strptime(raw[:19] + raw[19:26].replace("Z", ""), fmt), raw))
+                    break
+                except ValueError:
+                    continue
+        if not candidates:
+            return ""
+        return max(candidates, key=lambda c: c[0])[1]
 
     return {
         "buy_avg":   buy_avg,

@@ -57,8 +57,15 @@ import csv
 import io
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+# IST date — UTC _today_ist() returns yesterday's date until 5:30 AM IST,
+# so a same-day-effective override may not promote until UTC catches up;
+# the first 9:15 AM IST trade then runs against the stale baseline.
+_IST_TZ = timezone(timedelta(hours=5, minutes=30))
+def _today_ist() -> date:
+    return datetime.now(_IST_TZ).date()
 
 import requests
 from dotenv import load_dotenv
@@ -370,25 +377,47 @@ def effective_lot_size_on(d, overrides):
 def merge_pending(existing_pending, new_events):
     """
     Merge new events into pending list, handling extensions.
-    Keyed by (lot_size, year-month of detection) to catch shifted effective dates.
+    Keyed by (lot_size, effective_date) — previously keyed by lot_size only,
+    which collapsed two distinct upcoming changes (e.g. a Q1 change AND a
+    Q3 change both targeting the same lot value) into one entry, with only
+    the latest surviving. Different effective dates → different entries.
     """
     merged = list(existing_pending)
     for ev in new_events:
-        # Look for an existing pending entry with same lot_size that might be an extension
+        # Match on (lot_size, effective_date) — same value AND same effective
+        # date = the same event, possibly with a refined `notes`/`source`.
         match_idx = None
         for i, p in enumerate(merged):
-            if p["lot_size"] == ev["lot_size"]:
-                # Same direction, possibly extended
+            if (p["lot_size"] == ev["lot_size"]
+                    and p.get("effective_date") == ev.get("effective_date")):
                 match_idx = i
                 break
         if match_idx is not None:
-            old = merged[match_idx]
-            if old["effective_date"] != ev["effective_date"]:
-                ev["note"] = f"EXTENSION: shifted from {old['effective_date']} → {ev['effective_date']}"
-                ev["previous_effective"] = old["effective_date"]
             merged[match_idx] = ev
-        else:
-            merged.append(ev)
+            continue
+        # Same lot_size but different effective_date → check if it's a
+        # shifted version of an EARLIER pending entry vs a genuinely new event.
+        same_size_idx = next(
+            (i for i, p in enumerate(merged) if p["lot_size"] == ev["lot_size"]),
+            None,
+        )
+        if same_size_idx is not None:
+            old = merged[same_size_idx]
+            old_eff = old.get("effective_date")
+            new_eff = ev.get("effective_date")
+            # Heuristic: if both effective dates are within 30 days, treat as
+            # extension (rescheduled). Otherwise genuinely separate event.
+            try:
+                gap = abs((datetime.fromisoformat(str(new_eff))
+                           - datetime.fromisoformat(str(old_eff))).days)
+            except Exception:
+                gap = 999
+            if gap <= 30:
+                ev["note"] = f"EXTENSION: shifted from {old_eff} → {new_eff}"
+                ev["previous_effective"] = old_eff
+                merged[same_size_idx] = ev
+                continue
+        merged.append(ev)
     return merged
 
 
@@ -472,8 +501,8 @@ def show_state():
     print(json.dumps(ov, indent=2, default=str))
     print("\n── Expiry status ──────────────────────────────────")
     print(json.dumps(es, indent=2, default=str))
-    print(f"\n── Baseline for today ({date.today()}): {baseline_get_lot_size(date.today())}")
-    print(f"── Effective for today:                    {effective_lot_size_on(date.today(), ov)}")
+    print(f"\n── Baseline for today ({_today_ist()}): {baseline_get_lot_size(_today_ist())}")
+    print(f"── Effective for today:                    {effective_lot_size_on(_today_ist(), ov)}")
 
 
 def main():
@@ -484,7 +513,7 @@ def main():
 
     dry_run = "--dry-run" in args
     force   = "--force" in args
-    today   = date.today()
+    today   = _today_ist()
 
     print(f"Nifty50 lot/expiry scanner — {today}")
     print(f"{'='*60}")
@@ -514,6 +543,15 @@ def main():
             source = "dhan_api"
         else:
             print("    Dhan fetch failed.")
+
+    # If BOTH primary (NSE) and fallback (Dhan) failed, we have no source of
+    # truth. Abort instead of silently rubber-stamping "no change" — that
+    # claim is unverified and the previous bare-excepts let it slide.
+    if not nse_contracts and not dhan_lot:
+        msg = "Both NSE CSV and Dhan scrip master fetch FAILED — cannot verify lot size. Re-run after network/API recovers."
+        print(f"\n❌ {msg}")
+        send_alert("Lot/Expiry Scanner FAILED", [msg])
+        sys.exit(1)
 
     # 3. Detect changes
     print("\n[3] Detecting changes vs baseline...")

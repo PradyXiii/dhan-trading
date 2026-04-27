@@ -147,15 +147,26 @@ def _build_ic_row(date_str: str, legs: dict, archive: dict) -> dict:
     ce_credit = ce_short["sell_avg"] - ce_long["buy_avg"]
     pe_credit = pe_short["sell_avg"] - pe_long["buy_avg"]
     net_credit = ce_credit + pe_credit
-    qty   = ce_short.get("qty") or 65
+    # Use Dhan-reported qty when present and positive; fall back to 65 ONLY
+    # if missing/None. Previously `qty or 65` flipped a real qty=0 (zero-fill
+    # leg) to 65 → wrong INR. Reconcile buy_qty vs sell_qty per leg: take
+    # min of paired sides as the "matched" qty for the round-trip.
+    raw_qty = ce_short.get("qty")
+    if raw_qty is None or int(raw_qty) <= 0:
+        # Try buy/sell qty reconciliation
+        bq = int(ce_short.get("day_buy_qty", 0) or 0)
+        sq = int(ce_short.get("day_sell_qty", 0) or 0)
+        raw_qty = min(bq, sq) if (bq and sq) else max(bq, sq) or 65
+    qty   = int(raw_qty)
     lots  = max(1, qty // 65)
     spread_width = abs(ce_long["drv_strike"] - ce_short["drv_strike"])
 
-    # exit_time = latest sell across all legs (closing trades)
     exit_times = [l["sell_time"] for l in legs.values() if l["sell_time"]]
     exit_time  = max(exit_times)[-8:] if exit_times else ""
 
-    pnl_pct = (pnl_inr / (net_credit * qty) * 100) if net_credit > 0 else 0
+    # Allow negative net_credit (debit / inverted quote) — previously the
+    # `> 0` guard zeroed pnl_pct on losing trades, masking the loss in % terms.
+    pnl_pct = (pnl_inr / (abs(net_credit) * qty) * 100) if (net_credit and qty) else 0
 
     return {
         "date":              date_str,
@@ -212,14 +223,21 @@ def _build_spread_row(date_str: str, legs: dict, archive: dict) -> dict:
     long_exit   = long_leg["sell_avg"]
     net_credit  = short_entry - long_entry
     exit_spread = round(short_exit - long_exit, 2)
-    qty   = short_leg.get("qty") or long_leg.get("qty") or 65
+    def _qty_or_reconcile(leg) -> int:
+        v = leg.get("qty")
+        if v is not None and int(v) > 0:
+            return int(v)
+        bq = int(leg.get("day_buy_qty", 0) or 0)
+        sq = int(leg.get("day_sell_qty", 0) or 0)
+        return min(bq, sq) if (bq and sq) else (max(bq, sq) or 0)
+    qty   = _qty_or_reconcile(short_leg) or _qty_or_reconcile(long_leg) or 65
     lots  = max(1, qty // 65)
     spread_width = abs(long_leg["drv_strike"] - short_leg["drv_strike"])
 
     exit_times = [l["sell_time"] for l in legs.values() if l["sell_time"]]
     exit_time  = max(exit_times)[-8:] if exit_times else ""
 
-    pnl_pct = (pnl_inr / (net_credit * qty) * 100) if net_credit > 0 else 0
+    pnl_pct = (pnl_inr / (abs(net_credit) * qty) * 100) if (net_credit and qty) else 0
     signal  = archive.get("signal") or ("PUT" if strategy == "bull_put_credit" else "CALL")
 
     return {
@@ -263,9 +281,14 @@ def _build_straddle_row(date_str: str, legs: dict, archive: dict) -> dict:
     pe_exit    = pe_leg["buy_avg"]
     net_credit = ce_entry + pe_entry
     exit_cost  = round(ce_exit + pe_exit, 2)
-    qty   = ce_leg.get("qty") or 65
+    raw_q = ce_leg.get("qty")
+    if raw_q is None or int(raw_q) <= 0:
+        bq = int(ce_leg.get("day_buy_qty", 0) or 0)
+        sq = int(ce_leg.get("day_sell_qty", 0) or 0)
+        raw_q = min(bq, sq) if (bq and sq) else (max(bq, sq) or 65)
+    qty   = int(raw_q)
     lots  = max(1, qty // 65)
-    pnl_pct = (pnl_inr / (net_credit * qty) * 100) if net_credit > 0 else 0
+    pnl_pct = (pnl_inr / (abs(net_credit) * qty) * 100) if (net_credit and qty) else 0
 
     exit_times = [l["sell_time"] for l in legs.values() if l["sell_time"]]
     exit_time  = max(exit_times)[-8:] if exit_times else ""

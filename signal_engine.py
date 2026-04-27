@@ -98,9 +98,13 @@ def load_data():
 
     df = df.sort_values("date").reset_index(drop=True)
 
-    # Forward-fill global market data (handles weekends/holidays)
+    # Forward-fill global market data (handles weekends/holidays).
+    # limit=3 → 3 calendar days. Long Indian holiday clusters (Diwali week,
+    # Hindu New Year) can stretch >3 trading days for global tickers, so
+    # bump to 7 calendar days. Bounded so a permanent ticker outage still
+    # surfaces as NaN → row dropped.
     ff_cols = ["vix_close", "sp_close", "nk_close", "spf_open", "spf_close"]
-    df[ff_cols] = df[ff_cols].ffill(limit=3)
+    df[ff_cols] = df[ff_cols].ffill(limit=7)
 
     result = df.dropna(subset=["nf_close", "vix_close",
                                "sp_close", "nk_close", "spf_open", "spf_close"])
@@ -312,7 +316,8 @@ def main():
 
     # Embed threshold for backtest_engine to read back
     signals["threshold"] = SIGNAL_THRESHOLD
-    signals.to_csv(f"{DATA_DIR}/signals.csv", index=False)
+    from atomic_io import write_atomic_dataframe
+    write_atomic_dataframe(f"{DATA_DIR}/signals.csv", signals, index=False)
     signals.drop(columns=["threshold"], inplace=True)
 
     # Summary

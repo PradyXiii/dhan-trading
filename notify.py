@@ -84,11 +84,17 @@ def send(message: str, silent: bool = False) -> bool:
         )
         if resp.status_code == 200:
             return True
-        if is_critical:
-            _write_alert_log(message)
+        # Non-200: previously only critical alerts were mirrored to the
+        # local fallback log. But operationally important non-critical
+        # alerts (daily reports, lever status) also vanish on 429/5xx →
+        # we lose them silently. Write a short stamp for non-critical
+        # failures too, so health_ping can detect persistent outages.
+        _write_alert_log(message if is_critical
+                         else f"[non-critical send failed HTTP {resp.status_code}]\n"
+                              f"{message[:500]}")
         return False
     except Exception as e:
         print(f"  Telegram send failed: {e}")
-        if is_critical:
-            _write_alert_log(message)
+        _write_alert_log(message if is_critical
+                         else f"[non-critical send exception: {e}]\n{message[:500]}")
         return False

@@ -48,7 +48,21 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "    EOF"
     echo ""
 else
-    source "$ENV_FILE" 2>/dev/null || true
+    # `source $ENV_FILE` blindly evaluates shell — a tampered .env from a
+    # bad git pull or compromised checkout could `rm -rf` the box. Parse
+    # KEY=VALUE pairs explicitly instead. Only trusted, expected keys are read.
+    _read_env_var() {
+        local key="$1"
+        # Match `KEY=...` or `KEY="..."`/`KEY='...'`, stripping quotes.
+        grep -E "^${key}=" "$ENV_FILE" 2>/dev/null \
+            | head -n1 \
+            | sed -E "s/^${key}=//" \
+            | sed -E 's/^["'\''](.*)["'\'']$/\1/'
+    }
+    DHAN_ACCESS_TOKEN=$(_read_env_var DHAN_ACCESS_TOKEN)
+    DHAN_CLIENT_ID=$(_read_env_var DHAN_CLIENT_ID)
+    TELEGRAM_BOT_TOKEN=$(_read_env_var TELEGRAM_BOT_TOKEN)
+    TELEGRAM_CHAT_ID=$(_read_env_var TELEGRAM_CHAT_ID)
     [ -n "$DHAN_ACCESS_TOKEN" ]  && echo "    DHAN_ACCESS_TOKEN   ✓" || echo "    DHAN_ACCESS_TOKEN   ✗  MISSING"
     [ -n "$DHAN_CLIENT_ID" ]     && echo "    DHAN_CLIENT_ID      ✓" || echo "    DHAN_CLIENT_ID      ✗  MISSING"
     [ -n "$TELEGRAM_BOT_TOKEN" ] && echo "    TELEGRAM_BOT_TOKEN  ✓" || echo "    TELEGRAM_BOT_TOKEN  ✗  (optional — add for notifications)"
@@ -206,8 +220,17 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "forecast_pnl" \
   | grep -v "Daily FY forecast")
 
-# Add fresh entries
+# Add fresh entries.
+# PATH header — restrictive cron PATH may not include /usr/local/bin (where
+# python3 lives on some VM images), causing every cron job to fail with
+# "command not found". MAILTO="" suppresses local-mail noise from cron's
+# default behaviour of mailing the user when stderr fires.
+CRON_HEADER="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+SHELL=/bin/bash
+MAILTO=\"\""
+
 NEW_CRON="$(echo "$EXISTING")
+$CRON_HEADER
 $RENEWER_COMMENT
 $RENEWER_CMD_MORNING
 $RENEWER_CMD_EVENING

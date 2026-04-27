@@ -105,6 +105,13 @@ def _detect_csv_for_date(target_date: str) -> Path | None:
     n = len(grouped)
     if n >= 4:
         return CSVS["ic"]
+    if n == 3:
+        # 3-leg: an IC where one leg's order rejected, OR a spread + a stray
+        # leg from a different strategy. Treat as IC and let backfill match
+        # the matched legs by buyAvg/sellAvg pairing — better than dropping
+        # the trade as "could-not-detect" forever. backfill_dhan_history.py
+        # ignores unmatched legs gracefully.
+        return CSVS["ic"]
     if n == 2:
         opts = set()
         for fills in grouped.values():
@@ -122,10 +129,17 @@ def _run_backfill(target_date: str) -> bool:
         return True
     cmd = ["python3", str(_HERE / "backfill_dhan_history.py"), "--date", target_date, "--apply"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # 60s was too tight for IC backfills (4 legs × tradebook fetch + Dhan
+        # rate-limit pacing). Truncated runs left partial CSV rows and a re-run
+        # produced duplicates. 300s leaves headroom for the slowest IC + strikes.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode == 0:
             return True
         notify.log(f"weekly_audit: backfill failed for {target_date}: {result.stderr[:200]}")
+        return False
+    except subprocess.TimeoutExpired:
+        notify.log(f"weekly_audit: backfill TIMEOUT (>5min) for {target_date} — likely "
+                   f"Dhan API slow; re-run manually with broader window")
         return False
     except Exception as e:
         notify.log(f"weekly_audit: backfill exception for {target_date}: {e}")

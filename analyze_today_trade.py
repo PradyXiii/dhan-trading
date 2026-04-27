@@ -58,9 +58,14 @@ def _fetch_ltps(security_ids: list) -> dict:
         out = {}
         for sid in security_ids:
             entry = seg.get(str(sid)) or seg.get(int(sid)) or {}
-            out[str(sid)] = float(
-                entry.get("last_price") or entry.get("lastTradedPrice") or 0
-            )
+            # Use explicit None checks — `last_price or lastTradedPrice or 0`
+            # treats a legitimate 0.0 (deep OTM, halted feed) as "missing"
+            # and flips to the next fallback. A real 0.0 value should be
+            # preserved so the caller can detect "untradeable" vs "missing".
+            v = entry.get("last_price")
+            if v is None:
+                v = entry.get("lastTradedPrice")
+            out[str(sid)] = float(v) if v is not None else 0.0
         return out
     except Exception as e:
         print(f"  LTP fetch failed: {e}")
@@ -121,7 +126,10 @@ def main():
     ml_conf    = tt.get("ml_conf")
     score      = tt.get("rule_score")
     lots       = tt.get("lots", 0)
-    lot_size   = tt.get("lot_size", 65)
+    # Read lot_size from today_trade.json — falling back to 65 hard-codes
+    # the post-Jan-2026 NF lot. If the contract is later resized again,
+    # under-reports per-share→total conversion. Default still 65 if absent.
+    lot_size   = int(tt.get("lot_size") or 65)
     qty        = lots * lot_size
 
     print(f"  Date:        {today_date}")
@@ -238,8 +246,14 @@ def main():
     else:
         time_value_long = long_ltp
 
-    proj_short_ltp = (short_strike - spot if spot < short_strike else 0) + time_value_short * decay_fraction
-    proj_long_ltp  = (long_strike  - spot if spot < long_strike  else 0) + time_value_long  * decay_fraction
+    # Floor projected LTPs at intrinsic — `intrinsic + (TV * decay)` can drop
+    # BELOW intrinsic if `time_value` was already negative (mispriced LTP feed
+    # or stale tick). That's a no-arbitrage violation (option > intrinsic
+    # always); clamp to intrinsic so projected P&L stays sensible.
+    intrinsic_short = max(0.0, short_strike - spot)
+    intrinsic_long  = max(0.0, long_strike  - spot)
+    proj_short_ltp = max(intrinsic_short, intrinsic_short + time_value_short * decay_fraction)
+    proj_long_ltp  = max(intrinsic_long,  intrinsic_long  + time_value_long  * decay_fraction)
     proj_spread    = proj_short_ltp - proj_long_ltp
     proj_pnl       = (net_credit_per_share - proj_spread) * qty
 

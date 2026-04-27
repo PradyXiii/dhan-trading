@@ -325,12 +325,16 @@ def get_option_ltp(security_id: str, trade: dict | None = None) -> float | None:
         else:
             data  = r.json()
             items = data if isinstance(data, list) else data.get("data", [])
+            # Filter to open NSE_FNO positions only.
+            # Previously also filtered on `"NIFTY" in tradingSymbol` — but Dhan
+            # responses sometimes carry only a numeric securityId without
+            # tradingSymbol, in which case the substring check returned False
+            # and ALL NF positions were dropped. The exact security_id match
+            # below is the correct authoritative filter.
             nf_positions = [
                 p for p in items
                 if int(p.get("netQty", 0)) > 0
                 and p.get("exchangeSegment", "") == "NSE_FNO"
-                and "NIFTY" in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
-                and "BANKNIFTY" not in str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
             ]
             # Prefer exact security_id match
             ltp_from_pos = None
@@ -534,12 +538,13 @@ def _check_position_open(security_id: str) -> bool:
             return True
         data  = r.json()
         items = data if isinstance(data, list) else data.get("data", [])
+        # Any open NSE_FNO position is treated as our position. tradingSymbol
+        # filter dropped — see same fix in get_option_ltp(): Dhan can return
+        # numeric securityId only, in which case substring "NIFTY in numericid"
+        # is False and the function under-reports open positions.
         for p in items:
-            sym = str(p.get("tradingSymbol", p.get("securityId", ""))).upper()
             if (int(p.get("netQty", 0)) != 0
-                    and p.get("exchangeSegment", "") == "NSE_FNO"
-                    and "NIFTY" in sym
-                    and "BANKNIFTY" not in sym):
+                    and p.get("exchangeSegment", "") == "NSE_FNO"):
                 return True
         return False
     except Exception as e:
@@ -680,6 +685,11 @@ def main():
         pe_net_credit   = float(trade.get("pe_credit",   0))   # auto_trader writes "pe_credit" not "pe_net_credit"
         lots            = int(trade.get("lots",    1))
         lot_size        = int(trade.get("lot_size", 65))
+        if net_credit <= 0:
+            _log(f"IC: net_credit missing/zero ({net_credit}). Skipping conviction (sl_trigger meaningless).")
+            _write_midday_checkpoint({"date": today_str, "signal": signal,
+                                      "verdict": "missing_net_credit", "reversal_detected": False})
+            return
         # Recalculate DTE from expiry — JSON dte is entry-time value (stale on expiry day)
         dte             = _calc_dte(trade)
         paper           = trade.get("order_mode") == "PAPER"
@@ -866,10 +876,15 @@ def main():
         long_strike   = float(trade.get("long_strike", 0))
         net_credit    = float(trade.get("net_credit", 0))
         lots          = int(trade.get("lots", 1))
-        lot_size      = int(trade.get("lot_size", 30))
+        lot_size      = int(trade.get("lot_size", 65))   # NF lot since Jan 2026 (was 30 BNF leftover)
         dte           = _calc_dte(trade)
         paper         = trade.get("order_mode") == "PAPER"
         mode_tag      = "[PAPER] " if paper else ""
+        if net_credit <= 0:
+            _log(f"Spread: net_credit missing/zero ({net_credit}). sl_trigger would be 0 → false alerts. Skipping.")
+            _write_midday_checkpoint({"date": today_str, "signal": signal,
+                                      "verdict": "missing_net_credit", "reversal_detected": False})
+            return
 
         _log(f"Spread: {strategy_name}  SELL {int(short_strike)} / BUY {int(long_strike)}  credit ₹{net_credit:.0f}")
 
@@ -1046,6 +1061,11 @@ def main():
         dte        = _calc_dte(trade)
         paper      = trade.get("order_mode") == "PAPER"
         mode_tag   = "[PAPER] " if paper else ""
+        if net_credit <= 0:
+            _log(f"Straddle: net_credit missing/zero ({net_credit}). Skipping (sl_trigger meaningless).")
+            _write_midday_checkpoint({"date": today_str, "signal": direction,
+                                      "verdict": "missing_net_credit", "reversal_detected": False})
+            return
 
         _log(f"Straddle: ATM {int(atm_strike)}  CE+PE  credit ₹{net_credit:.0f}")
 

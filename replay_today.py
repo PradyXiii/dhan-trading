@@ -31,7 +31,24 @@ MODELS_DIR = "models"
 SL_PCT  = 0.15       # must match auto_trader.py
 RR      = 2.5
 TP_PCT  = SL_PCT * RR   # 0.375
-LOT_SIZE = 65
+
+
+def _today_lot_size(default: int = 65) -> int:
+    """Look up the live NF lot size from today_trade.json (set by auto_trader),
+    falling back to the import-time default. Hardcoding 65 here makes
+    replay's per-share→total math wrong if the contract is later resized.
+    """
+    try:
+        import json as _j
+        with open("data/today_trade.json") as f:
+            ls = _j.load(f).get("lot_size")
+            if ls:
+                return int(ls)
+    except (OSError, ValueError, KeyError):
+        pass
+    return default
+
+LOT_SIZE = _today_lot_size()
 
 MTYPE_NAMES = {"rf": "RandomForest", "xgb": "XGBoost", "lgb": "LightGBM"}
 
@@ -151,13 +168,26 @@ def main():
     print(f"\n  ACTUAL TRADE (from today_trade.json)")
     print(f"  ─────────────────────────────────────")
     if actual_signal != "?":
-        print(f"  Signal   : {actual_signal}  (score {actual_score:+d}/4)")
+        # Coerce score to int — `:+d` formatter raises ValueError if score is "?"
+        # or anything non-numeric. Defensive cast preserves the expected output
+        # while protecting against today_trade.json with missing signal_score.
+        try:
+            score_str = f"{int(actual_score):+d}"
+        except (TypeError, ValueError):
+            score_str = str(actual_score)
+        print(f"  Signal   : {actual_signal}  (score {score_str}/4)")
         print(f"  Strike   : {actual_strike}  Expiry {actual_expiry}")
         print(f"  Lots     : {actual_lots} × {LOT_SIZE} = {actual_lots * LOT_SIZE} qty")
         print(f"  Premium  : ₹{actual_premium:.0f}")
         print(f"  SL       : ₹{actual_sl:.0f}   TP : ₹{actual_tp:.0f}")
-        if actual_ml_conf != "?":
-            print(f"  ML conf  : {float(actual_ml_conf):.0%}  (was single-champion, pre-ensemble)")
+        # actual_ml_conf can be "?", None (JSON null), or a float string —
+        # the previous `!= "?"` guard didn't catch None → TypeError on float()
+        if actual_ml_conf not in ("?", None):
+            try:
+                conf_pct = float(actual_ml_conf)
+                print(f"  ML conf  : {conf_pct:.0%}  (was single-champion, pre-ensemble)")
+            except (TypeError, ValueError):
+                print(f"  ML conf  : {actual_ml_conf}  (unparseable)")
     else:
         print(f"  ⚠  today_trade.json not found — was a trade placed today?")
 

@@ -42,6 +42,17 @@ os.environ.setdefault("PYTHONWARNINGS", "ignore::UserWarning")
 _TYPICAL_PREMIUM = 900.0
 
 
+def _strip_comments(text: str) -> str:
+    """Drop lines whose first non-whitespace char is '#'. The regex parser
+    below uses re.MULTILINE which matches start-of-line anchors and would
+    otherwise pick up `# SL_PCT = 0.05` (commented-out experiment) as a
+    real assignment. Stripping comment-only lines first makes the parse
+    unambiguous."""
+    return "\n".join(
+        line for line in text.split("\n") if not line.lstrip().startswith("#")
+    )
+
+
 def _parse_float(pattern: str, text: str, default: float) -> float:
     """Extract a float from auto_trader.py source text via regex."""
     m = re.search(pattern, text, re.MULTILINE)
@@ -60,9 +71,10 @@ def _read_trader_constants() -> dict:
             src = f.read()
     except FileNotFoundError:
         return {"SL_PCT": 0.15, "RR": 2.5}
+    src_clean = _strip_comments(src)
     return {
-        "SL_PCT": _parse_float(r"^SL_PCT\s*=\s*([0-9.]+)", src, 0.15),
-        "RR":     _parse_float(r"^RR\s*=\s*([0-9.]+)", src, 2.5),
+        "SL_PCT": _parse_float(r"^SL_PCT\s*=\s*([0-9.]+)", src_clean, 0.15),
+        "RR":     _parse_float(r"^RR\s*=\s*([0-9.]+)", src_clean, 2.5),
     }
 
 

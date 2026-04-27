@@ -19,11 +19,19 @@ Cron: 7:00 AM IST (1:30 UTC) daily.
 
 import os
 import csv
+import html as _html
 import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import notify
+
+
+def _esc(v) -> str:
+    """HTML-escape interpolated values for Telegram parse_mode=HTML.
+    Commit subjects, exception strings, Claude API descriptions can contain
+    `<`, `>`, `&` which break Telegram's parser → message dropped silently."""
+    return _html.escape(str(v) if v is not None else "—", quote=False)
 
 _HERE   = Path(__file__).parent
 _DATA   = _HERE / "data"
@@ -188,11 +196,14 @@ def build_report() -> str:
         else:
             verdict = "→ <b>Stable</b> — composite tracking 30-day avg"
 
-    # Format kept feature description (truncate if long)
+    # Format kept feature description (truncate if long).
+    # HTML-escape since Claude API responses can contain `<`/`>`/`&` which
+    # would break Telegram's parse_mode=HTML and silently drop the message.
     def _exp_desc(e):
         if not e: return "—"
         d = e.get("description", "—")
-        return d[:70] + "…" if len(d) > 70 else d
+        d = d[:70] + "…" if len(d) > 70 else d
+        return _esc(d)
 
     # 6. Lever pipeline status (artifacts on disk = lever active)
     stack_meta_exists  = (_MODELS / "stack_meta.pkl").exists()

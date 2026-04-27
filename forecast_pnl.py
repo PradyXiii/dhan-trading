@@ -188,11 +188,21 @@ def _ewma_stats(df: pd.DataFrame, span: int = 20) -> tuple[float, float]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _pnl_per_lot_arr(df: pd.DataFrame) -> np.ndarray:
+    """Per-lot P&L array for bootstrap. CRITICAL: when 'lots' column is
+    missing the previous default of 1 caused 5-lot trades to be sampled as
+    1-lot returns → bootstrap pool inflated 5×. Now: refuse to default,
+    skip rows with missing/invalid lots so the pool stays per-lot accurate.
+    """
     if df.empty:
         return np.array([])
-    pnls = df["pnl_inr"].values
-    lots = df["lots"].values if "lots" in df.columns else np.ones(len(pnls))
-    return pnls / np.maximum(1.0, lots)
+    if "lots" not in df.columns:
+        # Cannot per-lot normalise. Refuse — caller should fall back to
+        # broader df with lots column rather than silently mixing.
+        return np.array([])
+    pnls = pd.to_numeric(df["pnl_inr"], errors="coerce").values
+    lots = pd.to_numeric(df["lots"],    errors="coerce").values
+    valid = (~np.isnan(pnls)) & (lots >= 1)
+    return pnls[valid] / lots[valid]
 
 
 def _simulate_compounding(
@@ -213,6 +223,14 @@ def _simulate_compounding(
     cum_pnl   = np.zeros(n_sim, dtype=float)
     upgraded  = np.zeros(n_sim, dtype=bool)
 
+    # CRITICAL: STRADDLE_SCALE_VS_IC is applied below to convert IC-per-lot
+    # samples into straddle-per-lot expected earnings on the auto-upgrade
+    # path. This is correct ONLY when `pnl_per_lot` is sampled from PURE IC
+    # trades. If the caller passes a mixed pool (IC + straddle) the
+    # straddle returns are already at full straddle-per-lot scale and
+    # multiplying again 2.3× double-counts. The caller in this file uses
+    # `_pnl_per_lot_arr(ic_df if len(ic_df) >= 3 else df)` — when the
+    # fallback to `df` triggers, the pool may be mixed. Document and warn.
     def _run_chunk(size: int) -> None:
         caps          = capital + cum_pnl
         straddle_mask = caps >= STRADDLE_MARGIN_PER_LOT
@@ -225,7 +243,6 @@ def _simulate_compounding(
 
         samples   = rng.choice(pnl_per_lot, size=(n_sim, size), replace=True)
         chunk_sum = samples.sum(axis=1)
-        # Straddle paths get higher per-lot P&L (2.3× IC per backtest)
         chunk_sum[:] = np.where(straddle_mask, chunk_sum * STRADDLE_SCALE_VS_IC, chunk_sum)
         cum_pnl[:] += chunk_sum * lots
 
@@ -407,12 +424,30 @@ def run(dry_run: bool = False) -> None:
     days_left         = _count_trading_days(today + timedelta(days=1), FY_END)
 
     # ── pnl_per_lot array for compounding sim ────────────────────────────────
-    # Prefer IC-only history; fall back to all trades if < 3 IC rows
+    # MUST be IC-only — the bootstrap applies STRADDLE_SCALE_VS_IC = 2.3×
+    # on straddle paths, expecting IC-per-lot input. Mixing strategies
+    # double-counts straddle return on the auto-upgrade path.
     if "strategy" in df.columns:
         ic_df = df[df["strategy"].isin(_IC_STRATS)]
     else:
         ic_df = pd.DataFrame()
-    ppl = _pnl_per_lot_arr(ic_df if len(ic_df) >= 3 else df)
+    if len(ic_df) >= 3:
+        ppl = _pnl_per_lot_arr(ic_df)
+    else:
+        # Too few IC trades to bootstrap. Fall back to *Bull Put only* — same
+        # credit-spread family with similar per-lot magnitude — rather than
+        # mixing in straddle returns. If that's also too small, refuse to
+        # forecast (signal "INSUFFICIENT DATA" upstream).
+        bp_df = (df[df["strategy"] == "bull_put_credit"]
+                 if "strategy" in df.columns else pd.DataFrame())
+        ppl = _pnl_per_lot_arr(bp_df) if len(bp_df) >= 3 else np.array([])
+        if len(ppl) == 0:
+            notify.send(
+                "📈 <b>Season Forecast</b> · Not enough IC / Bull-Put trades to forecast yet.\n"
+                "Need ≥ 3 trades of either strategy. Comes back online after a few sessions.",
+                silent=dry_run,
+            )
+            return
 
     # Layer 2 — bootstrap with compounding
     p10, p50, p90, upgrade_prob = _simulate_compounding(ppl, capital, days_left)

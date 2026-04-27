@@ -88,7 +88,8 @@ def _load_json(path: Path, default):
 
 def _save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str))
+    from atomic_io import write_atomic_json
+    write_atomic_json(str(path), data)
 
 
 # Reasons that mean "this evaluation failed; retry next run" — don't bury in archive

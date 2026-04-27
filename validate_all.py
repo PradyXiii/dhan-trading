@@ -7,7 +7,7 @@ Run on VM to confirm all components are working after a pull.
 """
 
 import os, sys, json, subprocess
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import numpy as np
@@ -17,7 +17,10 @@ load_dotenv()
 
 DATA_DIR   = "data"
 MODELS_DIR = "models"
-TODAY      = date.today()
+# IST date — UTC date.today() returns yesterday's date until 5:30 AM IST,
+# producing false-green stale checks right before the 9:15 AM trade.
+_IST       = timezone(timedelta(hours=5, minutes=30))
+TODAY      = datetime.now(_IST).date()
 
 _pass, _fail, _warn = "✅", "❌", "⚠️ "
 _results = []
@@ -186,8 +189,14 @@ try:
           fresh,
           f"{ns_date}  {ns['direction']} ({ns['confidence']})  {ns['n_headlines']} headlines")
 except FileNotFoundError:
-    check("data/news_sentiment.json", True,
-          "absent — will be written at 9:15 AM cron", warn_only=False)
+    # Pre-9:15 IST → expected absent (warn). Post-9:15 IST → genuine miss
+    # (fail). Previously always returned PASS — silent green.
+    now_ist = datetime.now(_IST)
+    is_premarket = now_ist.hour < 9 or (now_ist.hour == 9 and now_ist.minute < 16)
+    check("data/news_sentiment.json", is_premarket,
+          "absent (pre-9:15 IST — expected)" if is_premarket
+          else "ABSENT post-9:15 IST — morning_brief.py did not run",
+          warn_only=is_premarket)
 except Exception as e:
     check("data/news_sentiment.json", False, str(e)[:60])
 
@@ -257,8 +266,11 @@ try:
     sig_signal = last.get("signal", "?")
     sig_score  = last.get("score", "?")
     stale = (TODAY - pd.to_datetime(sig_date).date()).days
-    check("signals_ml.csv last row", stale <= 5,
-          f"{sig_date}  signal={sig_signal}  score={sig_score}")
+    # Tightened from 5 → 2 trading days. Daily option trader cannot be more
+    # than the previous TRADING day stale (weekend OK). 5 days hid a stale
+    # signal across long holidays + weekends.
+    check("signals_ml.csv last row", stale <= 2,
+          f"{sig_date}  signal={sig_signal}  score={sig_score}  (stale={stale}d)")
 
     exp_cols = ["date", "signal", "score", "s_ema20", "s_trend5", "s_vix"]
     missing  = [c for c in exp_cols if c not in sig.columns]

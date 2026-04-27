@@ -2,10 +2,10 @@
 # auto_recovery.sh — Self-healing safety net.
 # Runs hourly via cron during market hours. If smoke test fails badly:
 #   1. Auto-installs any missing pip packages from requirements.txt
-#   2. Auto-rolls back to last working commit if smoke still fails
-#   3. Telegram-alerts user in plain English (only when action helped or failed)
+#   2. Telegram-alerts user in plain English (only when action helped or failed)
 #
-# This is the "set it and forget it" net. User shouldn't need to babysit.
+# Hard reset removed — was rolling back legitimate good commits on every
+# transient blip. Recovery now restricted to pip install + alert.
 
 set +e
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -18,8 +18,11 @@ ts() { date +"%Y-%m-%d %H:%M:%S IST"; }
 
 log() { echo "[$(ts)] $1" >> "$LOG"; }
 
+# Telegram via stdin — never inline a string into python -c. Previously the
+# message was substituted into a triple-quoted python string, allowing shell
+# injection if smoke test output ever contained ''' or $(...).
 telegram() {
-  python3 -c "import notify; notify.send('''$1''')" 2>/dev/null
+  python3 -c "import sys, notify; notify.send(sys.stdin.read())" <<< "$1" 2>/dev/null
 }
 
 log "=== auto_recovery start ==="
@@ -53,25 +56,10 @@ if [ "$FAIL2" -lt 3 ]; then
   exit 0
 fi
 
-# Step 3: Rollback to last working commit
-log "Still failing — rolling back to last commit"
-LAST_GOOD=$(git rev-parse HEAD~1 2>/dev/null)
-git stash 2>/dev/null
-git reset --hard "$LAST_GOOD" 2>/dev/null
-
-SMOKE_OUT3=$(bash smoke_test.sh 2>&1)
-FAIL3=$(echo "$SMOKE_OUT3" | grep -oE "FAILED: [0-9]+" | grep -oE "[0-9]+")
-log "smoke after rollback: $FAIL3 failed"
-
-if [ "$FAIL3" -lt 3 ]; then
-  msg="🔧 Self-heal: rolled back broken code to last working version. System healthy now. Tell Claude — last commit had a bug."
-  telegram "$msg"
-  log "RECOVERED via rollback"
-  exit 0
-fi
-
-# Step 4: Alert user — neither install nor rollback fixed it
-msg="🚨 System is broken. Auto-install + rollback both failed. Pause trading. Check logs/auto_recovery.log. Last 3 fails: $(echo "$SMOKE_OUT3" | grep '❌' | head -3 | tr '\n' '|')"
+# Step 3: Alert user — pip install didn't fix it. NO automatic git rollback.
+# Hard reset of legitimate commits caused more outages than it solved.
+TAIL_FAILS=$(echo "$SMOKE_OUT2" | grep '❌' | head -3 | tr '\n' '|')
+msg="🚨 System is broken. Auto-install did not fix it. Pause trading. Check logs/auto_recovery.log. Last 3 fails: $TAIL_FAILS"
 telegram "$msg"
-log "FAILED to recover — user needs to intervene"
+log "FAILED to auto-recover — user must intervene (manual git revert if needed)"
 exit 1

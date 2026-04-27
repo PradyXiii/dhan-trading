@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 import os
 import time
+from atomic_io import write_atomic_dataframe
 
 load_dotenv()
 TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
@@ -69,12 +70,19 @@ def _merge_and_save(csv_path, df_new):
                       .reset_index(drop=True))
     else:
         combined = df_new
-    combined.to_csv(csv_path, index=False)
+    write_atomic_dataframe(csv_path, combined, index=False)
 
 
 def fetch_dhan_index(security_id, name, from_date, to_date):
-    """Fetch daily OHLCV from Dhan API in 90-day chunks."""
+    """Fetch daily OHLCV from Dhan API in 90-day chunks.
+
+    On chunk failure (anything other than DH-905 weekend/holiday): raise
+    RuntimeError. Previously logged 'ERROR' and silently continued, leaving
+    permanent holes in the OHLCV CSV which `_last_csv_date` walked past on
+    the next run — gaps were never re-fetched.
+    """
     all_frames = []
+    failed_chunks = []
     current = datetime.strptime(from_date, "%Y-%m-%d")
     end     = datetime.strptime(to_date,   "%Y-%m-%d")
 
@@ -83,7 +91,7 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
 
         payload = {
             "securityId":      security_id,
-            "exchangeSegment": "IDX_I",  # correct segment for NSE indices
+            "exchangeSegment": "IDX_I",
             "instrument":      "INDEX",
             "expiryCode":      0,
             "fromDate":        current.strftime("%Y-%m-%d"),
@@ -99,9 +107,6 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
         if resp.status_code == 200:
             data = resp.json()
             if data.get("open"):
-                # Dhan timestamps are midnight IST (UTC+5:30), not UTC.
-                # Parsing as UTC shifts every date 1 day earlier (Mon → Sun, etc.)
-                # Fix: add the IST offset before normalising to recover the correct date.
                 _ts = (pd.to_datetime(data["timestamp"], unit="s")
                        + pd.Timedelta(hours=5, minutes=30)).normalize()
                 df = pd.DataFrame({
@@ -116,14 +121,21 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
                 print(f"  {name}: {len(df)} rows  "
                       f"({current.strftime('%Y-%m-%d')} → {chunk_end.strftime('%Y-%m-%d')})")
         elif resp.status_code == 400 and "DH-905" in resp.text:
-            # DH-905 on a short/recent range = no trading data (weekend or holiday) — not an error
             print(f"  {name}: no new trading data ({current.strftime('%Y-%m-%d')} — weekend/holiday)")
         else:
-            print(f"  {name}: ERROR {resp.status_code}  "
-                  f"chunk {current.strftime('%Y-%m-%d')} — {resp.text[:120]}")
+            err = f"{current.strftime('%Y-%m-%d')}→{chunk_end.strftime('%Y-%m-%d')}: HTTP {resp.status_code} {resp.text[:120]}"
+            print(f"  {name}: CHUNK FAILURE {err}")
+            failed_chunks.append(err)
 
         current = chunk_end + timedelta(days=1)
-        time.sleep(0.4)   # stay polite to the API
+        time.sleep(0.4)
+
+    if failed_chunks:
+        raise RuntimeError(
+            f"{name} fetch had {len(failed_chunks)} failed chunk(s); refusing to "
+            f"merge partial data. Investigate Dhan API health and retry. "
+            f"First failure: {failed_chunks[0]}"
+        )
 
     if not all_frames:
         return pd.DataFrame()
@@ -242,7 +254,7 @@ def fetch_fii_today():
         else:
             combined = new_df.sort_values("date").reset_index(drop=True)
 
-        combined.to_csv(out_path, index=False)
+        write_atomic_dataframe(out_path, combined, index=False)
         print(f"  FII/DII: fetched {len(new_df)} rows → {out_path} ({len(combined)} total)")
         return new_df
 
@@ -343,7 +355,7 @@ def fetch_pcr_dhan_today():
         else:
             combined = new_row
 
-        combined.to_csv(out_path, index=False)
+        write_atomic_dataframe(out_path, combined, index=False)
         print(f"  PCR (Dhan): {pcr_val:.3f}  → {out_path}")
         return new_row
 
@@ -484,7 +496,7 @@ def fetch_rollingoption(from_date, to_date):
         combined = new_df
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    combined.to_csv(out_path, index=False)
+    write_atomic_dataframe(out_path, combined, index=False)
     real_count = combined["call_premium"].notna().sum()
     print(f"  → Saved options_atm_daily.csv  ({len(combined)} rows, "
           f"{real_count} with real CALL premium)")
@@ -626,7 +638,7 @@ def fetch_iv_skew(from_date, to_date):
         combined = new_df
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    combined.to_csv(out_path, index=False)
+    write_atomic_dataframe(out_path, combined, index=False)
     real_count = combined["call_iv_atm"].notna().sum()
     print(f"  → Saved options_iv_skew.csv  ({len(combined)} rows, "
           f"{real_count} with ATM CALL IV)")
@@ -787,7 +799,7 @@ def fetch_oi_surface(from_date, to_date):
         combined = new_df
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    combined.to_csv(out_path, index=False)
+    write_atomic_dataframe(out_path, combined, index=False)
     real_count = combined["ce_oi_atm"].notna().sum()
     print(f"  → Saved options_oi_surface.csv  ({len(combined)} rows, "
           f"{real_count} with ATM CE OI)")
@@ -890,7 +902,7 @@ def fetch_nf_intraday_15m(from_date, to_date):
         combined = new_df
 
     os.makedirs(DATA_DIR, exist_ok=True)
-    combined.to_csv(out_path, index=False)
+    write_atomic_dataframe(out_path, combined, index=False)
     print(f"  → Saved nifty50_15m_orb.csv  ({len(combined)} rows)")
     return new_df
 
@@ -1088,10 +1100,25 @@ def process_pcr_from_nse_bhavcopy(bhavcopy_file):
             print("  No NIFTY rows found in bhavcopy")
             return pd.DataFrame()
 
-        bn["date"] = pd.to_datetime(bn["timestamp"].str.strip()
-                                    if "timestamp" in bn.columns
-                                    else bn["expiry_dt"].str.strip(),
-                                    format="%d-%b-%Y", errors="coerce")
+        # CRITICAL: trade-date column ONLY, never expiry. Falling back to
+        # expiry_dt (as the original code did when timestamp was missing)
+        # collapsed every day in one expiry into a single bucket — PCR for
+        # 5-7 trading days got merged into one row keyed by expiry date.
+        if "timestamp" in bn.columns:
+            bn["date"] = pd.to_datetime(
+                bn["timestamp"].str.strip(),
+                format="%d-%b-%Y", errors="coerce",
+            )
+        elif "trade_date" in bn.columns:
+            bn["date"] = pd.to_datetime(
+                bn["trade_date"].str.strip(),
+                format="%d-%b-%Y", errors="coerce",
+            )
+        else:
+            print("  Bhavcopy missing timestamp/trade_date column — refusing "
+                  "to fall back to expiry_dt (would collapse trade days). "
+                  "Skipping this file.")
+            return pd.DataFrame()
 
         # Daily PCR: sum PUT OI / sum CALL OI
         puts  = bn[bn["option_typ"].str.strip() == "PE"].groupby("date")["open_int"].sum()

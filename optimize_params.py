@@ -73,14 +73,31 @@ def _stats(df):
 
 # ── Grid search ───────────────────────────────────────────────────────────────
 
-def grid_search(trade_dfs):
+def grid_search(trade_dfs, holdout_frac=0.20):
     """
     Exhaustive grid: VIX band × ML confidence threshold.
-    Returns DataFrame sorted by combined P&L.
+    Returns DataFrame sorted by combined HOLDOUT P&L (not in-sample).
+
+    Previously the grid was searched and selected on the same data → pure
+    look-ahead optimisation; the reported pnl_yr_L was in-sample-best, with
+    no out-of-sample test. Now: each strategy DataFrame is split temporally
+    (last `holdout_frac` of trades = holdout). Grid cells are scored on
+    TRAINING and ranked by HOLDOUT P&L. Reports both numbers so it's
+    obvious when a cell overfits training (high train, low holdout).
     """
     vix_mins  = [None, 11, 12, 13, 14, 15]
     vix_maxs  = [None, 18, 19, 20, 21, 22, 25]
     min_confs = [None, 0.55, 0.57, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70]
+
+    # Temporal split per strategy
+    train_dfs, holdout_dfs = {}, {}
+    for strat, df in trade_dfs.items():
+        if "date" in df.columns:
+            df = df.sort_values("date")
+        n = len(df)
+        cut = int(n * (1 - holdout_frac))
+        train_dfs[strat]   = df.iloc[:cut].copy()
+        holdout_dfs[strat] = df.iloc[cut:].copy()
 
     rows = []
     total = len(vix_mins) * len(vix_maxs) * len(min_confs)
@@ -91,23 +108,32 @@ def grid_search(trade_dfs):
         if vmin is not None and vmax is not None and vmin >= vmax:
             continue
 
-        combined = {"n": 0, "wins": 0, "pnl": 0.0, "pnl_yr": 0.0, "dd": 0.0}
+        combined_tr  = {"n": 0, "wins": 0, "pnl": 0.0, "pnl_yr": 0.0, "dd": 0.0}
+        combined_ho  = {"n": 0, "wins": 0, "pnl": 0.0, "pnl_yr": 0.0, "dd": 0.0}
         valid = True
 
-        for strat, df in trade_dfs.items():
-            sub = _filter(df, vmin, vmax, conf)
-            st  = _stats(sub)
-            if st is None:
+        for strat in trade_dfs:
+            sub_tr = _filter(train_dfs[strat],   vmin, vmax, conf)
+            sub_ho = _filter(holdout_dfs[strat], vmin, vmax, conf)
+            st_tr = _stats(sub_tr)
+            st_ho = _stats(sub_ho)
+            if st_tr is None or st_ho is None:
                 valid = False
                 break
-            combined["n"]     += st["n"]
-            combined["wins"]  += int(st["wr"] * st["n"])
-            combined["pnl"]   += st["pnl"]
-            combined["pnl_yr"] += st["pnl_yr"]
-            combined["dd"]    = max(combined["dd"], st["dd"])
+            for c, st in ((combined_tr, st_tr), (combined_ho, st_ho)):
+                c["n"]      += st["n"]
+                c["wins"]   += int(st["wr"] * st["n"])
+                c["pnl"]    += st["pnl"]
+                c["pnl_yr"] += st["pnl_yr"]
+                c["dd"]      = max(c["dd"], st["dd"])
 
-        if not valid or combined["n"] < 50:
+        if not valid or combined_tr["n"] < 50 or combined_ho["n"] < 10:
             continue
+        # Keep both in `combined` for backwards-compat output, but rank on
+        # holdout P&L. Train numbers are exposed for sanity comparison.
+        combined = combined_ho
+        combined["pnl_train"]    = combined_tr["pnl"]
+        combined["pnl_yr_train"] = combined_tr["pnl_yr"]
 
         rows.append({
             "vix_min":  vmin if vmin  is not None else "-",
@@ -166,7 +192,7 @@ def _fmt(df, sort_col, ascending=False, head=25):
 
 def main():
     ap = argparse.ArgumentParser(description="Spread parameter optimizer")
-    ap.add_argument("--instrument", choices=["BNF", "NF"], default="BNF",
+    ap.add_argument("--instrument", choices=["BNF", "NF"], default="NF",
                     help="NF=Nifty50 (default)")
     ap.add_argument("--entry-scan",  action="store_true",
                     help="Test 6 entry times 09:15–10:30 (requires ~3 min)")
