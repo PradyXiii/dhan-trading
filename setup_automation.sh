@@ -165,6 +165,11 @@ WIKI_COMMENT="# Weekly wiki compile — Monday 6 AM IST, raw discoveries → str
 SCOUT_CMD="30 18 * * 6 cd $SCRIPT_DIR && python3 tech_scout.py >> $LOG_DIR/tech_scout.log 2>&1"
 SCOUT_COMMENT="# Weekly tech scout — Sunday midnight IST, autonomous innovation scan"
 
+# Daily FY P&L forecast — 5 PM IST = 11:30 AM UTC, Mon–Fri
+# Bootstrap + EWMA + VIX regime projection to Mar 31 2027. Sends Telegram at market close.
+FORECAST_CMD="30 11 * * 1-5 cd $SCRIPT_DIR && python3 forecast_pnl.py >> $LOG_DIR/forecast_pnl.log 2>&1"
+FORECAST_COMMENT="# Daily FY forecast — 5 PM IST, bootstrap P&L projection to Mar 31 2027"
+
 # Remove old entries (all scripts) if any
 EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "auto_trader" \
@@ -197,7 +202,9 @@ EXISTING=$(crontab -l 2>/dev/null \
   | grep -v "regime_watcher" \
   | grep -v "Regime watcher" \
   | grep -v "tech_scout" \
-  | grep -v "Weekly tech scout")
+  | grep -v "Weekly tech scout" \
+  | grep -v "forecast_pnl" \
+  | grep -v "Daily FY forecast")
 
 # Add fresh entries
 NEW_CRON="$(echo "$EXISTING")
@@ -231,6 +238,8 @@ $WIKI_COMMENT
 $WIKI_CMD
 $SCOUT_COMMENT
 $SCOUT_CMD
+$FORECAST_COMMENT
+$FORECAST_CMD
 $LOG_ROTATE_COMMENT
 $LOG_ROTATE_CMD"
 
