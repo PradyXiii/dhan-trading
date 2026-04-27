@@ -173,16 +173,24 @@ def main():
     # ── 4. NF spot + distance to short strike ─────────────────────────────────
     _section("4. NF SPOT + STRIKE DISTANCE")
     expiry_str = tt.get("expiry", "")
+    spot = None
     if expiry_str:
-        spot, _, pe_ltps = fetch_optionchain_premiums(
-            expiry_str, set(), {int(short_strike), int(long_strike)},
-        )
-        print(f"  NF spot:           {spot:.2f}")
-        print(f"  Distance to short: {spot - short_strike:+.0f} pts ({'ITM by ' + str(int(short_strike-spot)) + 'pt' if spot < short_strike else 'OTM by ' + str(int(spot-short_strike)) + 'pt'})")
-        if spot < short_strike:
-            intrinsic_short = short_strike - spot
-            print(f"  SHORT PUT intrinsic value: Rs.{intrinsic_short:.2f}")
-            print(f"  SHORT PUT time value:      Rs.{short_ltp - intrinsic_short:.2f}")
+        try:
+            spot, _, _ = fetch_optionchain_premiums(
+                expiry_str, set(), {int(short_strike), int(long_strike)},
+            )
+        except Exception as e:
+            print(f"  optionchain fetch failed: {e}")
+    if spot is None or spot == 0:
+        print("  Spot fetch failed (token expired? run renew_token.py).")
+        print("  Skipping spot-based sections — leg P&L still valid above.")
+        return
+    print(f"  NF spot:           {spot:.2f}")
+    print(f"  Distance to short: {spot - short_strike:+.0f} pts ({'ITM by ' + str(int(short_strike-spot)) + 'pt' if spot < short_strike else 'OTM by ' + str(int(spot-short_strike)) + 'pt'})")
+    if spot < short_strike:
+        intrinsic_short = short_strike - spot
+        print(f"  SHORT PUT intrinsic value: Rs.{intrinsic_short:.2f}")
+        print(f"  SHORT PUT time value:      Rs.{short_ltp - intrinsic_short:.2f}")
 
     # ── 5. EOD exit projection ────────────────────────────────────────────────
     _section("5. EOD EXIT PROJECTION (3:15 PM)")
