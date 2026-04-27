@@ -2711,7 +2711,6 @@ def main():
             if not DRY_RUN:
                 _write_today_straddle_trade(
                     st, signal, dte, score, exp_used, ml_conf, order_result)
-                _setup_pnl_exit(st["net_credit"], st["lots"])
 
             mode = order_result.get("mode")
             if mode == "DRY_RUN":
@@ -2739,6 +2738,10 @@ def main():
             if mode and "PARTIAL" in mode:
                 notify.log(f"Partial straddle ({mode}) — emergency alert sent. Check Dhan app immediately.")
                 return
+
+            # Full success — safe to arm account-level P&L safety net.
+            if not DRY_RUN:
+                _setup_pnl_exit(st["net_credit"], st["lots"])
 
             notify.send(
                 f"✅  <b>Nifty Short Straddle Placed!</b>\n"
@@ -2841,7 +2844,17 @@ def main():
                     buy_oid=order_result.get("buy_oid"),
                     sell_oid=order_result.get("sell_oid"),
                 )
-                _setup_pnl_exit(net_credit, lots)
+                # Arm account-level P&L safety net ONLY on full success.
+                # PARTIAL / FAILED → no pnlExit (would be configured against a
+                # non-existent or partial position and trigger at wrong threshold).
+                _bp_mode = order_result.get("mode", "")
+                if _bp_mode and "PARTIAL" not in _bp_mode and _bp_mode != "FAILED":
+                    _setup_pnl_exit(net_credit, lots)
+                else:
+                    notify.log(
+                        f"Bull Put mode={_bp_mode} — skipping pnlExit setup. "
+                        f"Manual intervention may be required."
+                    )
             return
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -2955,7 +2968,6 @@ def main():
 
         if not DRY_RUN:
             _write_today_ic_trade(ic, signal, dte, score, exp_used, ml_conf, order_result)
-            _setup_pnl_exit(net_credit, lots)
 
         mode = order_result.get("mode")
 
@@ -2997,7 +3009,10 @@ def main():
             notify.log(f"Partial IC ({mode}) — emergency alert sent. Check Dhan app immediately.")
             return
 
-        # All 4 legs placed
+        # All 4 legs placed — safe to arm account-level P&L safety net.
+        if not DRY_RUN:
+            _setup_pnl_exit(net_credit, lots)
+
         notify.send(
             f"✅  <b>Nifty Iron Condor Placed!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"

@@ -91,7 +91,11 @@ atexit.register(_release_lock)
 
 
 def _in_market_hours() -> bool:
-    now = datetime.now().time()
+    # MKT_OPEN/MKT_CLOSE are IST values (9:30 / 15:10) — must compare in IST.
+    # VM clock is UTC, so naive datetime.now().time() returns UTC and the gate
+    # silently rejects every tick before 09:30 UTC (= 15:00 IST), meaning SL
+    # was un-monitored for the entire morning. Use _IST explicitly.
+    now = datetime.now(_IST).time()
     return MKT_OPEN <= now <= MKT_CLOSE
 
 
@@ -155,6 +159,24 @@ def _exit_all_api() -> bool:
     except Exception as e:
         notify.log(f"EXIT ALL API exception: {e}")
         return False
+
+
+def _backup_close_failed(close_result: dict) -> bool:
+    """True if any leg in the backup leg-by-leg close failed. Detects explicit
+    `*_err` keys (network/exception) and Dhan REJECTED responses. Used to abort
+    the `exit_done=True` write when the close did not actually happen."""
+    if not isinstance(close_result, dict) or not close_result:
+        return True
+    for k, v in close_result.items():
+        if k.endswith("_err"):
+            return True
+        if isinstance(v, dict):
+            status = (v.get("orderStatus") or v.get("status") or "").upper()
+            if status in ("REJECTED", "ERROR", "FAILED"):
+                return True
+            if v.get("errorMessage") or v.get("error"):
+                return True
+    return False
 
 
 def _dhan_realized_total(sids: list, settle_secs: int = 5) -> float | None:
@@ -437,6 +459,16 @@ def main():
             if not _exit_all_api():                    # primary: one DELETE call
                 close_result = _close_ic(intent)       # backup: leg-by-leg
                 notify.log(f"IC exit backup ({reason}) — {close_result}")
+                if _backup_close_failed(close_result):
+                    notify.send(
+                        f"🚨 <b>IC SL FIRED — CLOSE FAILED</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Both EXIT ALL API and leg-by-leg backup failed.\n"
+                        f"Positions likely still open on Dhan.\n"
+                        f"<b>Manual action required immediately.</b>\n"
+                        f"Backup result: {close_result}"
+                    )
+                    return   # do NOT mark exit_done — let next tick retry
         else:
             notify.log(f"IC exit ({reason}) — PAPER, no real order")
 
@@ -522,6 +554,16 @@ def main():
             if not _exit_all_api():                                                    # primary
                 close_result = _close_straddle(intent, ce_ltp=ce_ltp, pe_ltp=pe_ltp)  # backup
                 notify.log(f"Straddle exit backup ({reason}) — {close_result}")
+                if _backup_close_failed(close_result):
+                    notify.send(
+                        f"🚨 <b>STRADDLE SL FIRED — CLOSE FAILED</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Both EXIT ALL API and leg-by-leg backup failed.\n"
+                        f"Positions likely still open on Dhan.\n"
+                        f"<b>Manual action required immediately.</b>\n"
+                        f"Backup result: {close_result}"
+                    )
+                    return   # do NOT mark exit_done — let next tick retry
         else:
             notify.log(f"Straddle exit ({reason}) — PAPER, no real order")
 
@@ -595,6 +637,16 @@ def main():
         if not _exit_all_api():                    # primary: one DELETE call
             close_result = _close_spread(intent)   # backup: leg-by-leg
             notify.log(f"Spread exit backup ({reason}) — {close_result}")
+            if _backup_close_failed(close_result):
+                notify.send(
+                    f"🚨 <b>SPREAD {reason} FIRED — CLOSE FAILED</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Both EXIT ALL API and leg-by-leg backup failed.\n"
+                    f"Positions likely still open on Dhan.\n"
+                    f"<b>Manual action required immediately.</b>\n"
+                    f"Backup result: {close_result}"
+                )
+                return   # do NOT mark exit_done — let next tick retry
     else:
         notify.log(f"Spread exit ({reason}) — PAPER, no real order")
 
