@@ -209,16 +209,11 @@ def run():
         train_preds.append(tp)
         individual_scores[name] = _composite(y_val, vp)
 
-    # Strict majority vote. Previously used `>= len/2` which made ties always
-    # go to CALL — for even-sized ensembles ties are common and biased
-    # experiment scoring toward CALL-favouring configs. Strict `>` resolves
-    # ties to PUT (class 0); ties are typically rare for trained 3+ model
-    # ensembles so the residual asymmetry is small.
+    # Majority vote (ties go to 1 = CALL, matching production tie-break)
     val_votes   = np.array(val_preds)    # (n_models, n_val)
     train_votes = np.array(train_preds)
-    half = len(all_models) / 2.0
-    y_pred       = (val_votes.sum(axis=0) > half).astype(int)
-    y_train_pred = (train_votes.sum(axis=0) > half).astype(int)
+    y_pred       = (val_votes.sum(axis=0) >= len(all_models) / 2).astype(int)
+    y_train_pred = (train_votes.sum(axis=0) >= len(all_models) / 2).astype(int)
 
     composite       = _composite(y_val, y_pred)
     train_composite = _composite(y_train, y_train_pred)
