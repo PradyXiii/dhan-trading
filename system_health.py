@@ -207,6 +207,14 @@ def build_report() -> str:
         pass
     commits_str = "\n".join(f"  {c[:80]}" for c in recent_commits) if recent_commits else "  (none)"
 
+    # 8. Today's news sentiment (from morning_brief.py at 9:15 AM)
+    news = _read_json(_DATA / "news_sentiment.json", {}) or {}
+    news_dir  = news.get("direction", "—")
+    news_conf = news.get("confidence", "—")
+    news_n    = news.get("n_headlines", 0)
+    news_date = news.get("date", "—")
+    news_today = news_date == datetime.now(_IST).date().isoformat()
+
     # ─── compose Telegram message (HTML parse mode) ──────────────────────────
     msg = f"""📊 <b>NF System Health — {today_str}</b>
 
@@ -237,6 +245,10 @@ def build_report() -> str:
   Features discarded: {disc_30d}
   Last kept:      {_exp_desc(last_kept)}
   Last discarded: {_exp_desc(last_disc)}
+
+<b>News sentiment (today's pre-market)</b>
+  Direction:  {news_dir}  ({news_conf} conf, {news_n} headlines)
+  Status:     {'fresh' if news_today else 'stale (' + news_date + ')'}
 
 <b>Recent code changes (last 3 commits)</b>
 {commits_str}

@@ -271,7 +271,50 @@ def run() -> dict:
             "📉" if output["direction"] == "BEARISH" else "➡️")
     print(f"  {emoji} {output['direction']} ({output['confidence']}) — {output['reason']}")
     print(f"  Written → {OUTPUT_FILE}")
+
+    # ── Bonus: write live premarket macro snapshot for ML features ────────────
+    # Captured at 9:15 AM — DXY/ES/VIX values right before NF opens.
+    # ml_engine.py compute_features() reads this for today's intraday features.
+    _write_premarket_snapshot()
+
     return output
+
+
+def _write_premarket_snapshot():
+    """Capture DXY, ES futures, India VIX at 9:15 AM. Saves to data/intraday_premarket.json."""
+    import yfinance as yf
+    snapshot = {
+        "date":      datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat(),
+        "captured":  datetime.now(timezone.utc).isoformat(),
+    }
+    tickers = {
+        "es_futures": "ES=F",      # S&P 500 e-mini futures (live during US night)
+        "dxy":        "DX-Y.NYB",  # US dollar index
+        "india_vix":  "^INDIAVIX", # India fear gauge
+        "nikkei":     "^N225",     # Asian session lead
+    }
+    for key, sym in tickers.items():
+        try:
+            t = yf.Ticker(sym)
+            info = t.history(period="2d", interval="5m")
+            if not info.empty:
+                last_close = float(info["Close"].iloc[-1])
+                prev_close = float(info["Close"].iloc[0])  # ~yesterday close
+                pct_chg    = (last_close / prev_close - 1) * 100 if prev_close else 0.0
+                snapshot[f"{key}_now"] = round(last_close, 2)
+                snapshot[f"{key}_chg_pct"] = round(pct_chg, 3)
+        except Exception as e:
+            snapshot[f"{key}_now"] = None
+            snapshot[f"{key}_chg_pct"] = None
+            snapshot[f"{key}_error"] = str(e)[:80]
+
+    out_path = f"{DATA_DIR}/intraday_premarket.json"
+    try:
+        with open(out_path, "w") as f:
+            json.dump(snapshot, f, indent=2)
+        print(f"  Premarket snapshot → {out_path}")
+    except Exception as e:
+        print(f"  Premarket snapshot write failed: {e}")
 
 
 if __name__ == "__main__":

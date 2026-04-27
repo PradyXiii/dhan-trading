@@ -772,6 +772,21 @@ def compute_features(df):
     _gex_roll_std = _net_gex_raw.rolling(60, min_periods=10).std().replace(0, np.nan)
     d["net_gex_zscore"] = (_net_gex_raw / _gex_roll_std).fillna(0.0)
 
+    # ── Intraday premarket macro (live 9:15 AM snapshot from morning_brief.py) ─
+    # Captured daily by morning_brief into data/intraday_premarket.json.
+    # NOT added to FEATURE_COLS yet — needs ~30 days of historical capture
+    # before training signal exists (otherwise constant-zero across 1500 rows).
+    # After May 27 2026, can add: pm_es_chg, pm_dxy_chg, pm_vix_chg, pm_nikkei_chg.
+
+    # ── VIX term structure proxy (realized vol short/long) ────────────────────
+    # India has no VIX1D analog. Use 5-day vs 30-day realized vol as proxy:
+    # ratio > 1 = short-term vol spiking (crisis incoming) → mean-revert play
+    # ratio < 1 = vol crush in progress → carry trade favoured
+    _ret_for_rv = pd.to_numeric(d["nf_ret1"], errors="coerce")
+    _rv_5  = _ret_for_rv.rolling(5,  min_periods=3).std()
+    _rv_30 = _ret_for_rv.rolling(30, min_periods=10).std().replace(0, np.nan)
+    d["vix_term_ratio"] = (_rv_5 / _rv_30).fillna(1.0).clip(0.3, 3.0)
+
     # Hurst Exponent (hurst_exp_63) tested Apr 2026: 0.000 importance — dropped.
     # 63-day rolling + shift(1) made it too slow-moving to add signal. Kept code
     # commented in git history (commit e425490) in case future regime warrants retest.
@@ -904,6 +919,8 @@ FEATURE_COLS = [
     "sp_nf_corr20",   # 20-day rolling S&P vs NF return correlation — decoupling signal
     # Net GEX magnitude (Apr 2026) — delta-weighted dealer gamma exposure
     "net_gex_zscore", # z-scored net GEX from OI surface — ranging vs trending regime
+    # VIX term structure proxy (Apr 2026)
+    "vix_term_ratio", # 5d vs 30d realized vol ratio — short-vol spike detector
 ]
 
 
@@ -968,6 +985,73 @@ def compute_labels(df):
         rows.append({"date": date, "call_out": call_out, "put_out": put_out,
                      "label": label})
     return pd.DataFrame(rows)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IC P&L LABELS (alternative — relabels training data by strategy outcome,
+#  not raw direction. Enabled via env var LABEL_MODE=ic_pnl).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_labels_ic_pnl(df, spread_width=150):
+    """
+    Label = "did Iron Condor profit on this day?" — the actual question we care about.
+
+    For each day:
+      1. Approximate IC: SHORT ATM CE + BUY ATM+150 CE + SHORT ATM PE + BUY ATM-150 PE
+      2. Net credit ≈ 0.6 × ATM straddle premium (empirical for NF)
+      3. EOD P&L = net_credit - max(0, |close-open| - spread_width/2)
+         (simplified: pin loss when move > half-width)
+      4. Label = "CALL" if pnl > 0 (IC won), else "PUT" (IC lost)
+         (CALL/PUT mapping kept for downstream compatibility — model output then
+         interpreted as P(IC_will_win) where 1=win, 0=loss)
+
+    NOTE: This changes the SEMANTIC meaning of the label. Strategy router in
+    auto_trader.py still treats CALL→IC, PUT→Bull Put. With this label,
+    "CALL" effectively means "IC will profit today, place IC", and "PUT" means
+    "skip IC today, fall back to Bull Put or skip".
+
+    Use only after promoting via shadow training. To activate:
+       LABEL_MODE=ic_pnl python3 model_evolver.py
+    """
+    rows = []
+    for _, r in df.iterrows():
+        o = r["nf_open"]
+        c = r["nf_close"]
+        date = r["date"]
+        formula_prem = o * PREMIUM_K * (get_dte(date.date() if hasattr(date, "date") else date) ** 0.5)
+
+        # ATM straddle premium (real if available, formula otherwise)
+        call_p = r["call_premium"] if "call_premium" in r.index and pd.notna(r["call_premium"]) else formula_prem
+        put_p  = r["put_premium"]  if "put_premium"  in r.index and pd.notna(r["put_premium"])  else formula_prem
+        atm_straddle = call_p + put_p
+
+        # IC net credit ≈ 0.6 × straddle (empirical NF average from real-options backtest)
+        ic_net_credit = atm_straddle * 0.6
+
+        # Day move
+        day_move = abs(c - o)
+        half_width = spread_width / 2
+
+        # Simplified IC P&L:
+        #   move <= half_width → keep most credit (positive)
+        #   move >  half_width → linear loss past breakeven
+        if day_move <= half_width:
+            ic_pnl_per_share = ic_net_credit * (1 - day_move / half_width * 0.5)
+        else:
+            ic_pnl_per_share = ic_net_credit - (day_move - half_width)
+
+        label = "CALL" if ic_pnl_per_share > 0 else "PUT"
+        rows.append({"date": date, "ic_pnl": round(ic_pnl_per_share, 2), "label": label})
+    return pd.DataFrame(rows)
+
+
+# Switch label fn based on env var
+def get_label_fn():
+    """Return compute_labels (default) or compute_labels_ic_pnl based on LABEL_MODE."""
+    if os.environ.get("LABEL_MODE", "").lower() == "ic_pnl":
+        print("  [LABEL_MODE=ic_pnl] Using IC P&L labels instead of close-vs-open direction")
+        return compute_labels_ic_pnl
+    return compute_labels
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1338,6 +1422,36 @@ def load_calibrated_champion():
         return None
 
 
+REGIME_DIR  = f"{MODELS_DIR}/regime"
+REGIME_META = f"{REGIME_DIR}/meta.json"
+
+
+def load_regime_model(today_vix):
+    """
+    Load regime-specific champion based on today's VIX level.
+    Returns (model, regime_name, feature_cols) or (None, None, None).
+    Regime bins: low <14, med 14-18, high >18 (must match model_evolver).
+    """
+    import json as _json
+    if not os.path.exists(REGIME_META):
+        return None, None, None
+    try:
+        with open(REGIME_META) as f:
+            meta = _json.load(f)
+        bins   = meta.get("bins", [0, 14, 18, 999])
+        names  = ["low", "med", "high"]
+        idx    = max(0, min(len(names) - 1, int(np.digitize([today_vix], bins)[0]) - 1))
+        regime = names[idx]
+        path   = f"{REGIME_DIR}/{regime}.pkl"
+        if not os.path.exists(path):
+            return None, None, None
+        import joblib
+        model = joblib.load(path)
+        return model, regime, meta.get("feature_cols", [])
+    except Exception:
+        return None, None, None
+
+
 def load_champion():
     """
     Load saved champion model from models/champion.pkl.
@@ -1528,6 +1642,16 @@ def predict_today():
     stack_meta       = load_stack_meta()
     calib_model      = load_calibrated_champion()
 
+    # Regime-conditional model — picked based on today's VIX level
+    today_vix_val = 15.0
+    try:
+        import pandas as _pd
+        _vix_series = _pd.to_numeric(trading.get("vix_level", _pd.Series([15])), errors="coerce")
+        today_vix_val = float(_vix_series.iloc[-1]) if len(_vix_series) > 0 else 15.0
+    except Exception:
+        pass
+    regime_model, regime_name, regime_fc = load_regime_model(today_vix_val)
+
     if ensemble_members:
         votes  = []
         confs  = []
@@ -1547,6 +1671,23 @@ def predict_today():
             confs.append(max(pc, pp))
             pcalls.append(pc)
             types.append(meta["model_type"])
+
+        # Add regime-conditional vote if regime model is available
+        if regime_model is not None and regime_fc:
+            try:
+                X_rg = get_today_features(regime_fc)
+                if X_rg is not None and len(X_rg) > 0:
+                    proba_rg   = regime_model.predict_proba(X_rg)[0]
+                    classes_rg = list(regime_model.classes_)
+                    pc_rg = float(proba_rg[classes_rg.index(1)]) if 1 in classes_rg else 0.5
+                    pp_rg = 1.0 - pc_rg
+                    votes.append("CALL" if pc_rg >= pp_rg else "PUT")
+                    confs.append(max(pc_rg, pp_rg))
+                    pcalls.append(pc_rg)
+                    types.append(f"regime_{regime_name}")
+                    print(f"  Regime model active: {regime_name} (today VIX={today_vix_val:.1f})")
+            except Exception as e:
+                print(f"  Regime model failed: {e}")
 
         if votes:
             n_models = len(votes)

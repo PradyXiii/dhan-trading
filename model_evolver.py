@@ -1039,6 +1039,92 @@ def optimize_ensemble_weights(results, X_tr, y_tr, X_val, y_val, sw_tr=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  REGIME-CONDITIONAL MODELS — train one champion per VIX regime
+# ─────────────────────────────────────────────────────────────────────────────
+
+REGIME_DIR = f"{MODELS_DIR}/regime"
+VIX_REGIME_BINS = [0, 14, 18, 999]   # low / med / high
+VIX_REGIME_NAMES = ["low", "med", "high"]
+
+
+def train_regime_models(X_all, y_all, df_full, selected_cols, sample_weight=None):
+    """
+    Train separate champion per VIX regime (low/med/high).
+    Each model specializes in its volatility regime.
+    Routed at predict time based on today's VIX.
+
+    Saves models/regime/{low,med,high}.pkl + meta.json.
+    Skips a regime if it has < 200 rows (too few to train).
+
+    Returns dict {regime_name: meta} for the Telegram report.
+    """
+    import joblib
+    import json as _json
+    from sklearn.ensemble import RandomForestClassifier
+
+    os.makedirs(REGIME_DIR, exist_ok=True)
+    df = df_full.copy()
+    if "vix_level" not in df.columns:
+        print("  [regime] vix_level missing — skipping regime-conditional training")
+        return {}
+
+    vix = pd.to_numeric(df["vix_level"], errors="coerce").fillna(15).values[:len(y_all)]
+    regime_idx = np.digitize(vix, VIX_REGIME_BINS) - 1   # 0/1/2
+
+    out_meta = {}
+    for i, name in enumerate(VIX_REGIME_NAMES):
+        mask = (regime_idx == i)
+        n_rows = int(mask.sum())
+        if n_rows < 200:
+            print(f"  [regime] {name}: only {n_rows} rows — skipping (need 200)")
+            continue
+        if len(np.unique(y_all[mask])) < 2:
+            print(f"  [regime] {name}: single-class labels — skipping")
+            continue
+
+        # Light XGB per regime (fast, no HPO — just specialised model)
+        try:
+            from xgboost import XGBClassifier
+            mdl = XGBClassifier(
+                n_estimators=200, max_depth=5, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8,
+                use_label_encoder=False, eval_metric="logloss",
+                random_state=42, n_jobs=-1, verbosity=0,
+            )
+        except ImportError:
+            mdl = RandomForestClassifier(
+                n_estimators=200, max_depth=6, min_samples_leaf=10,
+                class_weight="balanced", random_state=42, n_jobs=-1,
+            )
+
+        sw = sample_weight[mask] if sample_weight is not None else None
+        try:
+            mdl.fit(X_all[mask], y_all[mask], sample_weight=sw)
+        except TypeError:
+            mdl.fit(X_all[mask], y_all[mask])
+
+        # Quick in-sample accuracy
+        train_acc = float((mdl.predict(X_all[mask]) == y_all[mask]).mean())
+        joblib.dump(mdl, f"{REGIME_DIR}/{name}.pkl")
+        out_meta[name] = {
+            "n_rows":    n_rows,
+            "train_acc": round(train_acc, 4),
+            "vix_range": f"{VIX_REGIME_BINS[i]}-{VIX_REGIME_BINS[i+1]}",
+        }
+        print(f"  [regime] {name}: {n_rows} rows, train_acc={train_acc:.1%} → {REGIME_DIR}/{name}.pkl")
+
+    if out_meta:
+        with open(f"{REGIME_DIR}/meta.json", "w") as f:
+            _json.dump({
+                "regimes":      out_meta,
+                "feature_cols": selected_cols,
+                "trained_at":   datetime.now(_IST).isoformat(),
+                "bins":         VIX_REGIME_BINS,
+            }, f, indent=2)
+    return out_meta
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  CONCEPT DRIFT DETECTION — River ADWIN on holdout error stream
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1285,6 +1371,10 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
                 lines.append(f"  - Drift check: stable (no regime change in holdout)")
             else:
                 lines.append(f"  - Drift check: {dc} regime-shift point(s) flagged")
+        if lever_info.get("regime_models"):
+            rm = lever_info["regime_models"]
+            rm_str = ", ".join(f"{k} ({v['n_rows']}r)" for k, v in rm.items())
+            lines.append(f"  - Regime-conditional models: {rm_str}")
         if lines:
             lever_section = "\n\nUpgrade pipeline:\n" + "\n".join(lines)
 
@@ -1474,6 +1564,7 @@ def main():
         "ensemble_w":     None,
         "weight_score":   None,
         "drift_count":    None,
+        "regime_models":  None,
     }
     sw_tr = sample_weights[:len(y_tr)]
 
@@ -1505,6 +1596,12 @@ def main():
         lever_info["drift_count"] = len(drift_pts) if drift_pts is not None else None
     except Exception as e:
         print(f"  [drift] Skipped: {e}")
+
+    try:
+        regime_meta = train_regime_models(X_aug, y_aug, trading, selected_cols, sample_weight=sw)
+        lever_info["regime_models"] = regime_meta
+    except Exception as e:
+        print(f"  [regime] Skipped: {e}")
 
     # ── 8. Predict tomorrow using ensemble vote ───────────────────────────────
     # Always predict from the most recent row in trading_full. If today's data
