@@ -1297,8 +1297,45 @@ def run_analysis():
 #  CHAMPION MODEL — helpers for fast morning prediction
 # ─────────────────────────────────────────────────────────────────────────────
 
-ENSEMBLE_DIR  = f"{MODELS_DIR}/ensemble"
-ENSEMBLE_META = f"{MODELS_DIR}/ensemble_meta.json"
+ENSEMBLE_DIR     = f"{MODELS_DIR}/ensemble"
+ENSEMBLE_META    = f"{MODELS_DIR}/ensemble_meta.json"
+ENSEMBLE_WEIGHTS = f"{MODELS_DIR}/ensemble_weights.json"
+STACK_META_PKL   = f"{MODELS_DIR}/stack_meta.pkl"
+CALIB_PKL        = f"{MODELS_DIR}/champion_calibrated.pkl"
+
+
+def load_ensemble_weights():
+    """Load optimized ensemble weights from models/ensemble_weights.json. Returns dict or None."""
+    import json as _json
+    if not os.path.exists(ENSEMBLE_WEIGHTS):
+        return None
+    try:
+        with open(ENSEMBLE_WEIGHTS) as f:
+            return _json.load(f)
+    except Exception:
+        return None
+
+
+def load_stack_meta():
+    """Load stacking meta-learner LogReg. Returns model or None."""
+    if not os.path.exists(STACK_META_PKL):
+        return None
+    try:
+        import joblib
+        return joblib.load(STACK_META_PKL)
+    except Exception:
+        return None
+
+
+def load_calibrated_champion():
+    """Load isotonic-calibrated champion. Returns model or None."""
+    if not os.path.exists(CALIB_PKL):
+        return None
+    try:
+        import joblib
+        return joblib.load(CALIB_PKL)
+    except Exception:
+        return None
 
 
 def load_champion():
@@ -1478,16 +1515,24 @@ def predict_today():
     ml_trained = False
     p_call = p_put = 0.5
 
-    # ── Fast path A: ensemble vote (RF + XGB + LGB majority) ─────────────────
-    # Preferred over single champion — reduces per-model variance significantly.
-    # All 3 models predict independently; majority direction wins.
-    # ml_conf = average probability of the models that voted for the winning direction.
+    # ── Fast path A: ensemble vote (with stacking / weights / calibration) ────
+    # Aggregation method (in priority order):
+    #   1. Stacking meta-learner (LogReg trained on OOF model probabilities)
+    #   2. Bayesian-optimized weighted vote (per-model weights from L-BFGS-B)
+    #   3. Equal-weight majority vote (legacy default)
+    # All produce p_call_aggregate. Calibrated champion (if available) generates
+    # the final ml_conf — calibrated probabilities are honest (vs raw which are
+    # overconfident).
     ensemble_members, ensemble_trained_at = load_ensemble()
+    ensemble_weights = load_ensemble_weights()
+    stack_meta       = load_stack_meta()
+    calib_model      = load_calibrated_champion()
 
     if ensemble_members:
-        votes  = []   # direction per model
-        confs  = []   # max(p_call, p_put) per model
+        votes  = []
+        confs  = []
         pcalls = []
+        types  = []
 
         for model, meta in ensemble_members:
             fc     = meta["feature_cols"]
@@ -1501,26 +1546,70 @@ def predict_today():
             votes.append("CALL" if pc >= pp else "PUT")
             confs.append(max(pc, pp))
             pcalls.append(pc)
+            types.append(meta["model_type"])
 
         if votes:
+            n_models = len(votes)
             call_v = votes.count("CALL")
             put_v  = votes.count("PUT")
-            ml_signal = "CALL" if call_v >= put_v else "PUT"
-            # Confidence = average prob from models that agreed with winner
-            agreed_confs = [c for v, c in zip(votes, confs) if v == ml_signal]
-            ml_conf   = sum(agreed_confs) / len(agreed_confs)
-            p_call    = sum(pcalls) / len(pcalls)   # avg across ensemble
+
+            # ── Aggregation method ────────────────────────────────────────────
+            if stack_meta is not None and len(pcalls) >= 2:
+                # Stacking: LogReg expects fixed model order [rf, xgb, lgb, cat]
+                ordered_types = ["rf", "xgb", "lgb", "cat"]
+                pc_by_type    = dict(zip(types, pcalls))
+                # Fill missing types with 0.5 (neutral) — LogReg saw them at train time
+                meta_input = np.array([[pc_by_type.get(t, 0.5) for t in ordered_types]])
+                try:
+                    p_call    = float(stack_meta.predict_proba(meta_input)[0][1])
+                    method    = "stacking"
+                except Exception:
+                    p_call    = sum(pcalls) / n_models
+                    method    = "equal-vote (stack failed)"
+            elif ensemble_weights:
+                weights = np.array([ensemble_weights.get(t, 1.0/n_models) for t in types])
+                weights = weights / weights.sum()
+                p_call  = float((np.array(pcalls) * weights).sum())
+                method  = "weighted"
+            else:
+                p_call  = sum(pcalls) / n_models
+                method  = "equal-vote"
+
             p_put     = 1.0 - p_call
+            ml_signal = "CALL" if p_call >= 0.5 else "PUT"
+            raw_conf  = max(p_call, p_put)
+
+            # ── Calibration: replace raw conf with calibrated probability ─────
+            if calib_model is not None:
+                try:
+                    calib_meta_path = CHAMPION_META
+                    import json as _json
+                    with open(calib_meta_path) as f:
+                        cmeta = _json.load(f)
+                    fc_calib = cmeta["feature_cols"]
+                    X_calib  = get_today_features(fc_calib)
+                    calib_proba = calib_model.predict_proba(X_calib)[0]
+                    calib_classes = list(calib_model.classes_)
+                    pc_calib = float(calib_proba[calib_classes.index(1)]) if 1 in calib_classes else raw_conf
+                    pp_calib = 1.0 - pc_calib
+                    ml_conf  = max(pc_calib, pp_calib)
+                    calib_str = f"  calibrated (raw {raw_conf:.1%})"
+                except Exception as _e:
+                    ml_conf   = raw_conf
+                    calib_str = "  (calib load failed)"
+            else:
+                ml_conf   = raw_conf
+                calib_str = ""
+
             ml_trained = True
             names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB", "cat": "CAT"}
             vote_str = "  ".join(
-                f"{names.get(m[1]['model_type'], '?')}:{v}"
-                for m, v in zip(ensemble_members, votes)
+                f"{names.get(t, '?')}:{v}"
+                for t, v in zip(types, votes)
             )
-            print(f"  Ensemble ({len(votes)} models, trained {(ensemble_trained_at or '')[:10]}):")
-            n_models = len(votes)
+            print(f"  Ensemble ({n_models} models, {method}, trained {(ensemble_trained_at or '')[:10]}):")
             print(f"  {vote_str}  →  {call_v}/{n_models} CALL  {put_v}/{n_models} PUT")
-            print(f"  → {ml_signal}  (avg agreed conf {ml_conf:.1%})")
+            print(f"  → {ml_signal}  (conf {ml_conf:.1%}{calib_str})")
 
     # ── Fast path B: single champion model (fallback if ensemble not ready) ───
     champion_model = None

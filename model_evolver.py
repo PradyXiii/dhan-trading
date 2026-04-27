@@ -1058,7 +1058,8 @@ _MODEL_NAMES = {"rf": "Random Forest", "xgb": "XGBoost", "lgb": "LightGBM", "cat
 
 
 def send_telegram_report(results, champion_meta, today_signal, today_conf,
-                         feature_importances, n_features_total, live_info=None):
+                         feature_importances, n_features_total, live_info=None,
+                         lever_info=None):
     """Send a plain-English Telegram report after nightly training."""
     import notify
 
@@ -1142,6 +1143,32 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         elif n_miss > 0:
             miss_section = f"\n\nMisses: {n_miss} — not enough data yet to identify pattern."
 
+    # ── Lever pipeline status (stacking / calibration / weights / drift) ─────
+    lever_section = ""
+    if lever_info:
+        lines = []
+        if lever_info.get("high_vix_n") is not None:
+            lines.append(f"  • High-fear days penalised: {lever_info['high_vix_n']} rows × {VIX_HIGH_WEIGHT}x")
+        if lever_info.get("stack_score") is not None:
+            lines.append(f"  • Meta-learner score: {lever_info['stack_score']:.3f}")
+        if lever_info.get("calib_ok"):
+            lines.append(f"  • Confidence calibrated (honest probabilities)")
+        if lever_info.get("ensemble_w"):
+            w = lever_info["ensemble_w"]
+            top = sorted(w.items(), key=lambda kv: -kv[1])[:3]
+            top_str = ", ".join(f"{k.upper()} {v:.2f}" for k, v in top)
+            lines.append(f"  • Optimal vote weights: {top_str}")
+            if lever_info.get("weight_score") is not None:
+                lines.append(f"  • Weighted ensemble score: {lever_info['weight_score']:.3f}")
+        if lever_info.get("drift_count") is not None:
+            dc = lever_info["drift_count"]
+            if dc == 0:
+                lines.append(f"  • Drift check: stable (no regime change in holdout)")
+            else:
+                lines.append(f"  • Drift check: {dc} regime-shift point(s) flagged")
+        if lines:
+            lever_section = "\n\nUpgrade pipeline:\n" + "\n".join(lines)
+
     msg = (
         f"Brain trained  |  {date_str}\n\n"
         f"Today's winner: {champ_name}\n"
@@ -1154,6 +1181,7 @@ def send_telegram_report(results, champion_meta, today_signal, today_conf,
         f"\n"
         f"Other engines: {others_str}\n"
         f"Signals used: {n_used} indicators"
+        f"{lever_section}"
         f"{live_section}"
         f"{miss_section}"
     )
@@ -1313,32 +1341,43 @@ def main():
     save_champion(final_model, meta)
     save_ensemble(ensemble_models, ensemble_metas)
 
-    # ── 7b. Stacking meta-learner ─────────────────────────────────────────────
+    # ── 7b-e. Lever pipeline (stacking, calibration, weight optim, drift) ─────
+    lever_info = {
+        "high_vix_n":     high_vix_n,
+        "stack_score":    None,
+        "calib_ok":       False,
+        "ensemble_w":     None,
+        "weight_score":   None,
+        "drift_count":    None,
+    }
     sw_tr = sample_weights[:len(y_tr)]
+
     try:
-        train_stacking_meta(results, X_tr, y_tr, X_val, y_val, sw_tr=sw_tr)
+        _, stack_score = train_stacking_meta(results, X_tr, y_tr, X_val, y_val, sw_tr=sw_tr)
+        lever_info["stack_score"] = stack_score
     except Exception as e:
         print(f"  [stack] Skipped: {e}")
 
-    # ── 7c. Probability calibration ───────────────────────────────────────────
     try:
-        calibrate_champion(final_model, X_val, y_val)
+        calib = calibrate_champion(final_model, X_val, y_val)
+        lever_info["calib_ok"] = calib is not final_model  # True if a real CalibratedCV returned
     except Exception as e:
         print(f"  [calib] Skipped: {e}")
 
-    # ── 7d. Ensemble weight optimization (L-BFGS-B, < 5 sec) ─────────────────
     try:
-        optimize_ensemble_weights(results, X_tr, y_tr, X_val, y_val, sw_tr=sw_tr)
+        w_dict, w_score = optimize_ensemble_weights(results, X_tr, y_tr, X_val, y_val, sw_tr=sw_tr)
+        lever_info["ensemble_w"]   = w_dict
+        lever_info["weight_score"] = w_score
     except Exception as e:
         print(f"  [weights] Skipped: {e}")
 
-    # ── 7e. Concept drift check ───────────────────────────────────────────────
     try:
         val_preds_all = np.array([
             m.predict(X_val) for m in ensemble_models.values()
         ])
         ensemble_val_pred = (val_preds_all.sum(axis=0) >= len(ensemble_models) / 2).astype(int)
-        check_concept_drift(ensemble_val_pred, y_val)
+        drift_pts = check_concept_drift(ensemble_val_pred, y_val)
+        lever_info["drift_count"] = len(drift_pts) if drift_pts is not None else None
     except Exception as e:
         print(f"  [drift] Skipped: {e}")
 
@@ -1400,6 +1439,7 @@ def main():
             feature_importances = feature_importances,
             n_features_total    = len(all_cols_present),
             live_info           = live_info,
+            lever_info          = lever_info,
         )
     except Exception as e:
         print(f"  Telegram report failed: {e}")
