@@ -216,7 +216,28 @@ def build_report() -> str:
     news_today = news_date == datetime.now(_IST).date().isoformat()
 
     # ─── compose Telegram message (HTML parse mode) ──────────────────────────
-    msg = f"""📊 <b>NF System Health — {today_str}</b>
+    # ── Plain-English daily summary (for the marketer-not-coder reader) ──
+    # If P&L is what matters, lead with that. Hide jargon below the fold.
+    lifetime_pnl_str = _fmt_money(pnl_all)
+    last30_pnl_str   = _fmt_money(pnl30)
+    plain_summary = f"""<b>📈 What happened</b>
+  Last 30 days: {n30} trades, won {wr30:.0f}% → {last30_pnl_str}
+  Lifetime:     {n_all} trades, won {wr_all:.0f}% → {lifetime_pnl_str}
+
+<b>🤖 What system is doing today</b>
+  Tomorrow's lean:    {champ_type.upper()} model says {('CALL' if champ_acc else 'thinking')}
+  Confidence:         {_fmt_pct(champ_acc * 100 if champ_acc else None)}
+  Open positions:     {open_n}
+
+<b>✅ Action you need to take today</b>
+  Nothing. System trades automatically at 9:30 AM, watches all day, exits at 3:15 PM.
+  You'll only get a Telegram alert if something needs your attention.
+""" if (wr30 is not None and wr_all is not None) else ""
+
+    msg = plain_summary + f"""
+<b>━━━ Detailed metrics (for reference) ━━━</b>
+
+📊 <b>NF System Health — {today_str}</b>
 
 <b>ML Composite Score</b> (paper experiment baseline)
   Today:      {_fmt_score(today_score)}
