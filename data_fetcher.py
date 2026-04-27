@@ -40,7 +40,15 @@ def _last_csv_date(path):
             df = pd.read_csv(path, usecols=["date"])
             if not df.empty:
                 last = pd.to_datetime(df["date"]).max()
-                return (last + timedelta(days=1)).strftime("%Y-%m-%d")
+                # Advance to the next trading day (skip Sat/Sun). Dhan's
+                # /v2/charts/historical rejects entire chunks with DH-905
+                # when fromDate is a weekend, even when trading days exist
+                # inside the requested range — caused Mon 27 Apr to be
+                # silently dropped because last+1 = Sat 25 Apr.
+                nxt = last + timedelta(days=1)
+                while nxt.weekday() >= 5:   # 5 = Sat, 6 = Sun
+                    nxt = nxt + timedelta(days=1)
+                return nxt.strftime("%Y-%m-%d")
     except Exception:
         pass
     return None
