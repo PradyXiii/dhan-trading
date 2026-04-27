@@ -180,6 +180,33 @@ def build_report() -> str:
         d = e.get("description", "—")
         return d[:70] + "…" if len(d) > 70 else d
 
+    # 6. Lever pipeline status (artifacts on disk = lever active)
+    stack_meta_exists  = (_MODELS / "stack_meta.pkl").exists()
+    calib_exists       = (_MODELS / "champion_calibrated.pkl").exists()
+    weights_path       = _MODELS / "ensemble_weights.json"
+    weights_dict       = _read_json(weights_path, {}) or {}
+    drift_status       = "stable" if (_MODELS / "drift_log.txt").exists() else "monitoring"
+
+    # Top 3 weighted models
+    top_weights = ""
+    if weights_dict:
+        sorted_w = sorted(weights_dict.items(), key=lambda kv: -kv[1])[:3]
+        top_weights = ", ".join(f"{k.upper()} {v:.2f}" for k, v in sorted_w)
+
+    # 7. Recent commits (last 3) — show what's been added to the system
+    recent_commits = []
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "log", "--oneline", "-3", "--no-decorate"],
+            cwd=_HERE, capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            recent_commits = [line.strip() for line in out.stdout.strip().split("\n") if line.strip()]
+    except Exception:
+        pass
+    commits_str = "\n".join(f"  {c[:80]}" for c in recent_commits) if recent_commits else "  (none)"
+
     # ─── compose Telegram message (HTML parse mode) ──────────────────────────
     msg = f"""📊 <b>NF System Health — {today_str}</b>
 
@@ -193,6 +220,12 @@ def build_report() -> str:
   Accuracy: {_fmt_pct(champ_acc * 100 if champ_acc else None)}
   Features: {champ_n} selected of {total_features} total
 
+<b>Upgrade Pipeline (lever artifacts on disk)</b>
+  Stacking meta-learner: {'active' if stack_meta_exists else 'missing'}
+  Calibrated champion:   {'active' if calib_exists else 'missing'}
+  Optimized weights:     {top_weights if top_weights else 'missing'}
+  Drift detection:       {drift_status}
+
 <b>Live Trades</b> (closed positions only)
   Last 5:   {_fmt_pct(wr5)}  ({n5} closed)
   Last 30:  {_fmt_pct(wr30)} ({n30} closed, {_fmt_money(pnl30)})
@@ -204,6 +237,9 @@ def build_report() -> str:
   Features discarded: {disc_30d}
   Last kept:      {_exp_desc(last_kept)}
   Last discarded: {_exp_desc(last_disc)}
+
+<b>Recent code changes (last 3 commits)</b>
+{commits_str}
 
 <b>Verdict:</b> {verdict}"""
 
