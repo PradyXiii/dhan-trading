@@ -1696,7 +1696,14 @@ def main():
             confs.append(max(pc, pp))
         call_v = votes.count("CALL")
         put_v  = votes.count("PUT")
-        today_signal = "CALL" if call_v >= put_v else "PUT"
+        # Strict majority: a tie is genuinely uncertain — emit NONE (already
+        # handled downstream) rather than silently biasing toward CALL.
+        if call_v > put_v:
+            today_signal = "CALL"
+        elif put_v > call_v:
+            today_signal = "PUT"
+        else:
+            today_signal = "NONE"
         agreed_confs = [c for v, c in zip(votes, confs) if v == today_signal]
         today_conf   = sum(agreed_confs) / len(agreed_confs) if agreed_confs else 0.5
         n_models = len(votes)
