@@ -188,7 +188,7 @@ def build_report() -> str:
   7-day avg:  {_fmt_score(avg7)}{_trend_arrow(today_score, avg7)}
   30-day avg: {_fmt_score(avg30)}{_trend_arrow(today_score, avg30)}
 
-<b>Champion Model</b> (predicts tomorrow's signal)
+<b>Champion Model</b> (predicts today's signal)
   Type:     {champ_type}
   Accuracy: {_fmt_pct(champ_acc * 100 if champ_acc else None)}
   Features: {champ_n} selected of {total_features} total
