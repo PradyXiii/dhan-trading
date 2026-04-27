@@ -91,17 +91,60 @@ def _save_json(path: Path, data):
     path.write_text(json.dumps(data, indent=2, default=str))
 
 
+# Reasons that mean "this evaluation failed; retry next run" — don't bury in archive
+_RETRYABLE_REASONS = ("error", "chunk error", "no match", "no api key", "api error")
+
+
+def _is_retryable_failure(item: dict) -> bool:
+    """True if a stored item was a failed eval (score=0 + error reason). These should
+    not block re-evaluation in future runs."""
+    if int(item.get("score", 0) or 0) > 0:
+        return False
+    reason = str(item.get("reason", "")).lower()
+    return any(r in reason for r in _RETRYABLE_REASONS)
+
+
 def _already_seen(name: str) -> bool:
+    """True if name has been EVALUATED CLEANLY (success or genuine reject) before.
+    Failed-API attempts are NOT considered seen — they should retry."""
     discoveries = _load_json(SCOUT_DISCOVERIES, [])
     queue       = _load_json(SCOUT_QUEUE, [])
-    seen_names  = {d.get("name", "").lower() for d in discoveries + queue}
-    return name.lower() in seen_names
+    nm = name.lower()
+    for d in discoveries + queue:
+        if d.get("name", "").lower() != nm:
+            continue
+        if _is_retryable_failure(d):
+            continue   # failed eval — let it retry
+        return True
+    return False
 
 
 def _archive(item: dict):
+    """Archive a candidate. Failed evals (api error etc.) are skipped — we want
+    them retried on next run."""
+    if _is_retryable_failure(item):
+        return  # don't pollute discoveries with errors
     discoveries = _load_json(SCOUT_DISCOVERIES, [])
     discoveries.append(item)
     _save_json(SCOUT_DISCOVERIES, discoveries)
+
+
+def _purge_failed_evals():
+    """One-shot cleanup: remove score=0+error entries from discoveries.json so they
+    can be re-evaluated next run."""
+    discoveries = _load_json(SCOUT_DISCOVERIES, [])
+    if not discoveries:
+        print("  scout_discoveries.json empty or missing — nothing to purge")
+        return
+    before = len(discoveries)
+    cleaned = [d for d in discoveries if not _is_retryable_failure(d)]
+    after = len(cleaned)
+    removed = before - after
+    if removed > 0:
+        _save_json(SCOUT_DISCOVERIES, cleaned)
+        print(f"  purged {removed} failed-eval entries (kept {after} clean evaluations)")
+    else:
+        print(f"  no failed-eval entries to purge ({before} entries all clean)")
 
 
 def _enqueue(item: dict):
@@ -495,7 +538,12 @@ def main():
     parser.add_argument("--sources", default="github,pypi",
                         help="Comma-separated sources (default: github,pypi). "
                              "Available: github, github_topics, pypi")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="Purge prior failed-API entries from discoveries.json, then run normally")
     args = parser.parse_args()
+    if args.retry_failed:
+        print("=== Purging failed evals from scout_discoveries.json ===")
+        _purge_failed_evals()
     sources = [s.strip() for s in args.sources.split(",")]
     run_scout(sources=sources, dry_run=args.dry_run)
 
