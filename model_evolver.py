@@ -324,6 +324,54 @@ def _score(y_true, y_pred, y_prob):
     return 0.50 * acc + 0.25 * rec_call + 0.25 * rec_put
 
 
+class TabNetWrapper:
+    """sklearn-compatible wrapper around TabNetClassifier — adds .classes_ attribute,
+    converts inputs to float32, ignores sample_weight (TabNet uses class weights).
+    Picklable via joblib for ensemble persistence.
+    """
+    def __init__(self, n_d=16, n_a=16, n_steps=3, lr=0.02, max_epochs=50,
+                 patience=10, batch_size=128, **_extra):
+        self.n_d = n_d
+        self.n_a = n_a
+        self.n_steps = n_steps
+        self.lr = lr
+        self.max_epochs = max_epochs
+        self.patience = patience
+        self.batch_size = batch_size
+        self._model = None
+        self.classes_ = None
+
+    def fit(self, X, y, sample_weight=None):
+        from pytorch_tabnet.tab_model import TabNetClassifier
+        import torch as _torch
+        _torch.set_num_threads(2)
+
+        self._model = TabNetClassifier(
+            n_d=self.n_d, n_a=self.n_a, n_steps=self.n_steps,
+            optimizer_params=dict(lr=self.lr),
+            seed=42, device_name="cpu", verbose=0,
+        )
+        X32 = np.asarray(X, dtype="float32")
+        y_int = np.asarray(y, dtype="int64")
+        # Hold out 15% of train for TabNet's internal early-stopping eval
+        eval_n = max(1, int(len(X32) * 0.15))
+        self._model.fit(
+            X32[:-eval_n], y_int[:-eval_n],
+            eval_set=[(X32[-eval_n:], y_int[-eval_n:])],
+            max_epochs=self.max_epochs, patience=self.patience,
+            batch_size=self.batch_size, num_workers=0, drop_last=False,
+            weights=1,  # auto inverse class frequency (proxy for class_weight=balanced)
+        )
+        self.classes_ = np.array([0, 1])
+        return self
+
+    def predict(self, X):
+        return self._model.predict(np.asarray(X, dtype="float32"))
+
+    def predict_proba(self, X):
+        return self._model.predict_proba(np.asarray(X, dtype="float32"))
+
+
 def _build_model(model_type, params):
     if model_type == "rf":
         from sklearn.ensemble import RandomForestClassifier
@@ -344,6 +392,8 @@ def _build_model(model_type, params):
         return CatBoostClassifier(
             **params, auto_class_weights="Balanced", random_seed=42,
             thread_count=-1, verbose=0)
+    elif model_type == "tabnet":
+        return TabNetWrapper(**params)
     raise ValueError(f"Unknown model_type: {model_type}")
 
 
@@ -685,9 +735,23 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
             "l2_leaf_reg":     trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
             "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 1.0),
         }
+    elif model_type == "tabnet":
+        params = {
+            "n_d":         trial.suggest_int("n_d", 8, 32, step=8),
+            "n_a":         trial.suggest_int("n_a", 8, 32, step=8),
+            "n_steps":     trial.suggest_int("n_steps", 3, 5),
+            "lr":          trial.suggest_float("lr", 0.005, 0.05, log=True),
+            "max_epochs":  20,   # HPO: small epochs for speed; champion refit uses 50
+            "patience":    5,
+            "batch_size":  128,
+        }
 
     model = _build_model(model_type, params)
-    model.fit(X_tr, y_tr, sample_weight=sw_tr)
+    # TabNet ignores sample_weight (uses class weights internally via weights=1)
+    if model_type == "tabnet":
+        model.fit(X_tr, y_tr)
+    else:
+        model.fit(X_tr, y_tr, sample_weight=sw_tr)
     y_pred = model.predict(X_val)
     y_prob = model.predict_proba(X_val)[:, list(model.classes_).index(1)] \
              if 1 in model.classes_ else np.zeros(len(y_val))
@@ -695,7 +759,7 @@ def _optuna_objective(trial, model_type, X_tr, y_tr, X_val, y_val, sw_tr=None):
 
 
 # Final champion refit uses these full n_estimators (only ONE fit, not N_TRIALS)
-_CHAMPION_N_ESTIMATORS = {"rf": 400, "xgb": 300, "lgb": 300, "cat": 500}
+_CHAMPION_N_ESTIMATORS = {"rf": 400, "xgb": 300, "lgb": 300, "cat": 500, "tabnet": 50}
 
 
 def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
@@ -722,9 +786,11 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
           + ("  +live-feedback" if sample_weight is not None else ""))
 
     results = []
-    for mtype in ["rf", "xgb", "lgb", "cat"]:
+    for mtype in ["rf", "xgb", "lgb", "cat", "tabnet"]:
 
-        print(f"\n  [{mtype.upper()}] Running {n_trials} Optuna trials...")
+        # TabNet uses fewer Optuna trials (slower per-trial: 30-60s each)
+        n_trials_for = max(8, n_trials // 3) if mtype == "tabnet" else n_trials
+        print(f"\n  [{mtype.upper()}] Running {n_trials_for} Optuna trials...")
 
         try:
             # Quick import check before spinning up Optuna trials
@@ -733,6 +799,9 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
             elif mtype == "cat":
                 _build_model(mtype, {"iterations": 10, "depth": 2, "learning_rate": 0.1,
                                      "l2_leaf_reg": 1.0, "bagging_temperature": 0.5})
+            elif mtype == "tabnet":
+                # Confirm pytorch-tabnet is importable before launching trials
+                from pytorch_tabnet.tab_model import TabNetClassifier  # noqa: F401
             else:
                 _build_model(mtype, {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1,
                                      "subsample": 0.8, "colsample_bytree": 0.8,
@@ -749,7 +818,7 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
         try:
             study.optimize(
                 lambda trial: _optuna_objective(trial, mtype, X_tr, y_tr, X_val, y_val, sw_tr),
-                n_trials=n_trials,
+                n_trials=n_trials_for,
                 show_progress_bar=False,
             )
         except Exception as e:
@@ -823,8 +892,11 @@ def train_stacking_meta(results, X_tr, y_tr, X_val, y_val, sw_tr=None):
     for i, r in enumerate(results):
         for train_idx, val_idx in tscv.split(X_tr):
             m = _build_model(r["model_type"], r["params"])
-            m.fit(X_tr[train_idx], y_tr[train_idx],
-                  sample_weight=sw_tr[train_idx] if sw_tr is not None else None)
+            if r["model_type"] == "tabnet":
+                m.fit(X_tr[train_idx], y_tr[train_idx])   # ignores sample_weight
+            else:
+                m.fit(X_tr[train_idx], y_tr[train_idx],
+                      sample_weight=sw_tr[train_idx] if sw_tr is not None else None)
             classes  = list(m.classes_)
             call_idx = classes.index(1) if 1 in classes else 0
             oof_probs[val_idx, i] = m.predict_proba(X_tr[val_idx])[:, call_idx]
@@ -837,7 +909,10 @@ def train_stacking_meta(results, X_tr, y_tr, X_val, y_val, sw_tr=None):
     val_probs = np.zeros((len(X_val), n_models))
     for i, r in enumerate(results):
         m = _build_model(r["model_type"], r["params"])
-        m.fit(X_tr, y_tr, sample_weight=sw_tr)
+        if r["model_type"] == "tabnet":
+            m.fit(X_tr, y_tr)
+        else:
+            m.fit(X_tr, y_tr, sample_weight=sw_tr)
         classes  = list(m.classes_)
         call_idx = classes.index(1) if 1 in classes else 0
         val_probs[:, i] = m.predict_proba(X_val)[:, call_idx]
@@ -897,7 +972,10 @@ def optimize_ensemble_weights(results, X_tr, y_tr, X_val, y_val, sw_tr=None):
     model_probs = []
     for r in results:
         m = _build_model(r["model_type"], r["params"])
-        m.fit(X_tr, y_tr, sample_weight=sw_tr)
+        if r["model_type"] == "tabnet":
+            m.fit(X_tr, y_tr)
+        else:
+            m.fit(X_tr, y_tr, sample_weight=sw_tr)
         classes  = list(m.classes_)
         call_idx = classes.index(1) if 1 in classes else 0
         model_probs.append(m.predict_proba(X_val)[:, call_idx])
@@ -972,11 +1050,17 @@ def train_champion(champion_meta, X_all, y_all, sample_weight=None):
         full_n = _CHAMPION_N_ESTIMATORS.get(mtype, 500)
         params.pop("n_estimators", None)
         params["iterations"] = full_n
+    elif mtype == "tabnet":
+        params["max_epochs"] = _CHAMPION_N_ESTIMATORS.get("tabnet", 50)
+        params["patience"]   = 10
     else:
         full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
         params["n_estimators"] = full_n
     model = _build_model(mtype, params)
-    model.fit(X_all, y_all, sample_weight=sample_weight)
+    if mtype == "tabnet":
+        model.fit(X_all, y_all)   # TabNet ignores sample_weight
+    else:
+        model.fit(X_all, y_all, sample_weight=sample_weight)
     return model
 
 
@@ -1304,11 +1388,17 @@ def main():
             full_n = _CHAMPION_N_ESTIMATORS.get(mtype, 500)
             params.pop("n_estimators", None)
             params["iterations"] = full_n
+        elif mtype == "tabnet":
+            params["max_epochs"] = _CHAMPION_N_ESTIMATORS.get("tabnet", 50)
+            params["patience"]   = 10
         else:
             full_n = _CHAMPION_N_ESTIMATORS.get(mtype, params.get("n_estimators", 300))
             params["n_estimators"] = full_n
         m = _build_model(mtype, params)
-        m.fit(X_aug, y_aug, sample_weight=sw)
+        if mtype == "tabnet":
+            m.fit(X_aug, y_aug)   # TabNet ignores sample_weight
+        else:
+            m.fit(X_aug, y_aug, sample_weight=sw)
         ensemble_models[mtype] = m
         ensemble_metas[mtype]  = {
             "model_type":   mtype,

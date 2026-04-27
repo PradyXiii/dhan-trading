@@ -86,6 +86,17 @@ def _build_all_models() -> list[tuple]:
         random_state=42, n_jobs=-1,
     ), "RandomForest"))
 
+    try:
+        from model_evolver import TabNetWrapper
+        # Confirm pytorch-tabnet is importable before adding to ensemble
+        from pytorch_tabnet.tab_model import TabNetClassifier  # noqa: F401
+        models.append((TabNetWrapper(
+            n_d=16, n_a=16, n_steps=3, lr=0.02,
+            max_epochs=30, patience=8, batch_size=128,
+        ), "TabNet"))
+    except ImportError:
+        pass
+
     return models
 
 

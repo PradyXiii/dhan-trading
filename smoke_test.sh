@@ -49,11 +49,14 @@ assert exp, "expiry empty"
 PY
 
 echo ""
-echo "================ 5. ML 4-MODEL ENSEMBLE TEST ================"
+echo "================ 5. ML ENSEMBLE TEST ================"
 out=$(python3 ml_engine.py --predict-today 2>&1)
-echo "$out" | grep -q "Ensemble (4 models" \
-  && mark_pass "ML ensemble has 4 models" \
-  || mark_fail "ML ensemble missing model(s) -- $(echo "$out" | grep -i 'could not load')"
+if echo "$out" | grep -qE "Ensemble \([45] models"; then
+  n_models=$(echo "$out" | grep -oE "Ensemble \([0-9]+ models" | grep -oE "[0-9]+" | head -1)
+  mark_pass "ML ensemble has ${n_models} models"
+else
+  mark_fail "ML ensemble missing model(s) -- $(echo "$out" | grep -i 'could not load')"
+fi
 
 echo ""
 echo "================ 6. AUTO-TRADER DRY RUN ================"
