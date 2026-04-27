@@ -1218,14 +1218,47 @@ CHAMPION_PKL  = f"{MODELS_DIR}/champion.pkl"
 CHAMPION_META = f"{MODELS_DIR}/champion_meta.json"
 
 
+def _load_existing_champion_meta():
+    try:
+        with open(CHAMPION_META) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def save_champion(model, meta):
+    # Gate: only overwrite champion.pkl if the new candidate's score is at least
+    # as good as the existing champion's. Cross-day scores aren't strictly
+    # apples-to-apples (validation windows differ), so this is a soft ratchet —
+    # but it prevents the previous behaviour where every run unconditionally
+    # replaced the champion, making model quality a random walk.
     import joblib
     os.makedirs(MODELS_DIR, exist_ok=True)
+
+    existing = _load_existing_champion_meta()
+    if existing is not None and "score" in existing:
+        old_score = float(existing["score"])
+        new_score = float(meta.get("score", float("-inf")))
+        if new_score < old_score:
+            print(
+                f"\n  [GATE] new score={new_score:.4f} < existing score={old_score:.4f}"
+            )
+            print(
+                f"  [GATE] keeping existing champion "
+                f"({existing.get('model_type','?')}, trained {existing.get('trained_at','?')})"
+            )
+            print(f"  [GATE] champion.pkl NOT overwritten")
+            return False
+        print(
+            f"\n  [GATE] new score={new_score:.4f} >= existing score={old_score:.4f} — promoting"
+        )
+
     joblib.dump(model, CHAMPION_PKL)
     with open(CHAMPION_META, "w") as f:
         json.dump(meta, f, indent=2)
     print(f"\n  Saved: {CHAMPION_PKL}")
     print(f"  Saved: {CHAMPION_META}")
+    return True
 
 
 ENSEMBLE_DIR  = f"{MODELS_DIR}/ensemble"
