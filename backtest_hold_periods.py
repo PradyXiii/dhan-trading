@@ -47,15 +47,10 @@ def get_nf_expiry(d):
         return d + timedelta(days=days_ahead)
 
 def get_nf_dte(d):
-    """Calendar days to NF expiry (min 0.25 for intraday on expiry day).
-
-    Previously returned `days + 1` which inflated DTE by one calendar day on
-    every non-expiry day and made the 0.25 floor unreachable. Now returns
-    `days` with the 0.25 floor active on expiry day (days == 0).
-    """
+    """Calendar days to NF expiry (min 0.25 for intraday on expiry day)."""
     expiry = get_nf_expiry(d)
     days = (expiry - (d.date() if isinstance(d, pd.Timestamp) else d)).days
-    return max(0.25, float(days))
+    return max(0.25, float(days) + 1)
 
 def get_nf_lot_size(d):
     """NF lot size: 75 before Jan 6 2026, 65 from that date."""
