@@ -57,7 +57,9 @@ def send(message: str, silent: bool = False) -> bool:
     as evidence of a Telegram outage.
     """
     timestamp = datetime.now(_IST).strftime("%H:%M:%S IST")
-    print(f"[{timestamp}] {_strip_html(message)[:400]}")
+    # Stdout echo cap — Telegram itself receives the full message (4096 char limit).
+    # Cap stdout to keep cron logs readable while still showing full lever pipeline output.
+    print(f"[{timestamp}] {_strip_html(message)[:2000]}")
 
     if silent:
         return True   # console-only; do not send to Telegram
