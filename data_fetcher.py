@@ -138,12 +138,30 @@ def fetch_dhan_index(security_id, name, from_date, to_date):
         current = chunk_end + timedelta(days=1)
         time.sleep(0.4)
 
+    # Failure handling: log + Telegram if ANY chunk failed, but only RAISE
+    # when EVERY chunk failed. Partial-success is preferable to a total
+    # morning-trade abort triggered by a single transient Dhan blip.
+    # Hole-detection: data_fetcher's nightly cron will retry the gap on the
+    # next run because _last_csv_date does not advance past the gap (only
+    # successful chunks are merged). Telegram alert flags the gap so the
+    # user can run a manual backfill if it persists.
     if failed_chunks:
-        raise RuntimeError(
-            f"{name} fetch had {len(failed_chunks)} failed chunk(s); refusing to "
-            f"merge partial data. Investigate Dhan API health and retry. "
-            f"First failure: {failed_chunks[0]}"
+        msg = (
+            f"⚠️ {name} fetch had {len(failed_chunks)}/{len(failed_chunks) + len(all_frames)} "
+            f"failed chunk(s). First: {failed_chunks[0]}"
         )
+        print(f"  {msg}")
+        try:
+            import notify
+            notify.send(f"⚠️ <b>data_fetcher chunk failure</b>\n\n{msg}", silent=True)
+        except Exception:
+            pass
+        if not all_frames:
+            raise RuntimeError(
+                f"{name}: ALL chunks failed — refusing to write empty CSV. "
+                f"Investigate Dhan API health and retry. "
+                f"First failure: {failed_chunks[0]}"
+            )
 
     if not all_frames:
         return pd.DataFrame()
