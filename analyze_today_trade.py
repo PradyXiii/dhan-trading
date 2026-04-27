@@ -33,7 +33,7 @@ import auto_trader as AT
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 HEADERS = {
-    "access-token": os.getenv("DHAN_TOKEN", ""),
+    "access-token": os.getenv("DHAN_ACCESS_TOKEN", ""),
     "client-id":    os.getenv("DHAN_CLIENT_ID", ""),
     "Content-Type": "application/json",
     "Accept":       "application/json",
