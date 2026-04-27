@@ -1,0 +1,48 @@
+#!/bin/bash
+# pre-commit — blocks any commit containing credentials.
+# Install with: git config core.hooksPath .githooks
+#
+# Patterns blocked:
+#   - DHAN_ACCESS_TOKEN, TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY (with values)
+#   - sk-ant-* / sk-* style API keys
+#   - PEM private keys
+#
+# Excludes .env files (gitignored anyway).
+
+set -e
+
+PATTERNS='(DHAN_ACCESS_TOKEN\s*=\s*['\''"]*[A-Za-z0-9._-]{20,})|(TELEGRAM_BOT_TOKEN\s*=\s*['\''"]*[0-9]+:[A-Za-z0-9_-]{30,})|(ANTHROPIC_API_KEY\s*=\s*['\''"]*sk-ant-[A-Za-z0-9_-]{30,})|(sk-ant-api[0-9]+-[A-Za-z0-9_-]{50,})|(-----BEGIN.+PRIVATE KEY-----)'
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR | grep -v '^\.env$' || true)
+
+if [ -z "$STAGED" ]; then
+  exit 0
+fi
+
+HITS=""
+for f in $STAGED; do
+  if [ -f "$f" ]; then
+    if grep -nE "$PATTERNS" "$f" > /dev/null 2>&1; then
+      HITS="$HITS\n$f: $(grep -nE "$PATTERNS" "$f" | head -3)"
+    fi
+  fi
+done
+
+if [ -n "$HITS" ]; then
+  echo "BLOCKED: credentials detected in staged files."
+  echo -e "$HITS"
+  echo ""
+  echo "Remove the credentials and try again. Add the file to .gitignore if it's a config file."
+  exit 1
+fi
+
+# Also block any data/ file (P&L, backtest results, trade history)
+DATA_HITS=$(echo "$STAGED" | grep '^data/' || true)
+if [ -n "$DATA_HITS" ]; then
+  echo "BLOCKED: data/ files staged (private trade data should never be committed)."
+  echo "$DATA_HITS"
+  echo "Run: git reset HEAD data/"
+  exit 1
+fi
+
+exit 0
