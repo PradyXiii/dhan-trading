@@ -794,9 +794,8 @@ def compute_features(df):
     # ── HMM Market Regime (hidden state probabilities) ───────────────────────
     # 3-state Gaussian HMM on [nf_ret1, vix_pct_chg].
     # States sorted by mean nf_ret: bear / neutral / bull.
-    # Previously used predict_proba (forward-backward SMOOTHED posteriors) — those
-    # use observations from t+1..T and leak future info into walk-forward folds.
-    # Fix: forward-only filter posteriors P(state_t | x_0..x_t) via _do_forward_pass.
+    # Forward-only filter posteriors P(state_t | x_0..x_t) — no future leak.
+    # Manual numpy forward pass (hmmlearn private API not stable across versions).
     if _HMM_OK:
         _hmm_obs = np.column_stack([
             pd.to_numeric(d["nf_ret1"],    errors="coerce").fillna(0).values,
@@ -806,23 +805,29 @@ def compute_features(df):
             _hmm_model = _GaussianHMM(n_components=3, covariance_type="full",
                                       n_iter=200, random_state=42)
             _hmm_model.fit(_hmm_obs)
-            # Forward-only posteriors: log_alpha[t,k] = log P(x_0..x_t, s_t=k)
-            _log_b = _hmm_model._compute_log_likelihood(_hmm_obs)
-            try:
-                _, _log_alpha = _hmm_model._do_forward_pass(_log_b)
-            except (TypeError, ValueError):
-                # hmmlearn API variant: returns (log_prob, log_alpha) or just log_alpha
-                _log_alpha = _hmm_model._do_forward_pass(_log_b)[1]
             from scipy.special import logsumexp as _lse
+            _log_b  = _hmm_model._compute_log_likelihood(_hmm_obs)
+            with np.errstate(divide="ignore"):
+                _log_pi = np.log(_hmm_model.startprob_ + 1e-12)
+                _log_A  = np.log(_hmm_model.transmat_  + 1e-12)
+            _T, _K = _log_b.shape
+            _log_alpha = np.full((_T, _K), -np.inf)
+            _log_alpha[0] = _log_pi + _log_b[0]
+            for _t in range(1, _T):
+                # log_alpha[t, j] = logsumexp_i(log_alpha[t-1, i] + log_A[i, j]) + log_b[t, j]
+                _log_alpha[_t] = _lse(_log_alpha[_t - 1][:, None] + _log_A, axis=0) + _log_b[_t]
             _norm = _lse(_log_alpha, axis=1, keepdims=True)
             _regime_probs = np.exp(_log_alpha - _norm)
+            if np.any(np.isnan(_regime_probs)):
+                raise ValueError("forward filter produced NaN posteriors")
             _state_means  = [_hmm_model.means_[_s][0] for _s in range(3)]
             _sorted_states = np.argsort(_state_means)
             _bear_idx, _neutral_idx, _bull_idx = _sorted_states
             d["hmm_bull_prob"]    = pd.Series(_regime_probs[:, _bull_idx],    index=d.index).shift(1).fillna(0.33)
             d["hmm_neutral_prob"] = pd.Series(_regime_probs[:, _neutral_idx], index=d.index).shift(1).fillna(0.33)
             d["hmm_bear_prob"]    = pd.Series(_regime_probs[:, _bear_idx],    index=d.index).shift(1).fillna(0.33)
-        except Exception:
+        except Exception as _hmm_err:
+            print(f"  [HMM] forward-filter failed: {_hmm_err} — falling back to constant 0.33")
             d["hmm_bull_prob"] = d["hmm_neutral_prob"] = d["hmm_bear_prob"] = 0.33
     else:
         d["hmm_bull_prob"] = d["hmm_neutral_prob"] = d["hmm_bear_prob"] = 0.33
