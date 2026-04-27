@@ -747,6 +747,31 @@ def compute_features(df):
     # All features above are already computed. Adding code here means you can safely
     # reference ANY column that exists earlier in this function without KeyError.
 
+    # ── Temporal lag features (2 and 3-day lookback) ──────────────────────────
+    # nf_ret1 and vix_level are already shift(1). Shifting again = 2/3-day lookback.
+    # Captures multi-day momentum and mean-reversion patterns.
+    d["nf_ret_lag2"] = pd.to_numeric(d["nf_ret1"],  errors="coerce").shift(1).fillna(0.0)
+    d["nf_ret_lag3"] = pd.to_numeric(d["nf_ret1"],  errors="coerce").shift(2).fillna(0.0)
+    d["vix_lag2"]    = pd.to_numeric(d["vix_level"], errors="coerce").shift(1).fillna(0.0)
+
+    # ── S&P500 vs NF 20-day rolling correlation ───────────────────────────────
+    # Both sp500_chg and nf_ret1 are already shift(1). Rolling corr of those
+    # = trailing 20-day correlation of returns. Breakdowns signal regime change.
+    _sp_corr = pd.to_numeric(d["sp500_chg"], errors="coerce")
+    _nf_corr = pd.to_numeric(d["nf_ret1"],  errors="coerce")
+    d["sp_nf_corr20"] = _sp_corr.rolling(20, min_periods=10).corr(_nf_corr).fillna(0.0)
+
+    # ── Net GEX magnitude z-score (from OI surface, delta-weighted) ───────────
+    # Approximates net dealer gamma exposure: Σ(CE_OI × delta) - Σ(PE_OI × delta).
+    # Large positive = ranging regime (dealers buy dips). Large negative = trending.
+    # Uses _ce_oi / _pe_oi (already shift(1)) computed in the OI surface block above.
+    _gex_delta_w = np.array([0.20, 0.30, 0.42, 0.50, 0.42, 0.30, 0.20])
+    _ce_gex_raw  = pd.Series((_ce_oi.values * _gex_delta_w).sum(axis=1), index=d.index)
+    _pe_gex_raw  = pd.Series((_pe_oi.values * _gex_delta_w).sum(axis=1), index=d.index)
+    _net_gex_raw = _ce_gex_raw - _pe_gex_raw
+    _gex_roll_std = _net_gex_raw.rolling(60, min_periods=10).std().replace(0, np.nan)
+    d["net_gex_zscore"] = (_net_gex_raw / _gex_roll_std).fillna(0.0)
+
     # Hurst Exponent (hurst_exp_63) tested Apr 2026: 0.000 importance — dropped.
     # 63-day rolling + shift(1) made it too slow-moving to add signal. Kept code
     # commented in git history (commit e425490) in case future regime warrants retest.
@@ -871,6 +896,14 @@ FEATURE_COLS = [
     "hmm_neutral_prob",   # HMM 3-state: P(neutral regime)
     "hmm_bear_prob",      # HMM 3-state: P(bear regime)
     "nf_kalman_trend",    # Kalman-filtered daily return — noise-reduced trend signal
+    # Temporal lag features (Apr 2026) — multi-day momentum/reversal patterns
+    "nf_ret_lag2",    # NF return 2 days ago — short-term reversal / continuation
+    "nf_ret_lag3",    # NF return 3 days ago — 3-day momentum context
+    "vix_lag2",       # VIX level 2 days ago — fear persistence signal
+    # Cross-asset correlation regime (Apr 2026)
+    "sp_nf_corr20",   # 20-day rolling S&P vs NF return correlation — decoupling signal
+    # Net GEX magnitude (Apr 2026) — delta-weighted dealer gamma exposure
+    "net_gex_zscore", # z-scored net GEX from OI surface — ranging vs trending regime
 ]
 
 

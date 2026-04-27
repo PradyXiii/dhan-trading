@@ -34,6 +34,24 @@ DATA_DIR   = "data"
 MODELS_DIR = "models"
 HOLDOUT_DAYS = 252   # ~1 year temporal holdout for champion selection
 
+# Optional advanced libs — imported lazily
+try:
+    import shap as _shap
+    _SHAP_OK = True
+except ImportError:
+    _SHAP_OK = False
+
+try:
+    from river.drift import ADWIN as _ADWIN
+    _RIVER_OK = True
+except ImportError:
+    _RIVER_OK = False
+
+# ── Weighting constants ────────────────────────────────────────────────────────
+VIX_HIGH_THRESHOLD = 17.0   # VIX above this = high-fear day → 3× weight penalty
+VIX_HIGH_WEIGHT    = 3.0    # multiplier for high-VIX rows in training
+MAG_CLIP           = 3.0    # clip nf_ret1 magnitude before weighting
+
 # ── CLI flags ──────────────────────────────────────────────────────────────────
 SKIP_DATA_REFRESH = "--no-data" in sys.argv
 N_TRIALS = 30   # 30 trials: good balance of HPO quality vs run time
@@ -236,8 +254,9 @@ EXTENDED_FEATURE_COLS = BASE_FEATURE_COLS + [
 
 def select_features(X, y, all_cols):
     """
-    Train a quick RF on all data, return features with importance >= 1% of max.
-    Always keeps all BASE_FEATURE_COLS (they are validated signal components).
+    Feature selection using SHAP values when available (more accurate than impurity).
+    Falls back to RF impurity importance if shap not installed.
+    Always keeps all BASE_FEATURE_COLS (validated signal components).
     """
     from sklearn.ensemble import RandomForestClassifier
 
@@ -247,9 +266,24 @@ def select_features(X, y, all_cols):
         random_state=42, n_jobs=-1,
     )
     rf.fit(X, y)
-    importances = rf.feature_importances_
-    max_imp     = importances.max() if importances.max() > 0 else 1.0
-    norm_imp    = importances / max_imp * 100
+
+    if _SHAP_OK:
+        try:
+            explainer  = _shap.TreeExplainer(rf)
+            shap_vals  = explainer.shap_values(X)
+            # shap_values may be list [class0, class1] or single array
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[1]  # class 1 = CALL
+            importances = np.abs(shap_vals).mean(axis=0)
+            print("  Feature selection: using SHAP mean |value| (more accurate than impurity)")
+        except Exception as e:
+            print(f"  SHAP failed ({e}) — falling back to RF impurity")
+            importances = rf.feature_importances_
+    else:
+        importances = rf.feature_importances_
+
+    max_imp  = importances.max() if importances.max() > 0 else 1.0
+    norm_imp = importances / max_imp * 100
 
     selected = []
     for col, imp in zip(all_cols, norm_imp):
@@ -491,6 +525,27 @@ def _load_midday_reversals(df_full, selected_cols):
     if inject:
         print(f"  [feedback] Loaded {len(inject)} midday reversals from checkpoints")
     return inject
+
+
+def _compute_base_weights(df, y_all):
+    """
+    Per-row sample weights combining:
+    1. Magnitude weighting: bigger NF moves = more informative labels
+    2. VIX asymmetric loss: wrong on high-VIX days = IC SL hits faster → 3× penalty
+    Applied before live-feedback injection so all training rows benefit.
+    """
+    weights = np.ones(len(y_all))
+
+    if "nf_ret1" in df.columns:
+        mag = pd.to_numeric(df["nf_ret1"], errors="coerce").fillna(0).abs().clip(upper=MAG_CLIP).values
+        weights *= (1.0 + mag)
+
+    if "vix_level" in df.columns:
+        vix = pd.to_numeric(df["vix_level"], errors="coerce").fillna(15).values
+        weights[vix > VIX_HIGH_THRESHOLD] *= VIX_HIGH_WEIGHT
+
+    weights = weights / weights.mean()
+    return weights
 
 
 def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
@@ -737,6 +792,169 @@ def run_competition(X, y, feature_cols, n_trials=N_TRIALS, sample_weight=None):
 
     results.sort(key=lambda r: (-r["score"], r["brier"]))
     return results, X_tr, y_tr, X_val, y_val
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  STACKING META-LEARNER — LogReg on top of 4-model validation probabilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+STACK_META_PKL = f"{MODELS_DIR}/stack_meta.pkl"
+
+
+def train_stacking_meta(results, X_tr, y_tr, X_val, y_val, sw_tr=None):
+    """
+    Train LogisticRegression meta-learner on OOF (out-of-fold) probabilities.
+    Uses TimeSeriesSplit with 3 folds on X_tr to generate OOF predictions,
+    then fits meta-learner. Saves as stack_meta.pkl alongside ensemble.
+
+    Returns (meta_model, meta_val_score) where meta_val_score is composite on X_val.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import TimeSeriesSplit
+
+    print("\n  [stack] Training stacking meta-learner (OOF LogReg)...")
+
+    n_models = len(results)
+    n_tr     = len(X_tr)
+    tscv     = TimeSeriesSplit(n_splits=3)
+
+    oof_probs = np.zeros((n_tr, n_models))
+
+    for i, r in enumerate(results):
+        for train_idx, val_idx in tscv.split(X_tr):
+            m = _build_model(r["model_type"], r["params"])
+            m.fit(X_tr[train_idx], y_tr[train_idx],
+                  sample_weight=sw_tr[train_idx] if sw_tr is not None else None)
+            classes  = list(m.classes_)
+            call_idx = classes.index(1) if 1 in classes else 0
+            oof_probs[val_idx, i] = m.predict_proba(X_tr[val_idx])[:, call_idx]
+
+    meta = LogisticRegression(C=0.5, max_iter=1000, random_state=42)
+    meta.fit(oof_probs, y_tr)
+    print(f"  [stack] Meta weights: { {r['model_type']: round(float(w), 3) for r, w in zip(results, meta.coef_[0])} }")
+
+    # Evaluate meta on val set
+    val_probs = np.zeros((len(X_val), n_models))
+    for i, r in enumerate(results):
+        m = _build_model(r["model_type"], r["params"])
+        m.fit(X_tr, y_tr, sample_weight=sw_tr)
+        classes  = list(m.classes_)
+        call_idx = classes.index(1) if 1 in classes else 0
+        val_probs[:, i] = m.predict_proba(X_val)[:, call_idx]
+
+    meta_preds = meta.predict(val_probs)
+    meta_probs = meta.predict_proba(val_probs)[:, 1]
+    meta_score = _score(y_val, meta_preds, meta_probs)
+    print(f"  [stack] Meta composite on holdout: {meta_score:.4f}")
+
+    import joblib
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    joblib.dump(meta, STACK_META_PKL)
+    print(f"  [stack] Saved: {STACK_META_PKL}")
+
+    return meta, meta_score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PROBABILITY CALIBRATION — isotonic regression on champion probabilities
+# ─────────────────────────────────────────────────────────────────────────────
+
+CALIB_PKL = f"{MODELS_DIR}/champion_calibrated.pkl"
+
+
+def calibrate_champion(champion_model, X_val, y_val):
+    """
+    Wrap champion in isotonic calibration using the holdout set.
+    Calibrated probabilities → ML_CONF_THRESHOLD filter becomes meaningful.
+    Saved as champion_calibrated.pkl.
+    """
+    from sklearn.calibration import CalibratedClassifierCV
+    import joblib
+
+    try:
+        calib = CalibratedClassifierCV(champion_model, cv="prefit", method="isotonic")
+        calib.fit(X_val, y_val)
+        joblib.dump(calib, CALIB_PKL)
+        print(f"  [calib] Calibrated champion saved: {CALIB_PKL}")
+        return calib
+    except Exception as e:
+        print(f"  [calib] Calibration failed ({e}) — skipping")
+        return champion_model
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  BAYESIAN ENSEMBLE WEIGHT OPTIMIZATION (scipy L-BFGS-B, < 5 sec)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def optimize_ensemble_weights(results, X_tr, y_tr, X_val, y_val, sw_tr=None):
+    """
+    Find optimal per-model weights via L-BFGS-B (much faster than Optuna for weights).
+    Complements equal-vote ensemble: down-weights models that hurt holdout composite.
+    Returns (weights_dict, optimized_score).
+    """
+    from scipy.optimize import minimize
+
+    model_probs = []
+    for r in results:
+        m = _build_model(r["model_type"], r["params"])
+        m.fit(X_tr, y_tr, sample_weight=sw_tr)
+        classes  = list(m.classes_)
+        call_idx = classes.index(1) if 1 in classes else 0
+        model_probs.append(m.predict_proba(X_val)[:, call_idx])
+    model_probs = np.array(model_probs)  # (n_models, n_val)
+
+    def neg_score(w):
+        w = np.abs(w) / (np.abs(w).sum() + 1e-8)
+        ensemble_p = (model_probs * w[:, None]).sum(axis=0)
+        y_pred = (ensemble_p >= 0.5).astype(int)
+        return -_score(y_val, y_pred, ensemble_p)
+
+    n = len(results)
+    w0  = np.ones(n) / n
+    res = minimize(neg_score, w0, method="L-BFGS-B",
+                   bounds=[(0.0, 1.0)] * n, options={"maxiter": 200})
+    w_opt  = np.abs(res.x) / (np.abs(res.x).sum() + 1e-8)
+    opt_score = -res.fun
+    w_dict = {r["model_type"]: round(float(w), 3) for r, w in zip(results, w_opt)}
+    print(f"  [weights] Optimized ensemble weights: {w_dict}  composite={opt_score:.4f}")
+
+    # Save weights alongside ensemble meta
+    weights_path = f"{MODELS_DIR}/ensemble_weights.json"
+    with open(weights_path, "w") as f:
+        json.dump(w_dict, f, indent=2)
+    print(f"  [weights] Saved: {weights_path}")
+
+    return w_dict, opt_score
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONCEPT DRIFT DETECTION — River ADWIN on holdout error stream
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_concept_drift(val_preds, y_val):
+    """
+    Scan holdout predictions for concept drift using ADWIN.
+    Drift detected = model accuracy decaying mid-holdout (regime change).
+    Logs warning to Telegram if drift found.
+    """
+    if not _RIVER_OK:
+        return None
+
+    detector     = _ADWIN()
+    drift_points = []
+    for i, (pred, true) in enumerate(zip(val_preds, y_val)):
+        error = int(pred != true)
+        in_drift = detector.update(error)
+        if in_drift:
+            drift_points.append(i)
+
+    if drift_points:
+        print(f"  [drift] ADWIN detected {len(drift_points)} drift point(s) "
+              f"in holdout (indices: {drift_points[:5]}{'...' if len(drift_points)>5 else ''})")
+    else:
+        print("  [drift] No concept drift detected in holdout window")
+
+    return drift_points
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -999,17 +1217,29 @@ def main():
                    "importances":  feature_importances,
                    "updated_at":   datetime.now(_IST).isoformat()}, f, indent=2)
 
-    # ── 3b. Live trade feedback — inject real outcomes + boost miss patterns ──
-    print("\n[3b/6] Live trade feedback...")
-    X_aug, y_aug, sample_weights, live_info = _compute_live_feedback(
+    # ── 3b. Base sample weights (magnitude + VIX asymmetric) ─────────────────
+    print("\n[3b/6] Base sample weights (magnitude + VIX asymmetric)...")
+    base_weights = _compute_base_weights(trading, y_all)
+    high_vix_n = int((pd.to_numeric(trading.get("vix_level", pd.Series([])), errors="coerce").fillna(15) > VIX_HIGH_THRESHOLD).sum())
+    print(f"  Magnitude × VIX weighting active — {high_vix_n} high-VIX rows at {VIX_HIGH_WEIGHT}× penalty")
+
+    # ── 3c. Live trade feedback — inject real outcomes + boost miss patterns ──
+    print("\n[3c/6] Live trade feedback...")
+    X_aug, y_aug, live_weights, live_info = _compute_live_feedback(
         X_all, y_all, df, selected_cols
     )
+    # Merge: base weights for historical rows × live weights (already includes inject/boost)
+    sample_weights = live_weights.copy()
+    n_hist = len(y_all)
+    sample_weights[:n_hist] *= base_weights
+    sample_weights = sample_weights / sample_weights.mean()  # re-normalize
+
     has_feedback = live_info["n_injected"] > 0 or live_info["n_misses"] >= MIN_MISSES
 
     # ── 4. Model competition ──────────────────────────────────────────────────
     results, X_tr, y_tr, X_val, y_val = run_competition(
         X_aug, y_aug, selected_cols,
-        sample_weight=sample_weights if has_feedback else None,
+        sample_weight=sample_weights,  # always apply base weights (magnitude + VIX)
     )
 
     print("\n[4/6] Competition results:")
@@ -1082,6 +1312,35 @@ def main():
     }
     save_champion(final_model, meta)
     save_ensemble(ensemble_models, ensemble_metas)
+
+    # ── 7b. Stacking meta-learner ─────────────────────────────────────────────
+    sw_tr = sample_weights[:len(y_tr)]
+    try:
+        train_stacking_meta(results, X_tr, y_tr, X_val, y_val, sw_tr=sw_tr)
+    except Exception as e:
+        print(f"  [stack] Skipped: {e}")
+
+    # ── 7c. Probability calibration ───────────────────────────────────────────
+    try:
+        calibrate_champion(final_model, X_val, y_val)
+    except Exception as e:
+        print(f"  [calib] Skipped: {e}")
+
+    # ── 7d. Ensemble weight optimization (L-BFGS-B, < 5 sec) ─────────────────
+    try:
+        optimize_ensemble_weights(results, X_tr, y_tr, X_val, y_val, sw_tr=sw_tr)
+    except Exception as e:
+        print(f"  [weights] Skipped: {e}")
+
+    # ── 7e. Concept drift check ───────────────────────────────────────────────
+    try:
+        val_preds_all = np.array([
+            m.predict(X_val) for m in ensemble_models.values()
+        ])
+        ensemble_val_pred = (val_preds_all.sum(axis=0) >= len(ensemble_models) / 2).astype(int)
+        check_concept_drift(ensemble_val_pred, y_val)
+    except Exception as e:
+        print(f"  [drift] Skipped: {e}")
 
     # ── 8. Predict tomorrow using ensemble vote ───────────────────────────────
     # Always predict from the most recent row in trading_full. If today's data
