@@ -110,6 +110,20 @@ def _fmt_pct(v):    return f"{v:.1f}%" if v is not None else "—"
 def _fmt_money(v):  return f"₹{v:,.0f}" if v is not None else "—"
 
 
+def _today_signal() -> str:
+    """Read last row of signals_ml.csv (or signals.csv fallback) → today's
+    signal. Returns 'CALL' / 'PUT' / 'NONE' / 'thinking' if unreadable."""
+    for fname in ("signals_ml.csv", "signals.csv"):
+        path = _DATA / fname
+        rows = _read_csv(path)
+        if not rows:
+            continue
+        sig = (rows[-1].get("signal") or "").strip().upper()
+        if sig in ("CALL", "PUT", "NONE"):
+            return sig
+    return "thinking"
+
+
 # ─── main report builder ─────────────────────────────────────────────────────
 
 def build_report() -> str:
@@ -225,7 +239,7 @@ def build_report() -> str:
   Lifetime:     {n_all} trades, won {wr_all:.0f}% → {lifetime_pnl_str}
 
 <b>🤖 What system is doing today</b>
-  Tomorrow's lean:    {champ_type.upper()} model says {('CALL' if champ_acc else 'thinking')}
+  Tomorrow's lean:    {champ_type.upper()} model says {_today_signal()}
   Confidence:         {_fmt_pct(champ_acc * 100 if champ_acc else None)}
   Open positions:     {open_n}
 

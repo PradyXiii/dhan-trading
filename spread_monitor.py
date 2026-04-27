@@ -142,19 +142,43 @@ def _get_ltps(security_ids: list) -> dict:
 
 # ── Primary exit: DELETE /v2/positions ───────────────────────────────────────
 
-def _exit_all_api() -> bool:
+def _verify_all_positions_closed(sids: list[str], settle_secs: int = 3) -> bool:
+    """Re-fetch /v2/positions and confirm every supplied security_id has netQty=0.
+    Returns True only when every leg is verifiably flat."""
+    try:
+        time.sleep(settle_secs)
+        positions = dhan_journal.get_positions() or []
+        sid_set = {str(s) for s in sids if s}
+        live = {str(p.get("securityId")): int(p.get("netQty", 0) or 0) for p in positions}
+        for sid in sid_set:
+            if abs(live.get(sid, 0)) != 0:
+                notify.log(f"VERIFY FAIL: sid={sid} netQty={live.get(sid)} still open")
+                return False
+        return True
+    except Exception as e:
+        notify.log(f"VERIFY positions exception: {e}")
+        return False
+
+
+def _exit_all_api(verify_sids: list[str] | None = None) -> bool:
     """
     Primary exit: DELETE /v2/positions — one call closes all open positions.
-    Returns True on SUCCESS; False means fall back to leg-by-leg functions.
+    Returns True ONLY when SUCCESS AND every supplied leg sid verified netQty=0.
+    Returns False → caller falls back to leg-by-leg.
     """
     try:
         resp = requests.delete("https://api.dhan.co/v2/positions",
                                headers=HEADERS, timeout=15)
         data = resp.json()
-        if data.get("status") == "SUCCESS":
-            notify.log(f"EXIT ALL via DELETE /v2/positions: {data.get('message', '')}")
+        if data.get("status") != "SUCCESS":
+            notify.log(f"EXIT ALL API non-SUCCESS {resp.status_code}: {data}")
+            return False
+        notify.log(f"EXIT ALL via DELETE /v2/positions: {data.get('message', '')}")
+        if not verify_sids:
             return True
-        notify.log(f"EXIT ALL API non-SUCCESS {resp.status_code}: {data}")
+        if _verify_all_positions_closed(verify_sids):
+            return True
+        notify.log("EXIT ALL got SUCCESS but verify failed — falling back to leg-by-leg")
         return False
     except Exception as e:
         notify.log(f"EXIT ALL API exception: {e}")
@@ -181,14 +205,28 @@ def _backup_close_failed(close_result: dict) -> bool:
 
 def _dhan_realized_total(sids: list, settle_secs: int = 5) -> float | None:
     """After a real square-off, pull realizedProfit from Dhan /v2/positions for
-    the given securityIds and return the sum. Single source of truth for booked
-    P&L (matches trade_journal at 3:30 PM and the EOD Telegram). Returns None
-    if the API call fails or no SIDs were found — caller falls back to formula.
+    the given securityIds and return the sum. Returns None when:
+      - API call fails
+      - none of the supplied SIDs are present in the positions response
+        (pre-settlement: Dhan returns empty/zero before broker books fills)
+    A genuine 0.0 is returned only when SIDs match AND every leg has settled
+    realizedProfit recorded. Caller falls back to formula PnL on None.
     """
     try:
         time.sleep(settle_secs)
         positions = dhan_journal.get_positions() or []
-        return float(dhan_journal.realized_pnl(positions, [str(s) for s in sids]))
+        by_sid = dhan_journal.positions_by_sid(positions)
+        sid_strs = [str(s) for s in sids if s]
+        matched = [s for s in sid_strs if s in by_sid]
+        if not matched:
+            return None
+        # If any matched leg still has dayBuyQty != daySellQty (open contracts)
+        # treat as pre-settlement → return None.
+        for sid in matched:
+            p = by_sid.get(sid, {})
+            if int(p.get("netQty", 0) or 0) != 0:
+                return None
+        return float(dhan_journal.realized_pnl(positions, sid_strs))
     except Exception as e:
         notify.log(f"Realized-P&L re-fetch failed: {e}")
         return None
@@ -456,7 +494,7 @@ def main():
         reason = "SL"
 
         if not paper:
-            if not _exit_all_api():                    # primary: one DELETE call
+            if not _exit_all_api([ce_short_sid, ce_long_sid, pe_short_sid, pe_long_sid]):
                 close_result = _close_ic(intent)       # backup: leg-by-leg
                 notify.log(f"IC exit backup ({reason}) — {close_result}")
                 if _backup_close_failed(close_result):
@@ -551,7 +589,7 @@ def main():
         reason = "SL"
 
         if not paper:
-            if not _exit_all_api():                                                    # primary
+            if not _exit_all_api([ce_sid, pe_sid]):                                    # primary
                 close_result = _close_straddle(intent, ce_ltp=ce_ltp, pe_ltp=pe_ltp)  # backup
                 notify.log(f"Straddle exit backup ({reason}) — {close_result}")
                 if _backup_close_failed(close_result):
@@ -634,8 +672,8 @@ def main():
     reason = "SL" if hit_sl else "TP"
 
     if not paper:
-        if not _exit_all_api():                    # primary: one DELETE call
-            close_result = _close_spread(intent)   # backup: leg-by-leg
+        if not _exit_all_api([short_sid, long_sid]):   # primary: one DELETE call
+            close_result = _close_spread(intent)        # backup: leg-by-leg
             notify.log(f"Spread exit backup ({reason}) — {close_result}")
             if _backup_close_failed(close_result):
                 notify.send(

@@ -2950,7 +2950,7 @@ def main():
             try:
                 with open(f"{DATA_DIR}/today_trade.json") as _ttj:
                     ttj = json.load(_ttj)
-                if (ttj.get("date") == datetime.now(_IST).date().isoformat()
+                if (ttj.get("date") == datetime.now(_IST_TZ).date().isoformat()
                         and ttj.get("strategy") == "nf_iron_condor"
                         and not ttj.get("exit_done", False)):
                     notify.send(
@@ -2959,7 +2959,7 @@ def main():
                         f"Skipping to avoid double exposure."
                     )
                     return
-            except Exception:
+            except (FileNotFoundError, json.JSONDecodeError):
                 pass
 
         # Place IC

@@ -582,33 +582,46 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
     miss_drivers = []
     sample_weights = np.ones(len(X_all))
 
-    # ── Step 1: inject live rows ──────────────────────────────────────────────
+    # CRITICAL: live-feedback rows must be injected INTO the training portion only.
+    # Previously they were appended to the tail of X_aug, then _temporal_split
+    # took the last HOLDOUT_DAYS rows as the validation holdout — meaning the
+    # holdout contained the very rows the model had just been trained on with
+    # 10× weight. Score was inflated by leakage.
+    #
+    # Fix: insert injected rows at index `holdout_start = len(X_all) - HOLDOUT_DAYS`,
+    # so the last HOLDOUT_DAYS rows of X_aug remain a pristine historical holdout.
+    holdout_start = max(0, len(X_all) - HOLDOUT_DAYS)
+    X_train_hist  = X_all[:holdout_start]
+    X_holdout     = X_all[holdout_start:]
+    y_train_hist  = y_all[:holdout_start]
+    y_holdout     = y_all[holdout_start:]
+    sw_train_hist = sample_weights[:holdout_start]
+    sw_holdout    = sample_weights[holdout_start:]
+
+    # ── Step 1: inject live rows into TRAINING portion only ───────────────────
     if inject_rows:
         X_inject = np.array([r[0] for r in inject_rows])
         y_inject = np.array([r[1] for r in inject_rows])
-        X_aug = np.vstack([X_all, X_inject])
-        y_aug = np.concatenate([y_all, y_inject])
-        # Live rows get high weight; historical rows keep 1.0 for now
-        sample_weights = np.concatenate([
-            sample_weights,
+        X_train_hist  = np.vstack([X_train_hist, X_inject])
+        y_train_hist  = np.concatenate([y_train_hist, y_inject])
+        sw_train_hist = np.concatenate([
+            sw_train_hist,
             np.full(len(inject_rows), LIVE_INJECT_WEIGHT)
         ])
-        print(f"  [feedback] Injected {len(inject_rows)} of {n_labeled} labeled trades (weight={LIVE_INJECT_WEIGHT}×)")
+        print(f"  [feedback] Injected {len(inject_rows)} of {n_labeled} labeled trades into TRAIN (weight={LIVE_INJECT_WEIGHT}×, holdout untouched)")
     else:
-        X_aug = X_all.copy()
-        y_aug = y_all.copy()
         if n_labeled >= MIN_LIVE_TRADES:
             print(f"  [feedback] {n_labeled} labeled trades found but 0 joined df_full (trade dates not yet in feature data — will activate tomorrow)")
 
-    # ── Step 2: inject midday reversal rows ───────────────────────────────────
+    # ── Step 2: inject midday reversal rows into TRAINING portion only ────────
     midday_rows = _load_midday_reversals(df_full, selected_cols)
     if midday_rows:
         X_mid = np.array([r[0] for r in midday_rows])
         y_mid = np.array([r[1] for r in midday_rows])
-        X_aug = np.vstack([X_aug, X_mid])
-        y_aug = np.concatenate([y_aug, y_mid])
-        sample_weights = np.concatenate([
-            sample_weights,
+        X_train_hist  = np.vstack([X_train_hist, X_mid])
+        y_train_hist  = np.concatenate([y_train_hist, y_mid])
+        sw_train_hist = np.concatenate([
+            sw_train_hist,
             np.full(len(midday_rows), MIDDAY_MISS_WEIGHT),
         ])
         # Also fold into X_misses so miss-driver analysis sees them
@@ -616,19 +629,25 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
                     if X_misses is not None and X_misses.size
                     else X_mid)
         n_misses += len(midday_rows)
-        print(f"  [feedback] Injected {len(midday_rows)} midday reversals (weight={MIDDAY_MISS_WEIGHT}×)")
+        print(f"  [feedback] Injected {len(midday_rows)} midday reversals into TRAIN (weight={MIDDAY_MISS_WEIGHT}×)")
 
-    # ── Step 3: boost historical rows matching miss patterns ──────────────────
+    # Reassemble: train portion (historical + injected) followed by clean holdout.
+    X_aug          = np.vstack([X_train_hist, X_holdout]) if len(X_train_hist) else X_holdout
+    y_aug          = np.concatenate([y_train_hist, y_holdout])
+    sample_weights = np.concatenate([sw_train_hist, sw_holdout])
+
+    # ── Step 3: boost historical TRAINING rows matching miss patterns ─────────
+    # Boost only the pure-historical training segment ([0:holdout_start]).
+    # Skip injected rows (already at LIVE_INJECT_WEIGHT) and holdout (clean).
     if n_misses >= MIN_MISSES and X_misses is not None:
         miss_drivers = _identify_miss_drivers(X_misses, X_hits, selected_cols)
 
         if miss_drivers:
-            n_hist = len(X_all)
             for col, direction, effect, miss_mean, hit_mean in miss_drivers:
                 if col not in selected_cols:
                     continue
                 idx      = selected_cols.index(col)
-                col_vals = X_aug[:n_hist, idx]
+                col_vals = X_aug[:holdout_start, idx]
                 col_mean = col_vals.mean()
                 col_std  = col_vals.std() + 1e-8
 
@@ -639,10 +658,9 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
                     threshold = col_mean - 0.5 * col_std
                     mask = col_vals <= threshold
 
-                sample_weights[:n_hist][mask] *= MISS_BOOST
+                sample_weights[:holdout_start][mask] *= MISS_BOOST
 
             # Re-normalise so total weight stays consistent with dataset size
-            n_total = len(X_aug)
             sample_weights = sample_weights / sample_weights.mean()
 
             print(f"  [feedback] Miss pattern boost ({MISS_BOOST}×) on {len(miss_drivers)} drivers:")
@@ -650,11 +668,14 @@ def _compute_live_feedback(X_all, y_all, df_full, selected_cols):
                 label = _FEATURE_LABELS.get(col, col)
                 print(f"    {label}: {direction} on miss days (effect={effect:.2f})")
 
+    n_injected_total = (len(X_aug) - len(X_all)) if len(X_aug) > len(X_all) else 0
     live_info = dict(
-        n_labeled    = n_labeled,
-        n_misses     = n_misses,
-        n_hits       = n_labeled - n_misses,
-        n_injected   = len(inject_rows),
+        n_labeled        = n_labeled,
+        n_misses         = n_misses,
+        n_hits           = n_labeled - n_misses,
+        n_injected       = len(inject_rows),
+        n_injected_total = n_injected_total,
+        holdout_start    = holdout_start,
         miss_drivers = miss_drivers,
     )
 
@@ -1528,10 +1549,17 @@ def main():
     X_aug, y_aug, live_weights, live_info = _compute_live_feedback(
         X_all, y_all, df, selected_cols
     )
-    # Merge: base weights for historical rows × live weights (already includes inject/boost)
+    # Merge: base weights apply ONLY to historical rows (train + holdout segments).
+    # Layout of X_aug after fix: [hist_train | injected | hist_holdout].
+    # base_weights length = len(X_all) = hist_train + hist_holdout.
     sample_weights = live_weights.copy()
-    n_hist = len(y_all)
-    sample_weights[:n_hist] *= base_weights
+    holdout_start    = live_info["holdout_start"]
+    n_injected_total = live_info["n_injected_total"]
+    # Historical training segment
+    sample_weights[:holdout_start] *= base_weights[:holdout_start]
+    # Historical holdout segment (last HOLDOUT_DAYS rows of X_aug)
+    if holdout_start < len(base_weights):
+        sample_weights[holdout_start + n_injected_total:] *= base_weights[holdout_start:]
     sample_weights = sample_weights / sample_weights.mean()  # re-normalize
 
     has_feedback = live_info["n_injected"] > 0 or live_info["n_misses"] >= MIN_MISSES

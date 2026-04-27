@@ -65,7 +65,10 @@ def send(message: str, silent: bool = False) -> bool:
         return True   # console-only; do not send to Telegram
 
     if not _BOT_TOKEN or not _CHAT_ID:
-        return True   # Telegram not configured — silent no-op
+        # Telegram creds missing → log the failure (so health_ping can see it)
+        # and return False so callers can detect that the alert never left the box.
+        _write_alert_log(f"[CREDS MISSING — alert not sent]\n{message}")
+        return False
 
     is_critical = any(m in message for m in _CRITICAL_MARKERS)
 

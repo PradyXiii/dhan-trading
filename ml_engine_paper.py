@@ -1461,13 +1461,38 @@ def predict_today():
     """
     from datetime import date as _date, datetime as _datetime, timezone as _tz, timedelta as _td
     import os as _os
+    import json as _json
+    import joblib as _joblib
 
-    _IST_TZ   = _tz(timedelta(hours=5, minutes=30))
+    _IST_TZ   = _tz(_td(hours=5, minutes=30))
     today_dt  = _datetime.now(_IST_TZ).date()
     today_ts  = pd.Timestamp(today_dt)
     signals_ml_path = f"{DATA_DIR}/signals_ml.csv"
 
-    print(f"ML predict-today: {today_dt} ...")
+    print(f"ML predict-today (paper): {today_dt} ...")
+
+    # GUARD: when running predict_today from the paper module, the on-disk
+    # champion was likely trained from a different FEATURE_COLS list than
+    # what compute_features() in this file produces. Loading it would silently
+    # zero-fill missing columns and produce wrong predictions. Compare and
+    # abort fast on mismatch.
+    _champ_meta_path = f"{MODELS_DIR}/champion_meta.json"
+    if _os.path.exists(_champ_meta_path):
+        try:
+            with open(_champ_meta_path) as _f:
+                _meta = _json.load(_f)
+            _champ_cols = set(_meta.get("feature_cols") or [])
+            _paper_cols = set(FEATURE_COLS)
+            if _champ_cols and _champ_cols != _paper_cols:
+                _missing  = sorted(_champ_cols - _paper_cols)
+                _extra    = sorted(_paper_cols - _champ_cols)
+                print(f"  ❌ FEATURE_COLS mismatch (paper vs champion):")
+                if _missing: print(f"     champion has {len(_missing)} cols paper lacks: {_missing[:6]}...")
+                if _extra:   print(f"     paper has {len(_extra)} cols champion lacks: {_extra[:6]}...")
+                print(f"  Refusing to load champion. Run model_evolver.py with this paper module first.")
+                return
+        except (OSError, _json.JSONDecodeError):
+            pass
 
     # ── Determine rule-based signal for today (always needed for fallback) ────
     raw     = load_all_data()

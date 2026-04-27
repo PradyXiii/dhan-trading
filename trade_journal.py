@@ -261,11 +261,22 @@ def _journal_stats():
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pick(dhan_val, fallback) -> float:
+    """Prefer Dhan-reported leg average; fall back ONLY when Dhan didn't return
+    the leg at all (key missing → None). A genuine 0.0 from Dhan (filled at 0,
+    or absent fill on one wing) is preserved — never silently flipped to the
+    stale intent value. The previous `dhan or fallback` idiom masked real
+    zeros and produced rows with synthetic prices not traceable to /v2/positions.
+    """
+    return float(dhan_val) if dhan_val is not None else float(fallback)
+
+
 def _upsert_csv_row(csv_path: str, fields: list, row: dict):
     """
     Upsert by date: if a row with the same `date` already exists, REPLACE it;
-    otherwise APPEND. Lets us re-run the journal after exit_positions to
-    upgrade an OPEN row to a closed row without creating duplicates.
+    otherwise APPEND. Atomic on POSIX: writes to tmpfile then os.replace().
+    A crash mid-write leaves the original file untouched; concurrent writers
+    are serialised by the kernel rename.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
     today = row.get("date")
@@ -273,14 +284,20 @@ def _upsert_csv_row(csv_path: str, fields: list, row: dict):
     if os.path.exists(csv_path):
         with open(csv_path, newline="") as f:
             rows = list(csv.DictReader(f))
-    # Drop existing same-date row (if any), keep the rest, append the new one
     rows = [r for r in rows if r.get("date") != today]
     rows.append(row)
-    with open(csv_path, "w", newline="") as f:
+    tmp_path = csv_path + ".tmp"
+    with open(tmp_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+    os.replace(tmp_path, csv_path)
 
 
 def _append_spread_row(row: dict):
@@ -322,15 +339,16 @@ def _journal_ic(intent: dict, today_label: str):
 
     dhan_has_data = any([ce_short_leg, ce_long_leg, pe_short_leg, pe_long_leg])
 
-    # Entry/exit prices: prefer Dhan averages; fall back to intent values
-    ce_short_entry = ce_short_leg.get("sell_avg") or float(intent.get("ce_short_entry", 0))
-    ce_long_entry  = ce_long_leg.get("buy_avg")   or float(intent.get("ce_long_entry",  0))
-    pe_short_entry = pe_short_leg.get("sell_avg") or float(intent.get("pe_short_entry", 0))
-    pe_long_entry  = pe_long_leg.get("buy_avg")   or float(intent.get("pe_long_entry",  0))
-    ce_short_exit  = ce_short_leg.get("buy_avg")  or float(intent.get("ce_short_exit", 0))
-    ce_long_exit   = ce_long_leg.get("sell_avg")  or float(intent.get("ce_long_exit",  0))
-    pe_short_exit  = pe_short_leg.get("buy_avg")  or float(intent.get("pe_short_exit", 0))
-    pe_long_exit   = pe_long_leg.get("sell_avg")  or float(intent.get("pe_long_exit",  0))
+    # Entry/exit prices: prefer Dhan averages (preserve genuine 0.0); fall back
+    # to intent only when Dhan didn't return that leg.
+    ce_short_entry = _pick(ce_short_leg.get("sell_avg"), intent.get("ce_short_entry", 0))
+    ce_long_entry  = _pick(ce_long_leg.get("buy_avg"),   intent.get("ce_long_entry",  0))
+    pe_short_entry = _pick(pe_short_leg.get("sell_avg"), intent.get("pe_short_entry", 0))
+    pe_long_entry  = _pick(pe_long_leg.get("buy_avg"),   intent.get("pe_long_entry",  0))
+    ce_short_exit  = _pick(ce_short_leg.get("buy_avg"),  intent.get("ce_short_exit", 0))
+    ce_long_exit   = _pick(ce_long_leg.get("sell_avg"),  intent.get("ce_long_exit",  0))
+    pe_short_exit  = _pick(pe_short_leg.get("buy_avg"),  intent.get("pe_short_exit", 0))
+    pe_long_exit   = _pick(pe_long_leg.get("sell_avg"),  intent.get("pe_long_exit",  0))
     ce_net_credit  = float(intent.get("ce_credit", 0))
     pe_net_credit  = float(intent.get("pe_credit", 0))
 
@@ -476,10 +494,10 @@ def _journal_spread(intent: dict, today_label: str):
     long_leg  = _dhan_leg_avgs(positions, long_sid)  if long_sid  else {}
     dhan_has_data = bool(short_leg or long_leg)
 
-    short_entry = short_leg.get("sell_avg") or float(intent.get("short_entry", 0))
-    long_entry  = long_leg.get("buy_avg")   or float(intent.get("long_entry",  0))
-    short_exit  = short_leg.get("buy_avg")  or float(intent.get("exit_short_ltp", 0))
-    long_exit   = long_leg.get("sell_avg")  or float(intent.get("exit_long_ltp", 0))
+    short_entry = _pick(short_leg.get("sell_avg"), intent.get("short_entry", 0))
+    long_entry  = _pick(long_leg.get("buy_avg"),   intent.get("long_entry",  0))
+    short_exit  = _pick(short_leg.get("buy_avg"),  intent.get("exit_short_ltp", 0))
+    long_exit   = _pick(long_leg.get("sell_avg"),  intent.get("exit_long_ltp", 0))
     exit_spread = round(short_exit - long_exit, 2) if (short_exit or long_exit) else float(intent.get("exit_spread", 0))
 
     # P&L = realizedProfit on both legs (Dhan-booked, not estimated)
@@ -588,10 +606,10 @@ def _journal_straddle(intent: dict, today_label: str):
     pe_leg    = _dhan_leg_avgs(positions, pe_sid) if pe_sid else {}
     dhan_has_data = bool(ce_leg or pe_leg)
 
-    ce_entry  = ce_leg.get("sell_avg") or float(intent.get("ce_entry", intent.get("ce_ltp", 0)))
-    pe_entry  = pe_leg.get("sell_avg") or float(intent.get("pe_entry", intent.get("pe_ltp", 0)))
-    ce_exit   = ce_leg.get("buy_avg")  or 0.0
-    pe_exit   = pe_leg.get("buy_avg")  or 0.0
+    ce_entry  = _pick(ce_leg.get("sell_avg"), intent.get("ce_entry", intent.get("ce_ltp", 0)))
+    pe_entry  = _pick(pe_leg.get("sell_avg"), intent.get("pe_entry", intent.get("pe_ltp", 0)))
+    ce_exit   = _pick(ce_leg.get("buy_avg"),  0.0)
+    pe_exit   = _pick(pe_leg.get("buy_avg"),  0.0)
     net_credit = float(intent.get("net_credit", ce_entry + pe_entry))
     exit_cost  = round(ce_exit + pe_exit, 2) if (ce_exit or pe_exit) else float(intent.get("exit_spread", intent.get("exit_cost", 0)))
 

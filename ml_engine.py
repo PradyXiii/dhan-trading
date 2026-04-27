@@ -793,7 +793,10 @@ def compute_features(df):
 
     # ── HMM Market Regime (hidden state probabilities) ───────────────────────
     # 3-state Gaussian HMM on [nf_ret1, vix_pct_chg].
-    # States sorted by mean nf_ret: bear / neutral / bull
+    # States sorted by mean nf_ret: bear / neutral / bull.
+    # Previously used predict_proba (forward-backward SMOOTHED posteriors) — those
+    # use observations from t+1..T and leak future info into walk-forward folds.
+    # Fix: forward-only filter posteriors P(state_t | x_0..x_t) via _do_forward_pass.
     if _HMM_OK:
         _hmm_obs = np.column_stack([
             pd.to_numeric(d["nf_ret1"],    errors="coerce").fillna(0).values,
@@ -803,7 +806,16 @@ def compute_features(df):
             _hmm_model = _GaussianHMM(n_components=3, covariance_type="full",
                                       n_iter=200, random_state=42)
             _hmm_model.fit(_hmm_obs)
-            _regime_probs = _hmm_model.predict_proba(_hmm_obs)
+            # Forward-only posteriors: log_alpha[t,k] = log P(x_0..x_t, s_t=k)
+            _log_b = _hmm_model._compute_log_likelihood(_hmm_obs)
+            try:
+                _, _log_alpha = _hmm_model._do_forward_pass(_log_b)
+            except (TypeError, ValueError):
+                # hmmlearn API variant: returns (log_prob, log_alpha) or just log_alpha
+                _log_alpha = _hmm_model._do_forward_pass(_log_b)[1]
+            from scipy.special import logsumexp as _lse
+            _norm = _lse(_log_alpha, axis=1, keepdims=True)
+            _regime_probs = np.exp(_log_alpha - _norm)
             _state_means  = [_hmm_model.means_[_s][0] for _s in range(3)]
             _sorted_states = np.argsort(_state_means)
             _bear_idx, _neutral_idx, _bull_idx = _sorted_states
@@ -816,7 +828,9 @@ def compute_features(df):
         d["hmm_bull_prob"] = d["hmm_neutral_prob"] = d["hmm_bear_prob"] = 0.33
 
     # ── Kalman-filtered return trend ─────────────────────────────────────────
-    # Noise-reduced version of nf_ret1 — cleaner trend signal
+    # Forward-only filter — `.filter()` returns posteriors using only x_0..x_t.
+    # Previously used `.smooth()` (RTS smoother) which also conditions on x_{t+1}..x_T,
+    # so even after .shift(1) the value at time t already saw the future.
     if _KALMAN_OK:
         _kf_obs = pd.to_numeric(d["nf_ret1"], errors="coerce").fillna(0).values.reshape(-1, 1)
         try:
@@ -825,7 +839,7 @@ def compute_features(df):
                 initial_state_mean=0, initial_state_covariance=1,
                 observation_covariance=0.5, transition_covariance=0.01,
             )
-            _kf_means, _ = _kf.smooth(_kf_obs)
+            _kf_means, _ = _kf.filter(_kf_obs)
             d["nf_kalman_trend"] = pd.Series(_kf_means.flatten(), index=d.index).shift(1).fillna(0.0)
         except Exception:
             d["nf_kalman_trend"] = 0.0
