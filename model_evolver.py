@@ -960,24 +960,30 @@ def calibrate_champion(champion_model, X_val, y_val):
     from sklearn.calibration import CalibratedClassifierCV
     import joblib
 
+    # Use sigmoid (Platt) — more stable than isotonic on small holdout sets
+    # (252 rows × 5-fold = ~50 rows/fold; isotonic creates cliffs in sparse regions
+    # that can amplify probabilities to 1.0 at certain raw values, defeating the
+    # purpose of calibration.)
+    method = "sigmoid"
+
     # Try modern API: FrozenEstimator (sklearn 1.6+)
     try:
         from sklearn.frozen import FrozenEstimator
         frozen = FrozenEstimator(champion_model)
-        calib  = CalibratedClassifierCV(frozen, cv=5, method="isotonic")
+        calib  = CalibratedClassifierCV(frozen, cv=5, method=method)
         calib.fit(X_val, y_val)
         joblib.dump(calib, CALIB_PKL)
-        print(f"  [calib] Calibrated champion saved (FrozenEstimator): {CALIB_PKL}")
+        print(f"  [calib] Calibrated champion saved (FrozenEstimator/{method}): {CALIB_PKL}")
         return calib
     except ImportError:
         pass
 
     # Try legacy prefit API (sklearn < 1.6)
     try:
-        calib = CalibratedClassifierCV(champion_model, cv="prefit", method="isotonic")
+        calib = CalibratedClassifierCV(champion_model, cv="prefit", method=method)
         calib.fit(X_val, y_val)
         joblib.dump(calib, CALIB_PKL)
-        print(f"  [calib] Calibrated champion saved (prefit): {CALIB_PKL}")
+        print(f"  [calib] Calibrated champion saved (prefit/{method}): {CALIB_PKL}")
         return calib
     except Exception as e:
         print(f"  [calib] Calibration failed ({e}) — skipping")
