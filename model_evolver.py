@@ -271,10 +271,21 @@ def select_features(X, y, all_cols):
         try:
             explainer  = _shap.TreeExplainer(rf)
             shap_vals  = explainer.shap_values(X)
-            # shap_values may be list [class0, class1] or single array
+            # Handle all shap output shapes:
+            #   list of [class_0, class_1] arrays (legacy shap)
+            #   3D array (n_samples, n_features, n_classes) (shap 0.50+)
+            #   2D array (n_samples, n_features) (single output)
             if isinstance(shap_vals, list):
-                shap_vals = shap_vals[1]  # class 1 = CALL
+                shap_vals = shap_vals[1]   # class 1 = CALL
+            shap_vals = np.asarray(shap_vals)
+            if shap_vals.ndim == 3:
+                # Take class 1 (CALL) along the last axis
+                shap_vals = shap_vals[:, :, 1] if shap_vals.shape[2] >= 2 else shap_vals[:, :, 0]
             importances = np.abs(shap_vals).mean(axis=0)
+            # Ensure 1D — collapse any leftover dims
+            importances = np.asarray(importances).flatten()
+            if importances.shape[0] != X.shape[1]:
+                raise ValueError(f"shap importance shape mismatch: {importances.shape} vs {X.shape[1]} features")
             print("  Feature selection: using SHAP mean |value| (more accurate than impurity)")
         except Exception as e:
             print(f"  SHAP failed ({e}) — falling back to RF impurity")
