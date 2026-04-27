@@ -205,7 +205,7 @@ def _send_exit_telegram(today_trade: dict, sells: list):
         long_strike  = float(today_trade.get("long_strike", 0))
         net_credit   = float(today_trade.get("net_credit", 0))
         lots         = int(today_trade.get("lots", 0))
-        lot_size     = int(today_trade.get("lot_size", 30))
+        lot_size     = int(today_trade.get("lot_size", 65))
         pnl_inr      = float(today_trade.get("pnl_inr", 0))
         exit_spread  = float(today_trade.get("exit_spread", 0))
         exit_time    = today_trade.get("exit_time", "")
@@ -272,7 +272,26 @@ def _send_exit_telegram(today_trade: dict, sells: list):
         notify.send("\n".join(lines))
         return
 
-    # ── Naked option path ─────────────────────────────────────────────────────
+    # ── Naked option path (legacy long-CE/long-PE BUY-to-enter only) ─────────
+    # Guard: refuse to run the naked formula if today_trade looks like a
+    # short-side strategy whose explicit branch above didn't match (e.g.
+    # because of a typo in the strategy field). The naked path treats SELL
+    # fills as exits — for short-side strategies SELL fills are entries, so
+    # running it would attribute entry prices as exit prices and emit garbage P&L.
+    _short_markers = ("short_sid", "ce_short_sid", "pe_short_sid",
+                      "short_strike", "net_credit")
+    if any(today_trade.get(k) for k in _short_markers):
+        notify.send(
+            f"🚨 <b>EXIT TELEGRAM ABORTED — UNKNOWN STRATEGY</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"today_trade.json has short-leg fields ({_short_markers}) but\n"
+            f"strategy={strategy!r} did not match any known dispatch branch.\n"
+            f"Refusing naked-path fallback (would attribute SELL entry fills\n"
+            f"as exits and emit wrong P&L).\n"
+            f"<b>Manual review required.</b>"
+        )
+        return
+
     signal   = today_trade.get("signal", "?")
     strike   = today_trade.get("strike", 0)
     lots     = today_trade.get("lots", 0)
