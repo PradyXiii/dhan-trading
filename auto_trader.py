@@ -304,7 +304,11 @@ SL_PCT        = 0.15   # 15% stop-loss (legacy naked path only)
 RISK_PCT      = 0.05
 MAX_LOTS      = 10     # IC: half the naked MAX_LOTS — margin tied on both sides
 PREMIUM_K     = 0.004
-ITM_WALK_MAX  = 2    # Walk up to 200pt ITM when capital is flush (higher delta)
+# NF strike interval is 50pt (was 100 in legacy BankNifty code — caused this
+# walker to skip every other valid strike). All strike-step + ATM-rounding logic
+# below uses STRIKE_STEP so the BNF→NF migration is in one place.
+STRIKE_STEP   = 50
+ITM_WALK_MAX  = 4    # Walk up to 200pt ITM (4 × 50pt) when capital is flush (higher delta)
 
 RR = 2.5   # reward:risk ratio — SL=15%, TP=+37.5% of premium (RR=2.5x)
            # Grid result: 2.5x beats 2.0x on all metrics (+₹24L P&L, DD -8.8% vs -12.9%)
@@ -1172,7 +1176,7 @@ def compute_chain_signals(expiry: date, spot: float) -> dict:
                 gex -= put_oi[k]  * _gamma(S, k, p_iv)
 
         # ── ATM straddle premium ──────────────────────────────────────────────
-        atm     = round(spot / 100) * 100
+        atm     = round(spot / STRIKE_STEP) * STRIKE_STEP
         atm_key = f"{float(atm):.6f}"
         atm_d   = oc.get(atm_key, {})
         atm_c   = float((atm_d.get("ce") or {}).get("last_price") or 0)
@@ -1228,7 +1232,7 @@ def _append_chain_signals(chain_sig: dict, spot: float) -> None:
 
 
 def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
-                                     max_otm_strikes=10):
+                                     max_otm_strikes=20):
     """
     Find the optimal strike in the live option chain for the given capital.
 
@@ -1241,15 +1245,15 @@ def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
                 Return deepest ITM the capital supports.
                 Fall back to ATM if no ITM fits.
 
-    dist_100pts convention (return value index [4]):
-      negative = ITM  (-1 = 100pt ITM, -2 = 200pt ITM)
+    dist_steps convention (return value index [4]) — each step is STRIKE_STEP (50pt):
+      negative = ITM  (-1 = 50pt ITM, -2 = 100pt ITM, …)
       0        = ATM
-      positive = OTM  (+1 = 100pt OTM, +2 = 200pt OTM, …)
+      positive = OTM  (+1 = 50pt OTM, +2 = 100pt OTM, …)
     """
     opt_type_lc = "ce" if signal == "CALL" else "pe"
     opt_type_uc = opt_type_lc.upper()
-    # OTM step: CALL raises strike (56000→56100), PUT lowers (56000→55900)
-    otm_step = 100 if signal == "CALL" else -100
+    # OTM step: CALL raises strike (NF 56000→56050), PUT lowers (56000→55950)
+    otm_step = STRIKE_STEP if signal == "CALL" else -STRIKE_STEP
 
     oc = (inner.get("oc") if isinstance(inner, dict) else None) or {}
     if not oc or not atm_strike:
@@ -1300,9 +1304,9 @@ def _find_affordable_strike_in_chain(inner, atm_strike, signal, capital,
 
     # ── Phase 2: ATM fits → probe ITM for better delta ───────────────────────
     # ITM step is the reverse of OTM step:
-    #   CALL ITM → lower strike (55900, 55800); PUT ITM → higher strike
+    #   CALL ITM → lower strike (NF: 55950, 55900, ...); PUT ITM → higher strike
     itm_step = -otm_step
-    for itm_dist in range(ITM_WALK_MAX, 0, -1):   # try 200pt, then 100pt
+    for itm_dist in range(ITM_WALK_MAX, 0, -1):   # walk deepest-first (200pt → 50pt)
         strike = atm_strike + (itm_dist * itm_step)
         r = _check_strike(strike)
         if r:
@@ -1345,7 +1349,7 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
 
                 # Walk ATM → OTM in the live option chain
                 affordable = _find_affordable_strike_in_chain(
-                    inner, atm_strike, signal, capital, max_otm_strikes=10
+                    inner, atm_strike, signal, capital, max_otm_strikes=20
                 )
 
                 if affordable:
@@ -1355,11 +1359,11 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
                     if dist == 0:
                         notify.log(f"ATM {opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s)")
                     elif dist < 0:
-                        notify.log(f"Capital flush — selected {abs(dist)*100}pt ITM "
+                        notify.log(f"Capital flush — selected {abs(dist)*STRIKE_STEP}pt ITM "
                                    f"{opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s) "
                                    f"(higher delta)")
                     else:
-                        notify.log(f"ATM too expensive — selected {dist*100}pt OTM "
+                        notify.log(f"ATM too expensive — selected {dist*STRIKE_STEP}pt OTM "
                                    f"{opt_type} {int(strike)} @ ₹{ltp:.1f} → {lots} lot(s)")
                     return sid, strike, ltp, lots, spot, dist
 
@@ -1389,7 +1393,7 @@ def get_affordable_option(signal: str, expiry: date, capital: float):
     if DRY_RUN:
         dte = max(0.25, (expiry - date.today()).days + 1)
         approx_premium = spot * PREMIUM_K * sqrt(dte)
-        atm_strike = round(spot / 100) * 100
+        atm_strike = round(spot / STRIKE_STEP) * STRIKE_STEP
 
         loss_per_lot   = LOT_SIZE * approx_premium * SL_PCT
         margin_per_lot = LOT_SIZE * approx_premium
@@ -1454,7 +1458,7 @@ def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
     # ── Option chain exhausted: try live LTP before falling back to CSV ────────
     spot = _get_nf_ltp()
     if spot:
-        atm_strike = round(spot / 100) * 100
+        atm_strike = round(spot / STRIKE_STEP) * STRIKE_STEP
         notify.log(f"Option chain unavailable — using live NF LTP ₹{spot:,.0f} (ATM {int(atm_strike)})")
         if DRY_RUN:
             return "DRY_RUN_LIVE_LTP", atm_strike, spot
@@ -1465,7 +1469,7 @@ def get_atm_security_id(signal: str, expiry: date, spot_fallback: float = None):
         nf_df      = pd.read_csv(f"{DATA_DIR}/nifty50.csv", parse_dates=["date"])
         csv_close  = spot_fallback or float(nf_df.iloc[-1]["close"])
         csv_date   = nf_df.iloc[-1]["date"]
-        atm_strike = round(csv_close / 100) * 100
+        atm_strike = round(csv_close / STRIKE_STEP) * STRIKE_STEP
         notify.log(
             f"⚠️  Option chain AND LTP unavailable — using stale CSV close "
             f"₹{csv_close:,.0f} ({csv_date.date() if hasattr(csv_date,'date') else csv_date}). "
@@ -2950,7 +2954,7 @@ def main():
             try:
                 with open(f"{DATA_DIR}/today_trade.json") as _ttj:
                     ttj = json.load(_ttj)
-                if (ttj.get("date") == datetime.now(_IST).date().isoformat()
+                if (ttj.get("date") == datetime.now(_IST_TZ).date().isoformat()
                         and ttj.get("strategy") == "nf_iron_condor"
                         and not ttj.get("exit_done", False)):
                     notify.send(
