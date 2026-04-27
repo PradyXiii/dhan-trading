@@ -1053,6 +1053,10 @@ def train_regime_models(X_all, y_all, df_full, selected_cols, sample_weight=None
     Each model specializes in its volatility regime.
     Routed at predict time based on today's VIX.
 
+    Uses simple shallow tree to avoid memorization on small per-regime datasets
+    (~500 rows each). Reports HOLDOUT accuracy via temporal 80/20 split, not
+    training accuracy (training acc would be near 100% on overfit models).
+
     Saves models/regime/{low,med,high}.pkl + meta.json.
     Skips a regime if it has < 200 rows (too few to train).
 
@@ -1082,36 +1086,47 @@ def train_regime_models(X_all, y_all, df_full, selected_cols, sample_weight=None
             print(f"  [regime] {name}: single-class labels — skipping")
             continue
 
-        # Light XGB per regime (fast, no HPO — just specialised model)
-        try:
-            from xgboost import XGBClassifier
-            mdl = XGBClassifier(
-                n_estimators=200, max_depth=5, learning_rate=0.05,
-                subsample=0.8, colsample_bytree=0.8,
-                use_label_encoder=False, eval_metric="logloss",
-                random_state=42, n_jobs=-1, verbosity=0,
-            )
-        except ImportError:
-            mdl = RandomForestClassifier(
-                n_estimators=200, max_depth=6, min_samples_leaf=10,
-                class_weight="balanced", random_state=42, n_jobs=-1,
-            )
+        # Shallow regularized model — small per-regime data needs strong priors
+        # to avoid memorization. 50 trees + depth 3 + leaf 20 prevents overfit.
+        mdl = RandomForestClassifier(
+            n_estimators=50, max_depth=3, min_samples_leaf=20,
+            max_features="sqrt", class_weight="balanced",
+            random_state=42, n_jobs=-1,
+        )
 
-        sw = sample_weight[mask] if sample_weight is not None else None
+        # Temporal 80/20 split per regime (LAST 20% is holdout)
+        idxs   = np.where(mask)[0]
+        split  = int(len(idxs) * 0.8)
+        train_idx = idxs[:split]
+        val_idx   = idxs[split:]
+
+        sw_tr = sample_weight[train_idx] if sample_weight is not None else None
         try:
-            mdl.fit(X_all[mask], y_all[mask], sample_weight=sw)
+            mdl.fit(X_all[train_idx], y_all[train_idx], sample_weight=sw_tr)
+        except TypeError:
+            mdl.fit(X_all[train_idx], y_all[train_idx])
+
+        # Holdout accuracy (honest)
+        if len(val_idx) >= 10 and len(np.unique(y_all[val_idx])) >= 2:
+            holdout_acc = float((mdl.predict(X_all[val_idx]) == y_all[val_idx]).mean())
+        else:
+            holdout_acc = float("nan")
+
+        # Re-fit on FULL regime data for production model (now that we know it
+        # generalizes — holdout was just for honest reporting)
+        sw_full = sample_weight[mask] if sample_weight is not None else None
+        try:
+            mdl.fit(X_all[mask], y_all[mask], sample_weight=sw_full)
         except TypeError:
             mdl.fit(X_all[mask], y_all[mask])
 
-        # Quick in-sample accuracy
-        train_acc = float((mdl.predict(X_all[mask]) == y_all[mask]).mean())
         joblib.dump(mdl, f"{REGIME_DIR}/{name}.pkl")
         out_meta[name] = {
-            "n_rows":    n_rows,
-            "train_acc": round(train_acc, 4),
-            "vix_range": f"{VIX_REGIME_BINS[i]}-{VIX_REGIME_BINS[i+1]}",
+            "n_rows":      n_rows,
+            "holdout_acc": round(holdout_acc, 4) if holdout_acc == holdout_acc else None,  # NaN guard
+            "vix_range":   f"{VIX_REGIME_BINS[i]}-{VIX_REGIME_BINS[i+1]}",
         }
-        print(f"  [regime] {name}: {n_rows} rows, train_acc={train_acc:.1%} → {REGIME_DIR}/{name}.pkl")
+        print(f"  [regime] {name}: {n_rows} rows, holdout_acc={holdout_acc:.1%} → {REGIME_DIR}/{name}.pkl")
 
     if out_meta:
         with open(f"{REGIME_DIR}/meta.json", "w") as f:
@@ -1417,7 +1432,7 @@ def main():
 
     # ── 2. Feature engineering ────────────────────────────────────────────────
     print("\n[2/6] Engineering features...")
-    from ml_engine import compute_labels
+    from ml_engine import compute_labels, get_label_fn
 
     try:
         df = load_extended_data()
@@ -1432,7 +1447,7 @@ def main():
     trading_full = df[df["date"].dt.weekday.isin([0, 1, 2, 3, 4])].copy().reset_index(drop=True)
 
     # Labels (binary: 1=CALL, 0=PUT)
-    labels_df = compute_labels(trading_full)
+    labels_df = get_label_fn()(trading_full)   # respects LABEL_MODE env var
     y_all = np.array([1 if l == "CALL" else 0 for l in labels_df["label"].values])
 
     # Filter to rows that have labels (today's row has no next-day label yet)

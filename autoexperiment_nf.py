@@ -128,9 +128,14 @@ def run():
         print(json.dumps({"error": f"compute_features failed: {e}", "composite": 0.0}))
         sys.exit(1)
 
-    # ── Compute direction labels ──────────────────────────────────────────────
+    # ── Compute direction labels (or IC-P&L labels via LABEL_MODE env) ────────
     try:
-        labels_df = mle.compute_labels(df)
+        # Use get_label_fn dispatcher — switches by LABEL_MODE env var
+        if hasattr(mle, "get_label_fn"):
+            label_fn = mle.get_label_fn()
+        else:
+            label_fn = mle.compute_labels
+        labels_df = label_fn(df)
     except Exception as e:
         print(json.dumps({"error": f"compute_labels failed: {e}", "composite": 0.0}))
         sys.exit(1)

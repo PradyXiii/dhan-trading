@@ -1747,9 +1747,10 @@ def predict_today():
                 calib_str = ""
 
             ml_trained = True
-            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB", "cat": "CAT"}
+            names = {"rf": "RF", "xgb": "XGB", "lgb": "LGB", "cat": "CAT",
+                     "regime_low": "RGM-L", "regime_med": "RGM-M", "regime_high": "RGM-H"}
             vote_str = "  ".join(
-                f"{names.get(t, '?')}:{v}"
+                f"{names.get(t, t.upper()[:5])}:{v}"
                 for t, v in zip(types, votes)
             )
             print(f"  Ensemble ({n_models} models, {method}, trained {(ensemble_trained_at or '')[:10]}):")
