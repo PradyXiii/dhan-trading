@@ -23,6 +23,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 from dotenv import load_dotenv
 
 import notify
+import dhan_journal
 
 load_dotenv()
 TOKEN     = os.getenv("DHAN_ACCESS_TOKEN", "")
@@ -445,14 +446,34 @@ def _exit_all_positions_api() -> bool:
 
 
 def _positions_to_results(positions: list) -> list:
-    """Build the result-dict list for Telegram when DELETE API handled the exit."""
+    """Build the result-dict list for Telegram when DELETE API handled the exit.
+    P&L source = realizedProfit from a POST-close /v2/positions re-fetch (Dhan-truth,
+    matches trade_journal.py at 3:30 PM). Falls back to unrealizedProfit only if the
+    re-fetch fails (network blip).
+    """
+    sid_to_realized = {}
+    try:
+        post_close = dhan_journal.get_positions() or []
+        sid_to_realized = {
+            str(p.get("securityId", "")): float(p.get("realizedProfit", 0) or 0)
+            for p in post_close if p.get("securityId")
+        }
+    except Exception as e:
+        notify.log(f"Post-close positions re-fetch failed: {e}; falling back to unrealizedProfit")
+
     results = []
     for pos in positions:
         symbol  = str(pos.get("tradingSymbol", pos.get("securityId", "?")))
         net_qty = int(pos.get("netQty", 0))
         avg     = float(pos.get("costPrice",        pos.get("buyAvg",        0)))
         ltp     = float(pos.get("lastTradedPrice",  pos.get("ltp",           0)))
-        pnl     = float(pos.get("unrealizedProfit", pos.get("unrealizedPnl", 0)))
+        sid     = str(pos.get("securityId", ""))
+        # Prefer realizedProfit from post-close fetch (matches 3:30 PM journal).
+        # Fallback to unrealizedProfit only if re-fetch returned nothing for this SID.
+        if sid and sid in sid_to_realized:
+            pnl = sid_to_realized[sid]
+        else:
+            pnl = float(pos.get("unrealizedProfit", pos.get("unrealizedPnl", 0)))
         results.append({
             "symbol": symbol, "qty": net_qty, "avg": avg,
             "ltp": ltp, "pnl": pnl, "order_id": "EXIT_ALL_API", "error": None,
@@ -471,6 +492,7 @@ def _squareoff_all(positions) -> list:
     Square off every position — shorts (netQty < 0) first, longs (netQty > 0) second.
     Closing shorts first removes margin obligation before selling wings.
     Selling a long wing while short is still open = naked short = margin spike.
+    P&L per leg pulled from POST-close realizedProfit (Dhan-truth, matches journal).
     """
     # Sort: netQty < 0 (short, BUY to cover) → netQty > 0 (long, SELL to close)
     positions = sorted(positions, key=lambda p: (0 if int(p.get("netQty", 0)) < 0 else 1))
@@ -480,26 +502,45 @@ def _squareoff_all(positions) -> list:
         net_qty = int(pos.get("netQty", 0))
         avg     = float(pos.get("costPrice",          pos.get("buyAvg",        0)))
         ltp     = float(pos.get("lastTradedPrice",    pos.get("ltp",           0)))
-        pnl     = float(pos.get("unrealizedProfit",   pos.get("unrealizedPnl", 0)))
 
         result   = square_off(pos)
         order_id = (result.get("orderId") or result.get("order_id")
                     or result.get("status", "?"))
         error    = result.get("error") or result.get("errorMessage")
 
+        # Per-leg pnl: filled in below from post-close realizedProfit.
         results.append({
             "symbol":   symbol,
             "qty":      net_qty,
             "avg":      avg,
             "ltp":      ltp,
-            "pnl":      pnl,
+            "pnl":      float(pos.get("unrealizedProfit", pos.get("unrealizedPnl", 0))),
             "order_id": order_id,
             "error":    error,
+            "_sid":     str(pos.get("securityId", "")),
         })
         if error:
             notify.log(f"Square-off FAILED {symbol}: {error}")
         else:
             notify.log(f"Square-off sent {symbol} x{net_qty} → order {order_id}")
+
+    # Post-close realizedProfit pull — same source as trade_journal at 3:30 PM.
+    if not DRY_RUN:
+        try:
+            time.sleep(5)
+            post_close = dhan_journal.get_positions() or []
+            sid_to_realized = {
+                str(p.get("securityId", "")): float(p.get("realizedProfit", 0) or 0)
+                for p in post_close if p.get("securityId")
+            }
+            for r in results:
+                sid = r.get("_sid", "")
+                if sid in sid_to_realized:
+                    r["pnl"] = sid_to_realized[sid]
+        except Exception as e:
+            notify.log(f"Post-close realizedProfit fetch failed: {e}")
+    for r in results:
+        r.pop("_sid", None)
     return results
 
 
