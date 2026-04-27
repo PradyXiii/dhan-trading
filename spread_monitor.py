@@ -34,6 +34,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 from dotenv import load_dotenv
 
 import notify
+import dhan_journal
 
 load_dotenv()
 TOKEN     = os.getenv("DHAN_ACCESS_TOKEN", "")
@@ -154,6 +155,21 @@ def _exit_all_api() -> bool:
     except Exception as e:
         notify.log(f"EXIT ALL API exception: {e}")
         return False
+
+
+def _dhan_realized_total(sids: list, settle_secs: int = 5) -> float | None:
+    """After a real square-off, pull realizedProfit from Dhan /v2/positions for
+    the given securityIds and return the sum. Single source of truth for booked
+    P&L (matches trade_journal at 3:30 PM and the EOD Telegram). Returns None
+    if the API call fails or no SIDs were found — caller falls back to formula.
+    """
+    try:
+        time.sleep(settle_secs)
+        positions = dhan_journal.get_positions() or []
+        return float(dhan_journal.realized_pnl(positions, [str(s) for s in sids]))
+    except Exception as e:
+        notify.log(f"Realized-P&L re-fetch failed: {e}")
+        return None
 
 
 # ── 2-leg spread close (BNF bear_call / bull_put) ────────────────────────────
@@ -428,6 +444,14 @@ def main():
         pnl_per_share = net_credit - current_cost
         total_pnl     = round(pnl_per_share * qty, 2)
 
+        # Live mode: replace formula P&L with Dhan-booked realizedProfit.
+        if not paper:
+            dhan_pnl = _dhan_realized_total(
+                [ce_short_sid, ce_long_sid, pe_short_sid, pe_long_sid]
+            )
+            if dhan_pnl is not None:
+                total_pnl = round(dhan_pnl, 2)
+
         intent.update({
             "exit_done":          True,
             "exit_reason":        reason,
@@ -505,6 +529,12 @@ def main():
         pnl_per_share = net_credit - current_cost
         total_pnl     = round(pnl_per_share * qty, 2)
 
+        # Live mode: replace formula P&L with Dhan-booked realizedProfit.
+        if not paper:
+            dhan_pnl = _dhan_realized_total([ce_sid, pe_sid])
+            if dhan_pnl is not None:
+                total_pnl = round(dhan_pnl, 2)
+
         intent.update({
             "exit_done":      True,
             "exit_reason":    reason,
@@ -571,6 +601,12 @@ def main():
     pnl_per_share = net_credit - current_cost
     qty           = int(intent.get("lots", 0)) * int(intent.get("lot_size", 30))
     total_pnl     = round(pnl_per_share * qty, 2)
+
+    # Live mode: replace formula P&L with Dhan-booked realizedProfit.
+    if not paper:
+        dhan_pnl = _dhan_realized_total([short_sid, long_sid])
+        if dhan_pnl is not None:
+            total_pnl = round(dhan_pnl, 2)
 
     intent.update({
         "exit_done":      True,

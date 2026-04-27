@@ -44,6 +44,29 @@ def _fmt_money(v):
     return f"Rs.{v:+,.0f}" if v is not None else "n/a"
 
 
+def _fetch_ltps(security_ids: list) -> dict:
+    """Fetch LTPs from Dhan /v2/marketfeed/ltp. Returns {sid_str: float}."""
+    try:
+        payload = {"NSE_FNO": [int(s) for s in security_ids if s]}
+        resp = requests.post("https://api.dhan.co/v2/marketfeed/ltp",
+                             headers=HEADERS, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"  LTP fetch HTTP {resp.status_code}: {resp.text[:100]}")
+            return {}
+        d   = resp.json()
+        seg = (d.get("data") or {}).get("NSE_FNO") or {}
+        out = {}
+        for sid in security_ids:
+            entry = seg.get(str(sid)) or seg.get(int(sid)) or {}
+            out[str(sid)] = float(
+                entry.get("last_price") or entry.get("lastTradedPrice") or 0
+            )
+        return out
+    except Exception as e:
+        print(f"  LTP fetch failed: {e}")
+        return {}
+
+
 def _section(title):
     print(f"\n{'─' * 60}")
     print(f"  {title}")
@@ -148,8 +171,12 @@ def main():
 
     short_avgs = leg_avgs(positions, str(short_sid))
     long_avgs  = leg_avgs(positions, str(long_sid))
-    short_ltp  = short_avgs.get("ltp", 0)
-    long_ltp   = long_avgs.get("ltp", 0)
+    # Dhan-truth: pull LTPs from /v2/marketfeed/ltp directly. `leg_avgs()` does
+    # NOT return an "ltp" key — earlier `.get("ltp", 0)` always read 0, making
+    # every downstream LTP / spread-cost number garbage.
+    ltp_map  = _fetch_ltps([short_sid, long_sid])
+    short_ltp = ltp_map.get(str(short_sid), 0.0)
+    long_ltp  = ltp_map.get(str(long_sid),  0.0)
     short_unrealized = (short_entry - short_ltp) * qty   # we sold, so loss if LTP > entry
     long_unrealized  = (long_ltp - long_entry) * qty     # we bought, so gain if LTP > entry
     net_unrealized   = short_unrealized + long_unrealized
